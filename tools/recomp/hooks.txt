@@ -1,3 +1,4 @@
 # Guest functions overridden by the runtime (see gen_main.py --hooks). The generator emits each
 # one's body as f_<addr>_orig and the runtime provides f_<addr>.
 0x100057cee0  # main: Camera::BuildProj (runtime/src/game/widescreen.cpp)
+0x10003d45cc  # main: render camera sync, once per game tick (runtime/src/interp/camera.cpp)
