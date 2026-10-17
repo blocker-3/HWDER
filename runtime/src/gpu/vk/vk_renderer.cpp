@@ -3483,12 +3483,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
             if (!env_scale) {
                 float wx = settings::video().res_scale, wy = settings::video().res_scale;
-                if (settings::video().unlocked_res) {  // render at the window's own size and aspect
+                if (settings::video().unlocked_res) {  // largest 16:9 that fits the window; the blit pillarboxes the rest
                     unsigned cw = 0, chh = 0;
                     display::client_size(&cw, &chh);
                     if (!cw || !chh) cw = GetSystemMetrics(SM_CXSCREEN), chh = GetSystemMetrics(SM_CYSCREEN);
-                    wx = cw / 1920.0f;
-                    wy = chh / 1080.0f;
+                    wx = wy = std::min(cw / 1920.0f, chh / 1080.0f);  // uneven X/Y squeezes the game's 16:9 projection
                 }
                 wx = std::clamp(wx, 0.5f, 4.0f);
                 wy = std::clamp(wy, 0.5f, 4.0f);
