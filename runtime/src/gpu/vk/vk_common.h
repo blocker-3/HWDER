@@ -213,6 +213,7 @@ struct Image {
     // Internal resolution scale: the VkImage of a scaled render target is scale x the guest size
     // (info keeps the guest dimensions for cache matching and layout). level_* are PHYSICAL sizes.
     float scale = 1.0f, scale_y = 1.0f;  // x / y factors (differ for "unlocked" ultrawide rendering)
+    u64 full_width_frame = ~0ull;  // fill ultrawide: last frame a full-width pass or clear wrote this target
     u32 phys_w() const { return scale == 1.0f ? info.width : std::max(1u, (u32)(info.width * scale + 0.5f)); }
     u32 phys_h() const { return scale_y == 1.0f ? info.height : std::max(1u, (u32)(info.height * scale_y + 0.5f)); }
     u32 level_width(u32 l) const { return std::max(1u, phys_w() >> l); }

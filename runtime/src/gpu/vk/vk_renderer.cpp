@@ -2637,7 +2637,12 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         pc.viewport_scale[1] = draw_samples_rt_ ? 1.0f : fix;
         // Fill ultrawide: the game's own projection already has the window's aspect, so perspective draws
         // are not squeezed; the orthographic HUD is still pillarboxed to a centred 16:9.
-        if (settings::video().unlocked_res && settings::video().ultrawide) pc.viewport_scale[0] = 1.0f;
+        if (settings::video().unlocked_res && settings::video().ultrawide) {
+            pc.viewport_scale[0] = 1.0f;
+            if (draw_samples_rt_)  // full-screen passes keep the whole width: the side bands get drawn
+                for (u32 i = 0; i < fb.num_colors; i++)
+                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count;
+        }
     }
     pc.base_vertex = p.base_vertex;
     pc.base_instance = p.base_instance - p.instance;
@@ -2756,6 +2761,8 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         r.rect = {{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}};
     }
     if (!r.rect.extent.width || !r.rect.extent.height) return;
+    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width)
+        fb.color[rt]->full_width_frame = g_s.present_count;
     if (recording_) {
         rec_cur_.emplace_back();
         OpRec& o = rec_cur_.back();
@@ -3491,6 +3498,33 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         {
             static const char* strip_dir = getenv("HWDER_FILMSTRIP");
             if (strip_dir) filmstrip_capture(image, w, h, strip_dir);
+        }
+        // Fill ultrawide: the orthographic HUD (and movies, which the game draws as a 2D quad) stays in
+        // the centred 16:9; when nothing full-width (a 3D frame's post passes, a full clear) wrote this
+        // frame, the side bands hold stale memory. Clear them to black before presenting.
+        if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y &&
+            img->full_width_frame != g_s.present_count && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+            u32 iw = img->level_width(0), ih = img->level_height(0);
+            u32 center = std::min(iw, (u32)(iw * (img->scale_y / img->scale) + 0.5f));
+            u32 band = (iw - center) / 2;
+            if (band > 0) {
+                Framebuffer f;
+                f.color[0] = img;
+                f.color_format[0] = img->info.fmt.vk;
+                f.color_view[0] = tc_.view(img, img->info.fmt.vk, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1);
+                f.num_colors = 1;
+                f.width = iw;
+                f.height = ih;
+                f.scale = img->scale;
+                f.scale_y = img->scale_y;
+                if (f.color_view[0]) {
+                    VkClearAttachment a{VK_IMAGE_ASPECT_COLOR_BIT, 0};
+                    a.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+                    VkClearRect rr[2] = {{{{0, 0}, {band, ih}}, 0, 1}, {{{(s32)(iw - band), 0}, {band, ih}}, 0, 1}};
+                    begin_rendering(f);
+                    vkCmdClearAttachments(g_rec.cmd_in_pass(), 1, &a, 2, rr);
+                }
+            }
         }
         dump_frame(image, w, h, img->info.fmt.vk);
         pres_fmt_ = img->info.fmt.vk;
