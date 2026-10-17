@@ -634,12 +634,26 @@ void init() {
     init_vulkan();
     overlay::init(g_hwnd, g_dev.instance, g_dev.phys, g_dev.dev, g_dev.queue_family, g_dev.present_queue, VK_FORMAT_B8G8R8A8_UNORM);
     if (!g_images.empty()) overlay::on_swapchain(g_images, VK_FORMAT_B8G8R8A8_UNORM);
-    if (settings::video().display_60hz) PostMessageW(g_hwnd, overlay::kMsgDisplay60, 0, 1);
     if (settings::video().borderless) PostMessageW(g_hwnd, overlay::kMsgBorderless, 0, 1);
     else if (settings::video().window_w && settings::video().window_h)
         PostMessageW(g_hwnd, overlay::kMsgClientSize, 0, (LPARAM)((settings::video().window_w << 16) | settings::video().window_h));
-    std::thread(boot_screen_thread).detach();
     hw_log("display: window open");
 }
+
+void start() {
+    if (settings::video().display_60hz) PostMessageW(g_hwnd, overlay::kMsgDisplay60, 0, 1);
+    std::thread(boot_screen_thread).detach();
+}
+
+void present_overlay_frame() {
+    VkClearColorValue bg{};
+    bg.float32[0] = 0.035f;
+    bg.float32[1] = 0.04f;
+    bg.float32[2] = 0.05f;
+    bg.float32[3] = 1.0f;
+    present(VK_NULL_HANDLE, 0, 0, bg, VK_NULL_HANDLE, 0);
+}
+
+HWND window() { return g_hwnd; }
 
 }  // namespace display
