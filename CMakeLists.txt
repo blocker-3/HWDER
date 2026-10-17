@@ -25,6 +25,7 @@ set(RUNTIME_SOURCES
     runtime/src/core.cpp
     runtime/src/threads.cpp
     runtime/src/config.cpp
+    runtime/src/version.cpp
     runtime/src/kernel/kernel.cpp
     runtime/src/kernel/memory.cpp
     runtime/src/kernel/svc.cpp
@@ -37,6 +38,17 @@ foreach(sub hid fs audio gpu gpu/vk shader video)
     include(${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/${sub}/sources.cmake)
 endforeach()
 add_executable(hwder ${RUNTIME_SOURCES})
+
+# Version stamp: regenerated on every build (always out of date), rewritten only when it changes.
+set(HW_VERSION_DIR ${CMAKE_BINARY_DIR}/version)
+add_custom_target(hwder_version
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${HW_VERSION_DIR}/hwder_version.h
+            -P ${CMAKE_SOURCE_DIR}/tools/version.cmake
+    BYPRODUCTS ${HW_VERSION_DIR}/hwder_version.h
+    COMMENT "Stamping version"
+    VERBATIM)
+add_dependencies(hwder hwder_version)
+target_include_directories(hwder PRIVATE ${HW_VERSION_DIR})
 target_link_libraries(hwder PRIVATE hwder_game dbghelp winmm synchronization psapi bcrypt)
 target_include_directories(hwder PRIVATE runtime/src ${TP}/vulkan-headers/include ${TP}/spirv-headers/include ${TP}/imgui ${TP}/imgui/backends)
 target_compile_definitions(hwder PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN IMGUI_IMPL_VULKAN_NO_PROTOTYPES IMGUI_IMPL_VULKAN_USE_LOADER IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USER_CONFIG="gpu/hwder_imconfig.h")

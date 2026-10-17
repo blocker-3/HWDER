@@ -356,6 +356,14 @@ static void build_ui(VkExtent2D extent) {
     ImGui::SeparatorText("Overlay");
     if (ImGui::Checkbox("Show frame time", &v.show_fps)) changed = true;
     ImGui::TextDisabled("Settings are saved to hwder_settings.ini when changed.");
+
+    // Build identity for bug reports (same string as the first line of hwder.log).
+    static char version[160];
+    if (!version[0]) snprintf(version, sizeof(version), "HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", version);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(version);
     ImGui::End();
     if (changed) settings::save();
     (void)io;

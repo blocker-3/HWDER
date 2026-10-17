@@ -13,6 +13,11 @@ void hw_log(const char* fmt, ...);
 void hw_fatal(const char* why);
 void hw_sleep_ns(s64 ns);
 
+// Build identity (runtime/src/version.cpp): git describe, short commit, build date.
+const char* hw_version(void);
+const char* hw_commit(void);
+const char* hw_build_date(void);
+
 #ifdef __cplusplus
 }
 void hw_config_load(const std::string& dir);

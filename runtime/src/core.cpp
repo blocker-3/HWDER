@@ -445,6 +445,7 @@ int main(int argc, char** argv) {
     SetCurrentDirectoryW(to_w(dir).c_str());  // caches, settings and saves live beside the exe
     std::string log_path = env_u8("HWDER_LOG");
     g_log = fopen_u8(log_path.empty() ? dir + "\\hwder.log" : log_path, "w");
+    hw_log("HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(GetCurrentProcess(), nullptr, TRUE);
     AddVectoredExceptionHandler(1, crash_handler);
@@ -480,7 +481,6 @@ int main(int argc, char** argv) {
         hw_log("CRT: invalid parameter on thread %lu", GetCurrentThreadId());
     });
     timeBeginPeriod(1);
-    hw_log("HWDER - Hyrule Warriors: Definitive Edition static recompilation");
     hw_config_load(dir);
 
     std::string exefs = env_u8("HWDER_EXEFS");
