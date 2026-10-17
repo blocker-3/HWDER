@@ -217,8 +217,22 @@ static void init_vulkan() {
     ici.ppEnabledExtensionNames = inst_ext;
     const char* layer = "VK_LAYER_KHRONOS_validation";
     if (getenv("HWDER_VALIDATION")) {
-        ici.enabledLayerCount = 1;
-        ici.ppEnabledLayerNames = &layer;
+        // The layer ships with the Vulkan SDK, not the GPU driver. Requesting a missing layer fails
+        // vkCreateInstance (VK_ERROR_LAYER_NOT_PRESENT), so check first and run without it.
+        u32 nl = 0;
+        vkEnumerateInstanceLayerProperties(&nl, nullptr);
+        std::vector<VkLayerProperties> lp(nl);
+        vkEnumerateInstanceLayerProperties(&nl, lp.data());
+        bool have = false;
+        for (const auto& l : lp) have = have || strcmp(l.layerName, layer) == 0;
+        if (have) {
+            ici.enabledLayerCount = 1;
+            ici.ppEnabledLayerNames = &layer;
+            hw_log("display: HWDER_VALIDATION: %s enabled", layer);
+        } else {
+            hw_log("display: HWDER_VALIDATION is set but %s is not installed (it comes with the Vulkan SDK) - "
+                   "starting without validation", layer);
+        }
     }
     VKCHECK(vkCreateInstance(&ici, nullptr, &g_dev.instance));
     hw_vk_load_instance(g_dev.instance);
