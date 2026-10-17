@@ -40,8 +40,6 @@ struct Input {
     int deadzone_r = 27;
     bool invert_lx = false, invert_ly = false, invert_rx = false, invert_ry = false;
     bool motion = true;          // pass the controller's gyro and accelerometer to the game
-    bool gyro_camera = false;    // also turn the camera with the gyro (adds to the right stick)
-    float gyro_sens = 1.0f;
     int remap[kPadFamilies][kRemapSlots];  // host button (hid::HostButton) per Switch button, -1 = unbound
     Input();
 };

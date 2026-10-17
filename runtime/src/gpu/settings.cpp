@@ -90,8 +90,6 @@ void load() {
         else if (k == "invert_rx") g_input.invert_rx = atoi(v) != 0;
         else if (k == "invert_ry") g_input.invert_ry = atoi(v) != 0;
         else if (k == "motion") g_input.motion = atoi(v) != 0;
-        else if (k == "gyro_camera") g_input.gyro_camera = atoi(v) != 0;
-        else if (k == "gyro_sens") g_input.gyro_sens = std::clamp((float)atof(v), 0.1f, 5.0f);
         else if (k.rfind("remap_", 0) == 0) {
             for (int fam = 0; fam < kPadFamilies; fam++)
                 if (k == kFamilyKeys[fam]) parse_remap(v, g_input.remap[fam]);
@@ -134,10 +132,9 @@ void save() {
             g_audio.volume, (int)g_audio.mute, (int)g_audio.mute_background, (int)g_input.hold_view_menu, (int)g_input.rumble,
             (int)g_input.background_pad, g_video.menu_scale, (int)g_debug.async_shaders);
     fprintf(f, "rumble_strength=%d\nface_labels=%d\ndeadzone_l=%d\ndeadzone_r=%d\ninvert_lx=%d\ninvert_ly=%d\ninvert_rx=%d\ninvert_ry=%d\n"
-               "motion=%d\ngyro_camera=%d\ngyro_sens=%.2f\n",
+               "motion=%d\n",
             g_input.rumble_strength, (int)g_input.face_labels, g_input.deadzone_l, g_input.deadzone_r, (int)g_input.invert_lx,
-            (int)g_input.invert_ly, (int)g_input.invert_rx, (int)g_input.invert_ry, (int)g_input.motion,
-            (int)g_input.gyro_camera, g_input.gyro_sens);
+            (int)g_input.invert_ly, (int)g_input.invert_rx, (int)g_input.invert_ry, (int)g_input.motion);
     for (int fam = 0; fam < kPadFamilies; fam++) {
         fprintf(f, "%s=", kFamilyKeys[fam]);
         for (int i = 0; i < kRemapSlots; i++) fprintf(f, i ? ",%d" : "%d", g_input.remap[fam][i]);

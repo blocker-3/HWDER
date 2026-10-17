@@ -237,8 +237,8 @@ bool sdl_init() {
 }
 
 // Pumps SDL (hot-plug included), picks the most recently used pad and fills `raw` from it. `motion` gets
-// its six-axis state in the Switch convention, `gyro_rad` the raw angular velocity for the gyro camera.
-SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion, float* gyro_rad) {
+// its six-axis state in the Switch convention.
+SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) sdl_open(e.gdevice.which);
@@ -298,7 +298,6 @@ SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion, float* gyr
         motion.gyro[0] = g[0] / kTwoPi;
         motion.gyro[1] = -g[2] / kTwoPi;
         motion.gyro[2] = g[1] / kTwoPi;
-        memcpy(gyro_rad, g, sizeof(g));
     }
     return best;
 }
@@ -468,9 +467,8 @@ void poll_host_input(HostInput& out) {
     const bool focused = fg_pid == GetCurrentProcessId();
 
     RawPad raw;
-    float gyro_rad[3] = {};
     SdlPad* active = nullptr;
-    if (g_sdl_ok) active = sdl_poll(cfg.motion || cfg.gyro_camera, raw, out.motion, gyro_rad);
+    if (g_sdl_ok) active = sdl_poll(cfg.motion, raw, out.motion);
     else poll_xinput(raw);
     apply_rumble(active);
     if (!focused && !cfg.background_pad) {
@@ -478,7 +476,6 @@ void poll_host_input(HostInput& out) {
         raw.buttons = 0;
         raw.lx = raw.ly = raw.rx = raw.ry = raw.lt = raw.rt = 0;
         out.motion = {};
-        gyro_rad[0] = gyro_rad[1] = gyro_rad[2] = 0.0f;
     }
     {
         std::lock_guard<std::mutex> l(g_raw_m);
@@ -500,13 +497,6 @@ void poll_host_input(HostInput& out) {
     float lx, ly, rx, ry;
     deadzone(raw.lx, raw.ly, cfg.deadzone_l, lx, ly);
     deadzone(raw.rx, raw.ry, cfg.deadzone_r, rx, ry);
-    if (cfg.gyro_camera) {
-        // Turning the pad turns the camera: yaw (about SDL's up axis) on X, pitch on Y. Full stick at
-        // ~4 rad/s times the sensitivity; tiny rates are sensor drift.
-        auto rate = [](float v) { return std::fabs(v) < 0.03f ? 0.0f : v; };
-        rx += -rate(gyro_rad[1]) * 0.25f * cfg.gyro_sens;
-        ry += rate(gyro_rad[0]) * 0.25f * cfg.gyro_sens;
-    }
     s.lx = to_axis(cfg.invert_lx ? -lx : lx);
     s.ly = to_axis(cfg.invert_ly ? -ly : ly);
     s.rx = to_axis(cfg.invert_rx ? -rx : rx);

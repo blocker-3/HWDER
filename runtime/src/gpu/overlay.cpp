@@ -648,12 +648,6 @@ static void tab_input(bool& changed) {
     if (ImGui::Checkbox("Motion controls", &in.motion)) changed = true;
     help("Passes the controller's gyro and accelerometer to the game (DualSense, DualShock 4, Switch Pro and\n"
          "others with motion sensors). Hyrule Warriors itself barely uses motion.");
-    if (ImGui::Checkbox("Gyro camera", &in.gyro_camera)) changed = true;
-    help("Turning and tilting the controller moves the camera, added to the right stick (the right stick's\n"
-         "invert settings apply to it too).");
-    ImGui::BeginDisabled(!in.gyro_camera);
-    if (ImGui::SliderFloat("Gyro sensitivity", &in.gyro_sens, 0.1f, 5.0f, "%.1fx", ImGuiSliderFlags_AlwaysClamp)) changed = true;
-    ImGui::EndDisabled();
     if (pad.connected && !pad.has_gyro) ImGui::TextDisabled("This controller has no motion sensors.");
 
     section("Keyboard");
