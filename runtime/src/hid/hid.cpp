@@ -300,13 +300,30 @@ void update_thread() {
                 battle_since = 0;
             }
             const bool in_battle = battle_since && t - battle_since > 2000;
-            if (t > 5000 && !in_battle) {
+            // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of
+            // + (skip prompt), Left (Yes), A, then A twice for the menus (the default entries lead into Legend Mode).
+            static const bool skip = getenv("HWDER_AUTOPLAY_SKIP") != nullptr;
+            if (skip && t > 8000 && !in_battle) {
+                u64 s6 = t % 6000;
+                // + only on movie/dialogue frames (few draws): on Select Mode it opens the Manual applet,
+                // which hangs.
+                static bool skip_armed = false;  // + was pressed this cycle: Left selects Yes on its prompt
+                if (s6 < 120) {
+                    if (s6 < 10) skip_armed = hw_last_frame_draws.load() < 30;
+                    if (skip_armed) in.pad.buttons |= hid::kBtnPlus;
+                }
+                if (s6 >= 1000 && s6 < 1120 && skip_armed) in.pad.buttons |= hid::kBtnLeft;
+                if (s6 >= 1500 && s6 < 1620) in.pad.buttons |= hid::kBtnA;
+                if (s6 >= 3000 && s6 < 3120) in.pad.buttons |= hid::kBtnA;
+                if (s6 >= 4600 && s6 < 4720) in.pad.buttons |= hid::kBtnA;
+            }
+            if (!skip && t > 5000 && !in_battle) {
                 if (t > 25000 && c < 100) in.pad.buttons |= hid::kBtnB;
                 if (t > 25000 && ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)))
                     in.pad.buttons |= hid::kBtnUp;
                 if (c >= 1500 && c < 1620) in.pad.buttons |= hid::kBtnA;
             }
-            if (t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pad.buttons |= hid::kBtnPlus;  // loading tips
+            if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pad.buttons |= hid::kBtnPlus;  // loading tips
             static const bool idle_in_battle = getenv("HWDER_AUTOPLAY_IDLE") != nullptr;  // experiments: no input in battle
             if (in_battle && !idle_in_battle) {
                 if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
