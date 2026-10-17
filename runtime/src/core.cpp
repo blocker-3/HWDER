@@ -201,11 +201,91 @@ extern "C" void hw_fatal(const char* why) {
     ExitProcess(1);
 }
 
+// Minidumps go beside the log as hwder-crash-YYYYMMDD-HHMMSS.dmp (empty dir: disabled, HWDER_NO_DUMP=1).
+// They stay on this machine; nothing is uploaded.
+static wchar_t g_dump_dir[MAX_PATH];
+static std::atomic<DWORD> g_dump_owner{0};   // thread that started the one dump of this process
+static std::atomic<DWORD> g_dump_worker{0};  // thread running MiniDumpWriteDump
+
+struct DumpJob {
+    DWORD tid;
+    EXCEPTION_POINTERS* ep;
+    HANDLE file;
+    BOOL ok;
+    DWORD err;
+};
+
+static DWORD WINAPI dump_thread(void* p) {
+    auto* job = (DumpJob*)p;
+    g_dump_worker = GetCurrentThreadId();
+    MINIDUMP_EXCEPTION_INFORMATION mei = {job->tid, job->ep, FALSE};
+    // Never full memory: the guest address space is huge.
+    auto type = (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                MiniDumpWithHandleData | MiniDumpWithProcessThreadData);
+    job->ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), job->file, type, job->ep ? &mei : nullptr, nullptr, nullptr);
+    if (!job->ok) job->err = GetLastError();
+    return 0;
+}
+
+// Written from a fresh thread so a stack overflow on the faulting thread doesn't matter. Only the
+// first caller dumps; another thread faulting meanwhile parks here until the first one exits the process.
+static void write_crash_dump(EXCEPTION_POINTERS* ep) {
+    if (!g_dump_dir[0]) return;
+    DWORD self = GetCurrentThreadId(), none = 0;
+    if (!g_dump_owner.compare_exchange_strong(none, self)) {
+        if (none != self)
+            for (;;) Sleep(INFINITE);
+        return;
+    }
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t path[MAX_PATH + 40];
+    swprintf(path, sizeof(path) / sizeof(path[0]), L"%s\\hwder-crash-%04u%02u%02u-%02u%02u%02u.dmp", g_dump_dir, st.wYear,
+             st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    DumpJob job = {self, ep, CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr), FALSE, 0};
+    if (job.file == INVALID_HANDLE_VALUE) {
+        hw_log("crash dump failed: %lu", GetLastError());
+        return;
+    }
+    HANDLE t = CreateThread(nullptr, 0, dump_thread, &job, 0, nullptr);
+    if (!t) {
+        job.err = GetLastError();
+    } else {
+        if (WaitForSingleObject(t, 30000) != WAIT_OBJECT_0) {
+            hw_log("crash dump failed: %lu (timed out)", (unsigned long)WAIT_TIMEOUT);
+            return;  // the worker still owns the file; the process is about to exit anyway
+        }
+        CloseHandle(t);
+    }
+    CloseHandle(job.file);
+    if (job.ok) {
+        hw_log("crash dump written: %ls", path);
+    } else {
+        hw_log("crash dump failed: %lu", job.err);
+        DeleteFileW(path);
+    }
+}
+
+// Keep only the newest few dumps (names sort by time).
+static void prune_crash_dumps(const wchar_t* dir, size_t keep) {
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((std::wstring(dir) + L"\\hwder-crash-*.dmp").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.push_back(fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(names.begin(), names.end());
+    for (size_t i = 0; i + keep < names.size(); i++) DeleteFileW((std::wstring(dir) + L"\\" + names[i]).c_str());
+}
+
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     auto* er = ep->ExceptionRecord;
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION && er->ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION &&
         er->ExceptionCode != EXCEPTION_INT_DIVIDE_BY_ZERO && er->ExceptionCode != EXCEPTION_STACK_OVERFLOW)
         return EXCEPTION_CONTINUE_SEARCH;
+    if (GetCurrentThreadId() == g_dump_worker) return EXCEPTION_CONTINUE_SEARCH;  // dbghelp handles its own faults
     HANDLE proc = GetCurrentProcess();
     char symbuf[sizeof(SYMBOL_INFO) + 256] = {};
     auto* sym = (SYMBOL_INFO*)symbuf;
@@ -245,6 +325,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
         modname((const void*)sf.AddrPC.Offset, fm, sizeof(fm));
         hw_log("  #%02d %s!%s+0x%llx", i, fm, n, (unsigned long long)disp);
     }
+    write_crash_dump(ep);
     ExitProcess(2);
 }
 
@@ -444,8 +525,19 @@ int main(int argc, char** argv) {
     std::string dir = exe_dir();
     SetCurrentDirectoryW(to_w(dir).c_str());  // caches, settings and saves live beside the exe
     std::string log_path = env_u8("HWDER_LOG");
-    g_log = fopen_u8(log_path.empty() ? dir + "\\hwder.log" : log_path, "w");
+    if (log_path.empty()) log_path = dir + "\\hwder.log";
+    g_log = fopen_u8(log_path, "w");
     hw_log("HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
+    std::string no_dump = env_u8("HWDER_NO_DUMP");
+    if (no_dump.empty() || no_dump == "0") {
+        wchar_t* file = nullptr;
+        if (GetFullPathNameW(to_w(log_path).c_str(), MAX_PATH, g_dump_dir, &file) && file) {
+            file[-1] = 0;  // strip "\hwder.log"
+            prune_crash_dumps(g_dump_dir, 5);
+        } else {
+            g_dump_dir[0] = 0;
+        }
+    }
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(GetCurrentProcess(), nullptr, TRUE);
     AddVectoredExceptionHandler(1, crash_handler);
@@ -453,6 +545,7 @@ int main(int argc, char** argv) {
     // CRT invalid-parameter. Log them with the thread id instead of dying silently.
     std::set_terminate([] {
         hw_log("TERMINATE: std::terminate called (uncaught exception?) on thread %lu", GetCurrentThreadId());
+        write_crash_dump(nullptr);
         ExitProcess(3);
     });
     signal(SIGABRT, [](int) {
@@ -474,12 +567,18 @@ int main(int argc, char** argv) {
                 GetModuleBaseNameA(GetCurrentProcess(), mod, modname, sizeof(modname));
             hw_log("  #%02u %s!%s+0x%llx", i, modname, name, (unsigned long long)disp);
         }
+        write_crash_dump(nullptr);
         ExitProcess(3);
     });
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     _set_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
         hw_log("CRT: invalid parameter on thread %lu", GetCurrentThreadId());
     });
+    if (env_u8("HWDER_TEST_CRASH") == "1") {  // exercises the crash log + minidump path without game data
+        hw_log("HWDER_TEST_CRASH=1: crashing on purpose");
+        volatile int* p = nullptr;
+        *p = 1;
+    }
     timeBeginPeriod(1);
     hw_config_load(dir);
 
