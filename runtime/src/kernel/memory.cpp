@@ -14,8 +14,8 @@ static u64 g_heap_size = 0;
 static u64 g_tls_next = kTlsBase;
 static u64 g_system_next = kSystemBase;
 
-static void reserve(u64 addr, u64 size, const char* what) {
-    void* p = VirtualAlloc((void*)addr, size, MEM_RESERVE, PAGE_NOACCESS);
+static void reserve(u64 addr, u64 size, const char* what, DWORD extra = 0) {
+    void* p = VirtualAlloc((void*)addr, size, MEM_RESERVE | extra, PAGE_NOACCESS);
     if (p != (void*)addr) {
         hw_log("mem: cannot reserve %s at 0x%llx (+0x%llx): error %lu", what, (unsigned long long)addr,
                (unsigned long long)size, GetLastError());
@@ -24,8 +24,10 @@ static void reserve(u64 addr, u64 size, const char* what) {
 }
 
 void init() {
-    reserve(kHeapBase, kHeapMax, "heap region");
-    reserve(kAliasBase, kAliasSize, "alias region");
+    // Write-watched: the texture cache asks the OS which pages the game wrote (GetWriteWatch) instead
+    // of re-hashing textures on a timer. Textures live in the heap and alias regions.
+    reserve(kHeapBase, kHeapMax, "heap region", MEM_WRITE_WATCH);
+    reserve(kAliasBase, kAliasSize, "alias region", MEM_WRITE_WATCH);
     reserve(kStackBase, kStackSize, "stack region");
     reserve(kTlsBase, kTlsSize, "tls region");
     reserve(kSystemBase, 0x100000000ull, "system region");

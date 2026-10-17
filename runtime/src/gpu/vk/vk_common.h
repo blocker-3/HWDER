@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -209,6 +210,7 @@ struct Image {
     bool cpu_dirty = false;      // guest memory written (invalidate) since the last upload
     u64 hash = 0;
     u64 checked_epoch = 0;
+    u64 watch_epoch = 0;  // epoch of the last write-watch check (writes reported since then are unseen)
     u64 last_used = 0;
     // Internal resolution scale: the VkImage of a scaled render target is scale x the guest size
     // (info keeps the guest dimensions for cache matching and layout). level_* are PHYSICAL sizes.
@@ -263,6 +265,7 @@ public:
     u64 tex_gen = 0;  // bumps when a cached TIC->image mapping may change (image destroyed / alias created)
     u64 upload_bytes = 0;
     u64 hash_budget_epoch_ = 0, hash_budget_ = 0;
+    int written_since_check(Image* img);  // 1 written, 0 clean, -1 memory not write-watched
     void download(Image* img);  // write GPU data back to guest memory (waits for the GPU)
     void collect_garbage();
     // helpers for image info from TIC
@@ -281,6 +284,11 @@ private:
     MemoryManager* mm_;
     std::unordered_map<u64, std::vector<Image*>> pages_;  // 64 KiB pages -> images
     std::unordered_map<u64, VkSampler> samplers_;
+    // Write-watch reports, page address -> epoch reported. GetWriteWatch resets what it returns, so
+    // reports are kept here for every image sharing the page; entries older than watch_pruned_ are dropped.
+    std::map<u64, u64> written_pages_;
+    std::vector<void*> watch_buf_;
+    u64 watch_pruned_ = 0;
     u64 epoch_ = 1;
 };
 

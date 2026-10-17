@@ -495,18 +495,23 @@ void TextureCache::validate(Image* img) {
         return;
     }
     if (img->gpu_modified || img->checked_epoch == epoch_) return;
-    // CPU writes that bypass invalidate_region are caught by re-hashing, but hashing every bound
-    // texture every frame costs more than the frame: re-check small textures often, big ones rarely,
-    // and cap the bytes hashed per frame (the remainder is checked on later frames).
-    // Small textures are often CPU-written lookup tables (per-frame curves): check them every frame.
-    u64 interval = img->readable < (64u << 10) ? 1 : img->readable < (256u << 10) ? 2 : img->readable < (4u << 20) ? 8 : 32;
-    if (epoch_ - img->checked_epoch < interval) return;
-    if (hash_budget_epoch_ != epoch_) {
-        hash_budget_epoch_ = epoch_;
-        hash_budget_ = 48u << 20;
+    // CPU writes that bypass invalidate_region: the OS reports written pages (write watch), and a
+    // reported write is hashed at once whatever its size. Without a report the texture is still
+    // re-hashed rarely, in case a write reaches the page without being reported.
+    int written = written_since_check(img);
+    if (written <= 0) {
+        // Not write-watched: re-hash on a timer, small textures often and big ones rarely, capping the
+        // bytes hashed per frame. Small textures are often CPU-written lookup tables (per-frame curves).
+        u64 interval = written == 0 ? 64
+                       : img->readable < (64u << 10) ? 1 : img->readable < (256u << 10) ? 2 : img->readable < (4u << 20) ? 8 : 32;
+        if (img->checked_epoch && epoch_ - img->checked_epoch < interval) return;  // 0: validate_now forces it
+        if (hash_budget_epoch_ != epoch_) {
+            hash_budget_epoch_ = epoch_;
+            hash_budget_ = 48u << 20;
+        }
+        if (img->readable > hash_budget_) return;
+        hash_budget_ -= img->readable;
     }
-    if (img->readable > hash_budget_) return;
-    hash_budget_ -= img->readable;
     img->checked_epoch = epoch_;
     u8* p = (u8*)img->addr;
     u64 h;
@@ -515,6 +520,29 @@ void TextureCache::validate(Image* img) {
         h = hash_bytes(p, img->readable);
     }
     if (h != img->hash) upload(img);
+}
+
+int TextureCache::written_since_check(Image* img) {
+    u64 start = img->addr & ~0xFFFull, end = (img->addr + img->readable + 0xFFF) & ~0xFFFull;
+    if (start == end) return 0;
+    watch_buf_.resize((end - start) >> 12);
+    ULONG_PTR n = watch_buf_.size();
+    ULONG gran = 0;
+    SlowTimer t("write watch query", 2.0);
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void*)start, end - start, watch_buf_.data(), &n, &gran) != 0)
+        return -1;  // range not reserved with MEM_WRITE_WATCH
+    for (ULONG_PTR i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+    if (epoch_ - watch_pruned_ >= 512) {  // forget old reports; images last checked before then re-hash once
+        watch_pruned_ = epoch_ - 256;
+        for (auto it = written_pages_.begin(); it != written_pages_.end();)
+            it = it->second < watch_pruned_ ? written_pages_.erase(it) : std::next(it);
+    }
+    u64 since = img->watch_epoch;
+    img->watch_epoch = epoch_;
+    if (since < watch_pruned_) return 1;
+    for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
+        if (it->second >= since) return 1;
+    return 0;
 }
 
 void TextureCache::alloc_image(Image* img) {
