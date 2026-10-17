@@ -10,6 +10,7 @@
 //    match the GPU's: constant buffer updates between draws are honored).
 #include "gpu/settings.h"
 #include "interp/camera.h"
+#include "../../../third_party/renderdoc/renderdoc_app.h"
 #include <unordered_set>
 #include <deque>
 #include <windows.h>
@@ -595,6 +596,20 @@ struct Framebuffer {
 // Draws in the last presented frame (read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
 extern "C" std::atomic<u32> hw_last_frame_draws{0};
 
+// HWDER_DRAWLOG=1 (with HWDER_FILMSTRIP): one line per draw into <filmstrip dir>/drawlog.txt while the
+// filmstrip capture window is open, keyed by present number, to find the draw behind a bad frame.
+static bool g_drawlog_window = false;
+static FILE* g_drawlog = nullptr;
+static bool drawlog_active() {
+    static const bool on = getenv("HWDER_DRAWLOG") && getenv("HWDER_FILMSTRIP");
+    if (!on || !g_drawlog_window) return false;
+    if (!g_drawlog) {
+        std::string path = std::string(getenv("HWDER_FILMSTRIP")) + "/drawlog.txt";
+        g_drawlog = fopen(path.c_str(), "w");
+    }
+    return g_drawlog != nullptr;
+}
+
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
 static const u64 g_start_ms = GetTickCount64();
 
@@ -1012,6 +1027,7 @@ private:
     u64 dump_count_ = getenv("HWDER_VK_FRAME_DUMP_COUNT") ? std::max(1ull, strtoull(getenv("HWDER_VK_FRAME_DUMP_COUNT"), nullptr, 0)) : 1;
     bool dumping() const { return g_s.present_count + 1 >= dump_frame_ && g_s.present_count + 1 < dump_frame_ + dump_count_; }
     std::string dump_tex_;  // texture sources of the current draw (filled by bind_resources)
+    std::string drawlog_tex_;  // same, compact, for HWDER_DRAWLOG
     std::vector<Image*> dump_rts_;  // render targets drawn to during the dumped frame
 };
 
@@ -1799,6 +1815,12 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                     tc_.validate(te->img);
                     if (te->view) ii.imageView = te->view;
                     iref = {te->img, te->vp};
+                    if (drawlog_active()) {
+                        char t[96];
+                        snprintf(t, sizeof(t), " tex[%llx %ux%u f%d%s]", (unsigned long long)te->img->addr, te->img->info.width,
+                                 te->img->info.height, (int)te->img->info.fmt.vk, te->img->gpu_modified ? " gpu" : "");
+                        drawlog_tex_ += t;
+                    }
                     if (te->img->info.render_target || te->img->gpu_modified) draw_samples_rt_ = true;
                 } else {
                 ImageInfo info;
@@ -1865,6 +1887,12 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         e.view = v;
                         e.vp = {info.fmt.vk, vt, sub.level + bl, nl, sub.layer + blayer, layers, swz, aspect};
                         tic_cache_[tkey] = e;
+                    }
+                    if (drawlog_active()) {
+                        char t[96];
+                        snprintf(t, sizeof(t), " tex[%llx %ux%u f%d%s]", (unsigned long long)img->addr, img->info.width, img->info.height,
+                                 (int)img->info.fmt.vk, img->gpu_modified ? " gpu" : "");
+                        drawlog_tex_ += t;
                     }
                     if (dumping()) {
                         char t[128];
@@ -2414,6 +2442,17 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             dump_prog_.clear();
         }
     }
+    if (drawlog_active()) {
+        const float* vt = (const float*)(regs + ViewportTransform);
+        const u32* sc = regs + ScissorTest;
+        fprintf(g_drawlog, "%llu %llu prog %016llx topo %u count %u rt0 %llx %ux%u f%d rts %u depth %llx t%d w%d | blend %d mask %x | vp %.0f,%.0f %.0f,%.0f | sc %d %u-%u,%u-%u |%s\n",
+                (unsigned long long)g_s.present_count, (unsigned long long)draws_, (unsigned long long)prog_key, topo, count,
+                fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)fb.color_format[0], fb.num_colors,
+                fb.depth ? (unsigned long long)fb.depth->addr : 0ull, (int)key.depth_test, (int)key.depth_write, (int)key.blend_enable[0],
+                key.color_mask[0], vt[0], vt[1], vt[3], vt[4], (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16,
+                drawlog_tex_.c_str());
+    }
+    drawlog_tex_.clear();
     if (dumping()) {
         const float* vt = (const float*)(regs + ViewportTransform);
         const u32* sc = regs + ScissorTest;
@@ -3176,6 +3215,19 @@ void VkRenderer::cam_identify() {
         last_tick = tk;
         have_last = true;
     }
+    // Per-frame anomaly check: a frame whose view or viewProj hit count drops well below the running
+    // average was drawn (at least partly) with matrices that are not any recorded tick's.
+    if (interp::cam_log_every() > 0) {
+        u32 hv = 0, hvp = 0;
+        for (int l = 0; l < kCamLayouts; l++) hv += hits[kCamView][l], hvp += hits[kCamViewProj][l];
+        static double avg_v = 0, avg_vp = 0;
+        if (avg_v > 50 && (hv < avg_v * 0.6 || hvp < avg_vp * 0.6))
+            hw_log("cam: anomaly: present %llu: view hits %u (avg %.0f), viewProj hits %u (avg %.0f), %u draws, tick %llu, other-tick hits %u/%u/%u",
+                   (unsigned long long)g_s.present_count, hv, avg_v, hvp, avg_vp, (u32)rec_frame_.size(),
+                   best >= 0 ? (unsigned long long)snaps[best].tick : 0ull, other_hits[0], other_hits[1], other_hits[2]);
+        avg_v = avg_v * 0.9 + hv * 0.1;
+        avg_vp = avg_vp * 0.9 + hvp * 0.1;
+    }
     if (interp::cam_log_every() <= 0) return;
     // ---- HWDER_CAM_LOG diagnostics, once per second
     // Draws: how many carry the tick's view/viewProj (moved by the replay) or only its inverse view
@@ -3628,7 +3680,8 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
         // HWDER_FILMSTRIP_AFTER=<s>: start at that time since boot instead.
         static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
         if (start < 0) start = std::max(now, after);
-        if (now < start || now > start + dur) return;
+        g_drawlog_window = now >= start && now <= start + dur;
+        if (!g_drawlog_window) return;
     }
     static VkImage simg = VK_NULL_HANDLE;
     static VkDeviceMemory smem = VK_NULL_HANDLE;
@@ -3703,7 +3756,8 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     presents[sl] = cap_seq;
     pending[sl] = true;
     if (index) {
-        fprintf(index, "%llu %.3f %s\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0, g_strip_tag);
+        fprintf(index, "%llu %.3f %s present=%llu\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0, g_strip_tag,
+                (unsigned long long)g_s.present_count);
         fflush(index);
     }
     cap_seq++;
@@ -3838,6 +3892,22 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             static u64 draws_at_last = 0;
             hw_last_frame_draws = (u32)(draws_ - draws_at_last);
             draws_at_last = draws_;
+        }
+        {   // HWDER_RENDERDOC_AT=<present>[:<count>]: when running under RenderDoc (renderdoccmd capture),
+            // capture <count> consecutive frames starting at that present.
+            static const char* rd = getenv("HWDER_RENDERDOC_AT");
+            if (rd && g_s.present_count == strtoull(rd, nullptr, 10)) {
+                u32 n = strchr(rd, ':') ? (u32)atoi(strchr(rd, ':') + 1) : 1;
+                RENDERDOC_API_1_1_2* api = nullptr;
+                HMODULE m = GetModuleHandleA("renderdoc.dll");
+                auto get = m ? (pRENDERDOC_GetAPI)GetProcAddress(m, "RENDERDOC_GetAPI") : nullptr;
+                if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&api) && api) {
+                    api->TriggerMultiFrameCapture(n);
+                    hw_log("renderdoc: capturing %u frames from present %llu", n, (unsigned long long)g_s.present_count);
+                } else {
+                    hw_log("renderdoc: HWDER_RENDERDOC_AT set but RenderDoc is not loaded");
+                }
+            }
         }
         {   // F1 menu changed the internal resolution: apply between frames
             static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
