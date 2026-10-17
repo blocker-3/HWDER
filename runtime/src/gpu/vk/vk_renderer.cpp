@@ -592,6 +592,9 @@ struct Framebuffer {
     }
 };
 
+// Draws in the last presented frame (read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
+extern "C" std::atomic<u32> hw_last_frame_draws{0};
+
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
 static const u64 g_start_ms = GetTickCount64();
 
@@ -3590,10 +3593,29 @@ static void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const cha
     destroy_buffer(rb);
 }
 
+// Filmstrip index tag of the next capture: what the output is (real frame or replay, and its alpha).
+static char g_strip_tag[64] = "real";
+
 // HWDER_FILMSTRIP=<dir>: a 96x54 thumbnail of every presented frame (f_<present>.raw RGBA8 + index.txt),
 // read back two presents later so it never stalls. For frame-by-frame inspection of transitions/cadence.
 static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
-    constexpr u32 SW = 96, SH = 54;
+    // HWDER_FILMSTRIP_W=<width> (default 96): thumbnail width, 16:9.
+    static const u32 SW = getenv("HWDER_FILMSTRIP_W") ? std::max(16, atoi(getenv("HWDER_FILMSTRIP_W"))) : 96, SH = SW * 9 / 16;
+    // HWDER_FILMSTRIP_BATTLE=<s>: start capturing that long after the first battle-sized frame (more
+    // than 450 draws); HWDER_FILMSTRIP_FOR=<s>: stop after that long.
+    {
+        static const char* battle = getenv("HWDER_FILMSTRIP_BATTLE");
+        static const double dur = getenv("HWDER_FILMSTRIP_FOR") ? atof(getenv("HWDER_FILMSTRIP_FOR")) : 1e9;
+        static double start = -1;
+        double now = (GetTickCount64() - g_start_ms) / 1000.0;
+        if (battle && start < 0) {
+            if (hw_last_frame_draws.load() <= 450) return;
+            start = now + atof(battle);
+            hw_log("filmstrip: battle frame seen, capturing from t=%.1f for %.1f s", start, dur);
+        }
+        if (start < 0) start = now;
+        if (now < start || now > start + dur) return;
+    }
     static VkImage simg = VK_NULL_HANDLE;
     static VkDeviceMemory smem = VK_NULL_HANDLE;
     static Buffer bufs[3];
@@ -3667,7 +3689,7 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     presents[sl] = cap_seq;
     pending[sl] = true;
     if (index) {
-        fprintf(index, "%llu %.3f\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0);
+        fprintf(index, "%llu %.3f %s\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0, g_strip_tag);
         fflush(index);
     }
     cap_seq++;
@@ -3798,6 +3820,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         pres_fmt_ = img->info.fmt.vk;
         g_rec.flush();
         g_s.present_count++;
+        {
+            static u64 draws_at_last = 0;
+            hw_last_frame_draws = (u32)(draws_ - draws_at_last);
+            draws_at_last = draws_;
+        }
         {   // F1 menu changed the internal resolution: apply between frames
             static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
             if (!env_scale) {
@@ -3932,6 +3959,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         for (int j = 1; j < k; j++) {
             VkImage out = image;
             bool replay = can;
+            snprintf(g_strip_tag, sizeof(g_strip_tag), "replay %d/%d t=%.3f", j, k, (float)j / k);
             if (can && cam_mode) {
                 // Render one tick behind: this frame's tick b is shown unblended at the last of its k
                 // output slots, so output j is (k - j) slots earlier on the game clock, measured
@@ -3941,6 +3969,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                 double dt = b.t_ms - a.t_ms;
                 float alpha = dt > 0 ? (float)std::clamp(1.0 - (k - j) * (1000.0 / out_hz) / dt, 0.0, 1.0) : 1.0f;
                 replay = cam_prepare(alpha);
+                snprintf(g_strip_tag, sizeof(g_strip_tag), "replay %d/%d a=%.3f tick=%llu", j, k, alpha, (unsigned long long)b.tick);
                 // HWDER_CAM_LOG: replay outcomes once per second
                 if (interp::cam_log_every() > 0) {
                     static u64 blended, nomatch, noprev, gap, cut, last;
@@ -3972,9 +4001,15 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                 static const char* strip_dir2 = getenv("HWDER_FILMSTRIP");
                 if (strip_dir2) filmstrip_capture(out, w, h, strip_dir2);
                 g_rec.flush();
+            } else if (getenv("HWDER_FILMSTRIP")) {  // the real frame shown early: capture it too, tagged
+                std::lock_guard<std::recursive_mutex> l(m_);
+                snprintf(g_strip_tag, sizeof(g_strip_tag), "dup %d/%d", j, k);
+                filmstrip_capture(out, w, h, getenv("HWDER_FILMSTRIP"));
+                g_rec.flush();
             }
             display::present_image(out, w, h, 1, g_s.timeline, g_rec.serial() - 1);
         }
+        snprintf(g_strip_tag, sizeof(g_strip_tag), "real");
         display::present_image(image, w, h, 1, g_s.timeline, g_rec.serial() - 1);
         recording_ = true;
     } else {
