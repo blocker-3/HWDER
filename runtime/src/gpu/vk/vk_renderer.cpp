@@ -3163,6 +3163,18 @@ void VkRenderer::cam_identify() {
                 (snaps[fd.snap].tick < snaps[best].tick ? other_older : other_newer)++;
             }
         }
+        // Presented frames should use consecutive ticks. A tick that goes backwards or repeats means a
+        // frame was drawn with another tick's camera (the one-frame camera jumps at native 60 fps).
+        static u64 last_tick = 0;
+        static bool have_last = false;
+        u64 tk = snaps[best].tick;
+        if (have_last && interp::cam_log_every() > 0 && tk != last_tick + 1)
+            hw_log("cam: order: frame drawn with tick %llu after tick %llu (%s; newest tick %llu, %u other-tick hits)",
+                   (unsigned long long)tk, (unsigned long long)last_tick,
+                   tk <= last_tick ? (tk == last_tick ? "repeat" : "BACKWARDS") : "skip", (unsigned long long)snaps[0].tick,
+                   other_hits[0] + other_hits[1] + other_hits[2]);
+        last_tick = tk;
+        have_last = true;
     }
     if (interp::cam_log_every() <= 0) return;
     // ---- HWDER_CAM_LOG diagnostics, once per second
