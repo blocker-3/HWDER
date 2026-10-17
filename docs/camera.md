@@ -26,9 +26,9 @@ addresses with `main` at `0x1000000000`.
 
 * **Game cameras:** camera manager `*(*(u64*)0x1000c21880)`, per screen at `+0x350 + screen * 0x5a0`.
 * **Render cameras:** triple-buffered in the scene object S (`*(*(u64*)0x1000c2b5e8)`) at
-  `S + 0x71360 + (tick % 3) * 0x2e0 + screen * 0x170`. The tick counter for writing is `S + 0x710dc`.
+  `S + 0x71360 + (slot % 3) * 0x2e0 + screen * 0x170`. The write slot index is `S + 0x710dc` (observed mostly 0, so not a tick counter).
   The render side reads its slot with `S + 0x710e0` (0x10003d6634, `GetRenderCamera(S, screen)`).
-* **Per-tick sync:** `0x10003d45cc(S, tick)`, reached through `0x10003d61a4(S)` from 0x1000173270 and
+* **Per-tick sync:** `0x10003d45cc(S, slot)`, reached through `0x10003d61a4(S)` from 0x1000173270 and
   0x10002d96e0. For each active screen it copies the game camera into the render slot
   (`Camera::CopyFrom` 0x10003e6ee4, 0x150 bytes from +0x10) and calls `Camera::Update(cam, 1, 1)`.
   This is the hook point: one finished camera per game tick, after the game is done with it.
