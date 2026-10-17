@@ -15,6 +15,7 @@
 #include <mutex>
 #include <thread>
 
+#include "gpu/settings.h"
 #include "service/common.h"
 
 #pragma comment(lib, "ole32.lib")
@@ -56,6 +57,19 @@ struct OutputRing {
     }
 };
 static OutputRing g_ring;
+
+// Settings > Audio: volume, mute, and mute while another window has focus. Read every buffer, so
+// changes apply at once.
+static float output_gain() {
+    const settings::Audio& a = settings::audio();
+    if (a.mute) return 0.0f;
+    if (a.mute_background) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        if (pid != GetCurrentProcessId()) return 0.0f;
+    }
+    return a.volume / 100.0f;
+}
 
 static void wasapi_thread() {
     SetThreadDescription(GetCurrentThread(), L"HWDER audio out");
@@ -112,7 +126,13 @@ static void wasapi_thread() {
             u32 got = g_ring.pop((s16*)p, n);
             if (got < n) memset(p + got * 4, 0, (n - got) * 4);
             static const bool mute = getenv("HWDER_MUTE") != nullptr;  // silent output (test runs)
-            if (mute) memset(p, 0, (size_t)n * 4);
+            const float gain = output_gain();
+            if (mute || gain <= 0.0f) {
+                memset(p, 0, (size_t)n * 4);
+            } else if (gain < 1.0f) {
+                s16* smp = (s16*)p;
+                for (u32 i = 0; i < n * 2; i++) smp[i] = (s16)(smp[i] * gain);
+            }
             render->ReleaseBuffer(n, 0);
         }
         if (render) render->Release();

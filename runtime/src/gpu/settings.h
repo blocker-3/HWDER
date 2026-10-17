@@ -1,5 +1,8 @@
-// User-facing video settings (edited in the F1 overlay, persisted in hwder_settings.ini next to the exe).
+// User-facing settings (edited in the in-game menu, persisted in hwder_settings.ini next to the exe).
 #pragma once
+
+#include <set>
+#include <string>
 
 namespace settings {
 
@@ -14,6 +17,26 @@ struct Video {
     bool show_fps = false;      // small frame-time readout in the corner
     int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)
+    int menu_scale = 100;       // in-game menu text size, percent
+};
+
+struct Audio {
+    int volume = 100;              // master output volume, 0..100
+    bool mute = false;
+    bool mute_background = false;  // silent while another window has focus
+};
+
+struct Input {
+    bool hold_view_menu = true;  // holding View/Select opens the menu; a tap is the game's - button
+    bool rumble = true;
+    bool background_pad = true;  // read the controller while another window has focus
+};
+
+// Startup switches. Each is applied as its environment variable before the subsystems read it, so a
+// change takes effect on the next launch. A variable set outside the game always wins.
+struct Debug {
+    bool async_shaders = true;    // false = HWDER_SYNC_PIPELINES
+    std::set<std::string> env;    // HWDER_* debug switches set to 1 at startup
 };
 
 // False while frame interpolation is stubbed out: the presenter ignores interp_hz (the saved value is kept) and the
@@ -21,6 +44,9 @@ struct Video {
 constexpr bool kInterpEnabled = false;
 
 Video& video();
+Audio& audio();
+Input& input();
+Debug& debug();
 void load();
 void save();
 

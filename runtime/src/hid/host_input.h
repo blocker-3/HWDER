@@ -35,6 +35,12 @@ struct HostInput {
 // Poll every host source (cheap; safe to call at 1 kHz). Not thread safe: call from one thread.
 void poll_host_input(HostInput& out);
 
+// In-game menu: while blocked the game sees a neutral pad and no touch. After unblocking, the game
+// sees nothing until every button and stick is released, so the press that closed the menu stays out.
+void set_game_input_blocked(bool blocked);
+// True once each time View/Select is held past the menu threshold (Settings > Input). The overlay polls it.
+bool take_menu_request();
+
 // Rumble on the active XInput pad. Amplitudes 0..1 (low band -> big motor, high band -> small motor).
 void set_rumble(float low, float high);
 
