@@ -1,0 +1,77 @@
+name: Bug report
+description: Something crashes, renders wrong, or doesn't work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The log (and the crash dump, if there is one) is what makes a bug fixable.
+        Both are written beside `hwder.exe` (or next to the file `HWDER_LOG` points at).
+  - type: input
+    id: version
+    attributes:
+      label: HWDER version
+      description: Copy it from the bottom of the F1 menu (Copy button) or the first line of hwder.log.
+      placeholder: "HWDER 1a2b3c4d5e (commit 1a2b3c4d5e, built 2026-10-17)"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you saw instead. Screenshots welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Mode, stage, character, menu, settings changed from default, and what you did right before it happened.
+      placeholder: |
+        1. Legend Mode, first stage, Link
+        2. ...
+  - type: dropdown
+    id: crash
+    attributes:
+      label: Did it crash?
+      options:
+        - "No"
+        - Yes, the window closed (crash)
+        - Yes, it froze / hung
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: "NVIDIA RTX 3070, driver 566.36"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: hwder.log
+      description: Drag hwder.log in here, or paste its contents. It is overwritten on every launch, so grab it right after the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: dump
+    attributes:
+      label: Crash dump
+      description: |
+        After a crash, `hwder-crash-YYYYMMDD-HHMMSS.dmp` is written beside the log (the newest 5 are kept).
+        Zip it and drag the .zip in here; GitHub won't accept a raw .dmp.
+  - type: checkboxes
+    id: no-game-files
+    attributes:
+      label: Game files
+      options:
+        - label: I am not attaching any game files (NSP, exefs/romfs, saves from someone else) or keys (prod.keys).
+          required: true
