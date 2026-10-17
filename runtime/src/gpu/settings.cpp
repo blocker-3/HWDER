@@ -14,6 +14,7 @@ static Video g_video;
 static Audio g_audio;
 static Input g_input;
 static Debug g_debug;
+static Launch g_launch;
 static const char* kFile = "hwder_settings.ini";
 static const int kVersion = 3;  // bump when a default changes meaning; load() migrates older files (v3: input remaps)
 static const char* kFamilyKeys[kPadFamilies] = {"remap_xbox", "remap_playstation", "remap_nintendo", "remap_generic"};
@@ -43,6 +44,7 @@ Video& video() { return g_video; }
 Audio& audio() { return g_audio; }
 Input& input() { return g_input; }
 Debug& debug() { return g_debug; }
+Launch& launch() { return g_launch; }
 
 // Startup switches become environment variables before anything reads them (settings load first in
 // display::init, ahead of Vulkan, the services and the game). Variables set outside the game win.
@@ -55,10 +57,13 @@ static void apply_env() {
 }
 
 void load() {
+    static bool loaded = false;  // main() loads early for the startup screen; display::init loads again
+    if (loaded) return;
+    loaded = true;
     FILE* f = fopen(kFile, "r");
     if (!f) return;
     int version = 1;  // files without a version line predate versioning
-    char line[256];
+    char line[2048];  // long enough for the file paths
     while (fgets(line, sizeof(line), f)) {
         char* eq = strchr(line, '=');
         if (!eq) continue;
@@ -109,6 +114,12 @@ void load() {
             }
         }
         else if (k == "interp_hz") g_video.interp_hz = atoi(v);
+        else if (k == "nsp_path" || k == "keys_path") {
+            std::string path = v;  // UTF-8, as written by save()
+            while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+            (k == "nsp_path" ? g_launch.nsp_path : g_launch.keys_path) = path;
+        }
+        else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
     }
     fclose(f);
@@ -143,6 +154,8 @@ void save() {
     std::string env;
     for (const std::string& name : g_debug.env) env += (env.empty() ? "" : ",") + name;
     fprintf(f, "debug_env=%s\n", env.c_str());
+    fprintf(f, "nsp_path=%s\nkeys_path=%s\nskip_prelaunch=%d\n", g_launch.nsp_path.c_str(), g_launch.keys_path.c_str(),
+            (int)g_launch.skip_prelaunch);
     fclose(f);
 }
 

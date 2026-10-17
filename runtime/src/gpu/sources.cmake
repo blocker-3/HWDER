@@ -4,6 +4,7 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/display.cpp
     runtime/src/gpu/settings.cpp
     runtime/src/gpu/overlay.cpp
+    runtime/src/gpu/prelaunch.cpp
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp

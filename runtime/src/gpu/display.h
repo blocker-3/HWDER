@@ -22,8 +22,13 @@ struct Device {
 };
 Device& device();
 
-// Opens the window and initializes Vulkan; starts the presenter (boot screen until frames arrive).
+// Opens the window and initializes Vulkan.
 void init();
+// Starts the presenter for the game: the boot screen until frames arrive (and the 60 Hz monitor switch).
+void start();
+// One frame of just the overlay (the prelaunch screen) on a dark backdrop. Not paced: the caller sleeps.
+void present_overlay_frame();
+HWND window();
 
 // Present a guest frame (an image in GENERAL layout). Paced to the guest swap interval.
 // wait_sem/wait_value: timeline semaphore the presentation blit waits on (the renderer's last submit).

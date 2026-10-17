@@ -44,6 +44,13 @@ struct Input {
     Input();
 };
 
+// Startup screen: files picked there and whether it shows when everything checks out.
+struct Launch {
+    std::string nsp_path;   // game file; empty = search beside the exe (HWDER_NSP wins)
+    std::string keys_path;  // prod.keys; empty = search the usual places (HWDER_KEYS wins)
+    bool skip_prelaunch = false;
+};
+
 // Startup switches. Each is applied as its environment variable before the subsystems read it, so a
 // change takes effect on the next launch. A variable set outside the game always wins.
 struct Debug {
@@ -59,7 +66,8 @@ Video& video();
 Audio& audio();
 Input& input();
 Debug& debug();
-void load();
+Launch& launch();
+void load();  // once; later calls do nothing
 void save();
 
 }  // namespace settings

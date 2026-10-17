@@ -155,10 +155,14 @@ std::string env_str(const char* name) {  // UTF-8 (read wide: ANSI cannot spell 
     return e ? wide_to_utf8(e) : std::string();
 }
 
-// Candidate prod.keys locations, in priority order.
+std::string g_pick_nsp, g_pick_keys;  // set_paths()
+
+// Candidate prod.keys locations, in priority order. An explicit path (HWDER_KEYS, else the picked one)
+// is the only candidate: a missing explicit file must not silently fall back to another prod.keys.
 std::vector<std::string> key_candidates(const std::string& exe_dir) {
     std::vector<std::string> c;
-    if (std::string e = env_str("HWDER_KEYS"); !e.empty()) c.push_back(e);
+    if (std::string e = env_str("HWDER_KEYS"); !e.empty()) return {e};
+    if (!g_pick_keys.empty()) return {g_pick_keys};
     c.push_back(exe_dir + "\\prod.keys");
     c.push_back(exe_dir + "\\keys\\prod.keys");
     if (std::string h = env_str("USERPROFILE"); !h.empty()) c.push_back(h + "\\.switch\\prod.keys");
@@ -402,6 +406,10 @@ bool find_nsp(const std::string& exe_dir, std::string& out) {
         out = e;
         return true;
     }
+    if (!g_pick_nsp.empty()) {
+        out = g_pick_nsp;
+        return true;
+    }
     for (const std::string& dir : {exe_dir, exe_dir + "\\game"}) {
         WIN32_FIND_DATAW fd;
         std::wstring pat = utf8_to_wide(dir + "\\*.nsp");
@@ -422,46 +430,98 @@ bool find_nsp(const std::string& exe_dir, std::string& out) {
     return false;
 }
 
+// Version of the application from its .cnmt.nca (PackagedContentMeta: title id at 0, version at 8).
+bool read_cnmt_version(const State& st, const std::vector<PfsEntry>& files, u64 title_id, u32& version) {
+    for (const PfsEntry& e : files) {
+        if (e.name.size() < 9 || e.name.compare(e.name.size() - 9, 9, ".cnmt.nca") != 0) continue;
+        Nca meta;
+        std::string err;
+        if (!meta.open(st.file, e.offset, e.size, st.keys, err) || meta.sections().empty()) continue;
+        const Section& s = meta.sections()[0];
+        std::vector<PfsEntry> pfs;
+        auto rd = [&](u64 off, u8* dst, u64 size) { return meta.read(s, s.data_off + off, dst, size); };
+        if (!parse_pfs0(rd, 0, pfs)) continue;
+        for (const PfsEntry& c : pfs) {
+            u8 hdr[16];
+            if (c.size < 16 || !meta.read(s, s.data_off + c.offset, hdr, 16)) continue;
+            u64 tid;
+            memcpy(&tid, hdr, 8);
+            if (tid != title_id) continue;
+            memcpy(&version, hdr + 8, 4);
+            return true;
+        }
+    }
+    return false;
+}
+
+Info g_info;
+
 }  // namespace
+
+void set_paths(const std::string& nsp, const std::string& keys) {
+    g_pick_nsp = nsp;
+    g_pick_keys = keys;
+}
+
+const Info& info() { return g_info; }
+
+void reset() {
+    delete g_state;
+    g_state = nullptr;
+}
 
 bool init(const std::string& exe_dir, std::string& error) {
     if (g_state) return true;
+    Info& inf = g_info;
+    inf = Info{};
+    auto fail = [&](Status s, const std::string& why) {
+        inf.status = s;
+        inf.error = why;
+        error = why;
+        if (!why.empty()) hw_log("nsp: %s", why.c_str());
+        return false;
+    };
     std::string nsp;
     bool forced = !env_str("HWDER_NSP").empty();
     if (!forced && (!env_str("HWDER_EXEFS").empty() || !env_str("HWDER_ROMFS").empty())) return false;  // dev: directory mode
-    if (!find_nsp(exe_dir, nsp)) return false;
 
+    // Keys first, so the startup screen can show both checks even when the game file is missing.
     auto st = std::make_unique<State>();
-    st->path = nsp;
-    if (!st->file.open(nsp)) {
-        error = "cannot open " + nsp;
-        hw_log("nsp: %s", error.c_str());
-        return false;
-    }
-    std::string keys_path;
-    for (const std::string& c : key_candidates(exe_dir))
+    inf.keys_explicit = !env_str("HWDER_KEYS").empty() || !g_pick_keys.empty();
+    std::vector<std::string> cands = key_candidates(exe_dir);
+    for (const std::string& c : cands)
         if (file_exists(c)) {
-            keys_path = c;
+            inf.keys_path = c;
+            inf.keys_found = true;
             break;
         }
-    if (keys_path.empty()) {
-        error = "prod.keys not found. Put your prod.keys next to hwder.exe (or in %USERPROFILE%\\.switch).";
-        hw_log("nsp: %s", error.c_str());
-        return false;
+    if (inf.keys_found) {
+        load_key_file(inf.keys_path, st->keys.prod, false);
+        std::string tk = inf.keys_path.substr(0, inf.keys_path.find_last_of("\\/") + 1) + "title.keys";
+        load_key_file(tk, st->keys.titles, true);
+        inf.key_count = st->keys.prod.size();
+        inf.title_key_count = st->keys.titles.size();
+    } else if (inf.keys_explicit) {
+        inf.keys_path = cands[0];
     }
-    load_key_file(keys_path, st->keys.prod, false);
-    std::string tk = keys_path.substr(0, keys_path.find_last_of("\\/") + 1) + "title.keys";
-    load_key_file(tk, st->keys.titles, true);
+
+    inf.nsp_explicit = forced || !g_pick_nsp.empty();
+    if (!find_nsp(exe_dir, nsp)) return fail(Status::NoGame, "");
+    inf.nsp_path = nsp;
+    st->path = nsp;
+    if (!file_exists(nsp)) return fail(Status::NoGame, "game file not found: " + nsp);
+    if (!st->file.open(nsp)) return fail(Status::NoGame, "cannot open " + nsp);
+    inf.nsp_found = true;
+    if (!inf.keys_found)
+        return fail(Status::NoKeys, inf.keys_explicit ? "prod.keys not found: " + inf.keys_path
+                                                       : "prod.keys not found. Put your prod.keys next to hwder.exe (or in %USERPROFILE%\\.switch).");
+    if (inf.key_count == 0) return fail(Status::NoKeys, "no keys could be read from " + inf.keys_path);
     hw_log("nsp: %s", nsp.c_str());
-    hw_log("nsp: keys from %s (%zu keys, %zu title keys)", keys_path.c_str(), st->keys.prod.size(), st->keys.titles.size());
+    hw_log("nsp: keys from %s (%zu keys, %zu title keys)", inf.keys_path.c_str(), st->keys.prod.size(), st->keys.titles.size());
 
     std::vector<PfsEntry> files;
     auto raw = [&](u64 off, u8* dst, u64 size) { return st->file.read(off, dst, size); };
-    if (!parse_pfs0(raw, 0, files)) {
-        error = "not a PFS0 NSP: " + nsp;
-        hw_log("nsp: %s", error.c_str());
-        return false;
-    }
+    if (!parse_pfs0(raw, 0, files)) return fail(Status::Unreadable, "not an NSP (no PFS0 header): " + nsp);
     // Tickets: rights id at body+0x160, encrypted title key at body+0x40.
     for (const PfsEntry& e : files) {
         if (e.name.size() < 4 || e.name.compare(e.name.size() - 4, 4, ".tik") != 0 || e.size < 0x2C0) continue;
@@ -482,21 +542,34 @@ bool init(const std::string& exe_dir, std::string& error) {
         Nca nca;
         std::string err;
         if (!nca.open(st->file, e.offset, e.size, st->keys, err)) {
-            if (first_err.empty()) first_err = e.name + ": " + err;
+            if (first_err.empty()) first_err = err;
             hw_log("nsp: %s: %s", e.name.c_str(), err.c_str());
             continue;
         }
         if (nca.content_type() != 0) continue;
         st->program = std::move(nca);
         found = true;
+        inf.title_source = "program NCA " + e.name + " header";
         hw_log("nsp: program NCA %s (title %016llx, %zu sections)", e.name.c_str(), (unsigned long long)st->program.title_id(),
                st->program.sections().size());
         break;
     }
-    if (!found) {
-        error = first_err.empty() ? "no program NCA in " + nsp : first_err;
-        hw_log("nsp: %s", error.c_str());
-        return false;
+    if (!found) return fail(Status::Unreadable, first_err.empty() ? "no program NCA in " + nsp : first_err);
+    inf.title_id = st->program.title_id();
+    inf.has_version = read_cnmt_version(*st, files, inf.title_id, inf.version);
+    if (inf.has_version) hw_log("nsp: version %u", inf.version);
+    if (inf.has_version) inf.title_source += " (matches the CNMT)";
+    if (inf.title_id != kTitleId) {
+        // Updates are the base ID | 0x800; add-on content is the base ID + 0x1000 + index.
+        const char* what = inf.title_id == (kTitleId | 0x800) ? "an update, not the base game"
+                         : (inf.title_id & ~0xFFFull) == kTitleId + 0x1000 ? "add-on content (DLC), not the base game"
+                                                                          : "not Hyrule Warriors: Definitive Edition";
+        // Not a gate: warn and still serve the file, the user may know better (a re-packed or modded dump).
+        char why[512];
+        snprintf(why, sizeof(why), "title %016llX from the %s is %s (expected %016llX)", (unsigned long long)inf.title_id,
+                 inf.title_source.c_str(), what, (unsigned long long)kTitleId);
+        inf.warning = why;
+        hw_log("nsp: warning: %s", why);
     }
     for (const Section& s : st->program.sections()) {
         if (s.fs_type == 0 && !st->romfs) st->romfs = &s;
@@ -512,17 +585,14 @@ bool init(const std::string& exe_dir, std::string& error) {
             st->exefs_files = std::move(pfs);
         }
     }
-    if (!st->exefs) {
-        error = "program NCA has no ExeFS";
-        hw_log("nsp: %s", error.c_str());
-        return false;
-    }
+    if (!st->exefs) return fail(Status::Unreadable, "program NCA has no ExeFS");
     if (!st->romfs) hw_log("nsp: program NCA has no RomFS section");
     else
         hw_log("nsp: romfs section %d: 0x%llx bytes", st->romfs->idx, (unsigned long long)st->romfs->data_size);
     std::string names;
     for (auto& p : st->exefs_files) names += (names.empty() ? "" : " ") + p.name;
     hw_log("nsp: exefs: %s", names.c_str());
+    inf.status = Status::Ok;
     g_state = st.release();
     return true;
 }

@@ -20,6 +20,8 @@
 #include "kernel/kernel.h"
 #include "service/ipc.h"
 #include "gpu/display.h"
+#include "gpu/prelaunch.h"
+#include "gpu/settings.h"
 #include "fs/nsp.h"
 
 // ------------------------------------------------------------------ dispatch
@@ -584,13 +586,25 @@ int main(int argc, char** argv) {
 
     std::string exefs = env_u8("HWDER_EXEFS");
     if (exefs.empty()) exefs = dir + "\\exefs";
+    // Shift held at launch shows the startup screen even when it is set to be skipped.
+    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool prelaunch = false;
     {
-        // Game data: an NSP beside the exe (decrypted in-process with the user's prod.keys) or an
-        // extracted exefs/ + romfs/ pair. Nothing is written out either way.
+        // Game data: an NSP (decrypted in-process with the user's prod.keys) or an extracted exefs/ +
+        // romfs/ pair. Nothing is written out either way. Files picked on the startup screen are in the settings.
+        settings::load();
+        hwfs::nsp::set_paths(settings::launch().nsp_path, settings::launch().keys_path);
         std::string err;
         bool nsp = hwfs::nsp::init(dir, err);
         bool have_dir = GetFileAttributesW(to_w(exefs + "\\main").c_str()) != INVALID_FILE_ATTRIBUTES;
-        if (!nsp && !have_dir) {
+        // The startup screen: always when the game file or keys are missing or fail their checks, else unless
+        // skipped in the settings. Never in directory (dev) mode or in automated runs (HWDER_NO_PRELAUNCH, or
+        // HWDER_MUTE with HWDER_OFFSCREEN); HWDER_PRELAUNCH=1 forces it for the latter.
+        const bool dev = !env_u8("HWDER_EXEFS").empty() || !env_u8("HWDER_ROMFS").empty() || (!nsp && have_dir);
+        const bool automated = getenv("HWDER_MUTE") && getenv("HWDER_OFFSCREEN") && env_u8("HWDER_PRELAUNCH") != "1";
+        if (!dev && !getenv("HWDER_NO_PRELAUNCH") && !automated)
+            prelaunch = !nsp || !settings::launch().skip_prelaunch || shift || env_u8("HWDER_PRELAUNCH") == "1";
+        if (!nsp && !have_dir && !prelaunch) {
             std::string msg = err.empty() ? "No game data found.\n\nPut your own dump of Hyrule Warriors: Definitive Edition "
                                             "(the .nsp) and your prod.keys next to hwder.exe.\n\n(Looked for *.nsp in: " + dir + ")"
                                           : "Cannot load the game from the NSP:\n\n" + err;
@@ -598,11 +612,19 @@ int main(int argc, char** argv) {
             if (!getenv("HWDER_MUTE")) MessageBoxW(nullptr, to_w(msg).c_str(), L"HWDER", MB_ICONERROR | MB_OK);
             return 2;
         }
-        hw_log("boot: game data from %s", nsp ? hwfs::nsp::path().c_str() : exefs.c_str());
+        if (!prelaunch) hw_log("boot: game data from %s", nsp ? hwfs::nsp::path().c_str() : exefs.c_str());
     }
     kern::mem::init();
     build_dispatch();
     display::init();
+    if (prelaunch) {
+        if (!prelaunch::run(dir)) {
+            hw_log("boot: quit from the startup screen");
+            ExitProcess(0);
+        }
+        hw_log("boot: game data from %s", hwfs::nsp::path().c_str());
+    }
+    display::start();
     ipc::register_all_services();
     load_npdm(exefs);
     for (unsigned i = 0; i < hw_module_count; i++) load_module(hw_modules[i], exefs);

@@ -22,4 +22,9 @@ void on_swapchain(const std::vector<VkImage>& images, VkFormat fmt);  // called 
 void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent);
 bool swapchain_dirty();  // vsync setting changed: recreate the swapchain
 
+// A full-window screen drawn instead of the menu (the prelaunch screen), called inside the ImGui frame.
+// While one is set the overlay takes all window input and the menu cannot be opened. nullptr removes it.
+using ScreenFn = void (*)(VkExtent2D extent);
+void set_screen(ScreenFn fn);
+
 }  // namespace overlay

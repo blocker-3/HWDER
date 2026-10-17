@@ -1,4 +1,5 @@
 #include "gpu/overlay.h"
+#include "gpu/overlay_ui.h"
 
 #include "gpu/settings.h"
 #include "hid/host_input.h"
@@ -56,6 +57,7 @@ struct Capture {
 };
 static Capture g_capture;
 static bool g_nav_hold = false;
+static ScreenFn g_screen = nullptr;    // full-window screen drawn instead of the menu (prelaunch)
 
 constexpr float kFontPx = 18.0f;  // base text size at scale 1
 const ImVec4 kGold(0.86f, 0.68f, 0.30f, 1.0f);
@@ -126,8 +128,11 @@ static void apply_theme(float scale) {
     st.FontScaleMain = scale;
 }
 
+ImFont* bold_font() { return g_font_bold; }
+float ui_scale() { return g_style_scale; }
+
 // Footer hint: the key in a rounded cap, then what it does.
-static void key_hint(const char* key, const char* action) {
+void key_hint(const char* key, const char* action) {
     const ImGuiStyle& st = ImGui::GetStyle();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 ts = ImGui::CalcTextSize(key);
@@ -143,7 +148,7 @@ static void key_hint(const char* key, const char* action) {
 }
 
 // Section heading: bold gold text on a rule.
-static void section(const char* label) {
+void section(const char* label) {
     ImGui::Spacing();
     if (g_font_bold) ImGui::PushFont(g_font_bold, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_Text, kGold);
@@ -212,7 +217,7 @@ bool wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     std::lock_guard<std::recursive_mutex> l(g_m);
     // ImGui only gets input while the menu is open: no NewFrame runs while it is closed, so anything
     // queued then (clicks, the Escape that opens it) would replay into the menu.
-    if (!g_visible) return false;
+    if (!g_visible && !g_screen) return false;
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE && (lp & (1 << 30))) return true;  // held Escape: no auto-repeat close
     ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp);
     switch (msg) {
@@ -241,9 +246,17 @@ static void set_visible(bool on) {
 
 void toggle() {
     std::lock_guard<std::recursive_mutex> l(g_m);
-    if (g_inited) set_visible(!g_visible);
+    if (g_inited && !g_screen) set_visible(!g_visible);
 }
 bool visible() { return g_visible; }
+void set_screen(ScreenFn fn) {
+    std::lock_guard<std::recursive_mutex> l(g_m);
+    if (!g_inited) return;
+    ImGuiIO& io = ImGui::GetIO();
+    io.ClearEventsQueue();
+    io.ClearInputKeys();
+    g_screen = fn;
+}
 bool swapchain_dirty() {
     bool d = g_swapchain_dirty;
     g_swapchain_dirty = false;
@@ -343,7 +356,7 @@ static std::vector<unsigned char> read_all(const std::string& p) {
 }
 
 // Tooltip for the widget just drawn, shown on mouse hover and on keyboard/gamepad focus, plus a "(?)".
-static void help(const char* text) {
+void help(const char* text) {
     ImGui::SetItemTooltip("%s", text);
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
@@ -357,9 +370,8 @@ static void restart_marker(bool pending) {
     else ImGui::TextDisabled("on restart");
 }
 
-static void tab_display(VkExtent2D extent, bool& changed) {
+void opt_interpolation(bool& changed) {
     settings::Video& v = settings::video();
-    section("Frame rate");
     {
         // interp_hz: 0 off, -1 match the display, else a fixed output rate. Greyed out while the feature is stubbed.
         const int values[] = {0, -1, 120, 144};
@@ -381,27 +393,18 @@ static void tab_display(VkExtent2D extent, bool& changed) {
                    "Expect flashing, ghosting and broken effects in menus and gameplay.\n"
                    "Disabled in this build; the game stays at its native 60 fps.");
     }
-    if (ImGui::Checkbox("Switch monitor to 60 Hz while playing", &v.display_60hz)) {
-        changed = true;
-        PostMessageW(g_hwnd, kMsgDisplay60, 0, v.display_60hz ? 1 : 0);
-    }
-    help("The game renders at 60 fps and its movies at 30 fps. On a 144 Hz panel each frame is shown for\n"
-         "2 or 3 (movies: 4 or 5) refreshes in turn, which looks like stutter. At 60 Hz every frame is\n"
-         "shown exactly once (movies: twice). Reverts when the game exits.");
-    if (ImGui::Checkbox("VSync (FIFO)", &v.vsync)) {
-        changed = true;
-        g_swapchain_dirty = true;
-    }
-    help("Off = mailbox presentation (lowest latency).\nOn = classic vsync; use it if you see tearing.");
-    ImGui::TextWrapped("Game logic runs at a fixed 60 fps: the game advances one step per frame, so releasing frames faster "
-                       "speeds the whole game up. Presentation pacing is locked to 60 Hz; true 120/144 fps needs a "
-                       "game-side timestep change (on the roadmap).");
+}
 
-    section("Window");
+void opt_borderless(bool& changed) {
+    settings::Video& v = settings::video();
     if (ImGui::Checkbox("Borderless fullscreen (F11)", &v.borderless)) {
         changed = true;
         post_window_change();
     }
+}
+
+void opt_window_size(VkExtent2D extent, bool& changed) {
+    settings::Video& v = settings::video();
     {
         static const int sizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3440, 1440}, {3840, 2160}};
         char cur[32];
@@ -422,6 +425,67 @@ static void tab_display(VkExtent2D extent, bool& changed) {
         }
         ImGui::EndDisabled();
     }
+}
+
+void opt_internal_res(bool& changed) {
+    settings::Video& v = settings::video();
+    static const float steps[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f};
+    int cur = 2;
+    for (int i = 0; i < 7; i++)
+        if (fabsf(steps[i] - v.res_scale) < 0.01f) cur = i;
+    char label[64];
+    if (v.unlocked_res) snprintf(label, sizeof(label), "Overridden by Unlocked resolution");
+    else snprintf(label, sizeof(label), "%.2fx  (%dx%d)", steps[cur], (int)(1920 * steps[cur]), (int)(1080 * steps[cur]));
+    ImGui::BeginDisabled(v.unlocked_res);
+    if (ImGui::BeginCombo("Internal resolution", label)) {
+        for (int i = 0; i < 7; i++) {
+            char item[64];
+            snprintf(item, sizeof(item), "%.2fx  (%dx%d)", steps[i], (int)(1920 * steps[i]), (int)(1080 * steps[i]));
+            if (ImGui::Selectable(item, cur == i)) {
+                v.res_scale = steps[i];
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Unlocked resolution (render at the window's size)", &v.unlocked_res)) changed = true;
+    help("Scene render targets are allocated at this scale (UI and small post-process targets stay native).\n"
+         "Unlocked = the window's own size and aspect (ultrawide fills the screen); it overrides the scale above.\n"
+         "On a 1920x1080 window that equals 1.00x, i.e. the game's native resolution. Applies immediately.");
+}
+
+void opt_volume(bool& changed) {
+    settings::Audio& a = settings::audio();
+    ImGui::BeginDisabled(a.mute);
+    if (ImGui::SliderInt("Volume", &a.volume, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    ImGui::EndDisabled();
+    if (ImGui::Checkbox("Mute", &a.mute)) changed = true;
+}
+
+static void tab_display(VkExtent2D extent, bool& changed) {
+    settings::Video& v = settings::video();
+    section("Frame rate");
+    opt_interpolation(changed);
+    if (ImGui::Checkbox("Switch monitor to 60 Hz while playing", &v.display_60hz)) {
+        changed = true;
+        PostMessageW(g_hwnd, kMsgDisplay60, 0, v.display_60hz ? 1 : 0);
+    }
+    help("The game renders at 60 fps and its movies at 30 fps. On a 144 Hz panel each frame is shown for\n"
+         "2 or 3 (movies: 4 or 5) refreshes in turn, which looks like stutter. At 60 Hz every frame is\n"
+         "shown exactly once (movies: twice). Reverts when the game exits.");
+    if (ImGui::Checkbox("VSync (FIFO)", &v.vsync)) {
+        changed = true;
+        g_swapchain_dirty = true;
+    }
+    help("Off = mailbox presentation (lowest latency).\nOn = classic vsync; use it if you see tearing.");
+    ImGui::TextWrapped("Game logic runs at a fixed 60 fps: the game advances one step per frame, so releasing frames faster "
+                       "speeds the whole game up. Presentation pacing is locked to 60 Hz; true 120/144 fps needs a "
+                       "game-side timestep change (on the roadmap).");
+
+    section("Window");
+    opt_borderless(changed);
+    opt_window_size(extent, changed);
 
     section("Overlay");
     if (ImGui::Checkbox("Show frame time", &v.show_fps)) changed = true;
@@ -461,30 +525,7 @@ static void tab_graphics(bool& changed) {
         }
     }
     {
-        static const float steps[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f};
-        int cur = 2;
-        for (int i = 0; i < 7; i++)
-            if (fabsf(steps[i] - v.res_scale) < 0.01f) cur = i;
-        char label[64];
-        if (v.unlocked_res) snprintf(label, sizeof(label), "Overridden by Unlocked resolution");
-        else snprintf(label, sizeof(label), "%.2fx  (%dx%d)", steps[cur], (int)(1920 * steps[cur]), (int)(1080 * steps[cur]));
-        ImGui::BeginDisabled(v.unlocked_res);
-        if (ImGui::BeginCombo("Internal resolution", label)) {
-            for (int i = 0; i < 7; i++) {
-                char item[64];
-                snprintf(item, sizeof(item), "%.2fx  (%dx%d)", steps[i], (int)(1920 * steps[i]), (int)(1080 * steps[i]));
-                if (ImGui::Selectable(item, cur == i)) {
-                    v.res_scale = steps[i];
-                    changed = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::EndDisabled();
-        if (ImGui::Checkbox("Unlocked resolution (render at the window's size)", &v.unlocked_res)) changed = true;
-        help("Scene render targets are allocated at this scale (UI and small post-process targets stay native).\n"
-             "Unlocked = the window's own size and aspect (ultrawide fills the screen); it overrides the scale above.\n"
-             "On a 1920x1080 window that equals 1.00x, i.e. the game's native resolution. Applies immediately.");
+        opt_internal_res(changed);
         {   // the scale actually in effect (also reflects HWDER_RES_SCALE* overrides and the 0.5x-4x clamp)
             float sx = ::hwder_render_scale_x(), sy = ::hwder_render_scale_y();
             int rw = (int)(1920 * sx + 0.5f), rh = (int)(1080 * sy + 0.5f);
@@ -508,10 +549,7 @@ static void tab_graphics(bool& changed) {
 
 static void tab_audio(bool& changed) {
     settings::Audio& a = settings::audio();
-    ImGui::BeginDisabled(a.mute);
-    if (ImGui::SliderInt("Volume", &a.volume, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
-    ImGui::EndDisabled();
-    if (ImGui::Checkbox("Mute", &a.mute)) changed = true;
+    opt_volume(changed);
     if (ImGui::Checkbox("Mute while another window is active", &a.mute_background)) changed = true;
     if (getenv("HWDER_MUTE")) ImGui::TextDisabled("HWDER_MUTE is set: audio output is off for this run.");
 }
@@ -913,7 +951,7 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
     g_frame_ms[g_frame_i++ % 120] = (t.QuadPart - g_last_t.QuadPart) * 1000.0 / f.QuadPart;
     g_last_t = t;
     settings::Video& v = settings::video();
-    if (!g_visible && !v.show_fps) return;
+    if (!g_visible && !v.show_fps && !g_screen) return;
     auto vit = g_views.find(image);
     if (vit == g_views.end()) return;
     // The menu grows with the window: scale 1 at 900 pixels high, times the user's menu size.
@@ -926,7 +964,8 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-    build_ui(extent);
+    if (g_screen) g_screen(extent);
+    else build_ui(extent);
     ImGui::Render();
     ImDrawData* dd = ImGui::GetDrawData();
     if (!dd || dd->TotalVtxCount == 0) return;
