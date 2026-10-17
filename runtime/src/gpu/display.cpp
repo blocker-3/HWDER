@@ -112,7 +112,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case overlay::kMsgClientSize: set_client_size(h, (int)(lp >> 16), (int)(lp & 0xFFFF)); return 0;
     case overlay::kMsgDisplay60: set_display_60hz(h, lp != 0); return 0;
     case WM_KEYDOWN:
-        if (wp == VK_F1) overlay::toggle();
+        if (wp == VK_F1 || wp == VK_ESCAPE) overlay::toggle();  // while open, the overlay handles Escape itself
         if (wp == VK_F11) {
             set_borderless(h, !settings::video().borderless);
             settings::save();
