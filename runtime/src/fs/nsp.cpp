@@ -564,10 +564,12 @@ bool init(const std::string& exe_dir, std::string& error) {
         const char* what = inf.title_id == (kTitleId | 0x800) ? "an update, not the base game"
                          : (inf.title_id & ~0xFFFull) == kTitleId + 0x1000 ? "add-on content (DLC), not the base game"
                                                                           : "not Hyrule Warriors: Definitive Edition";
+        // Not a gate: warn and still serve the file, the user may know better (a re-packed or modded dump).
         char why[512];
         snprintf(why, sizeof(why), "title %016llX from the %s is %s (expected %016llX)", (unsigned long long)inf.title_id,
                  inf.title_source.c_str(), what, (unsigned long long)kTitleId);
-        return fail(Status::WrongTitle, why);
+        inf.warning = why;
+        hw_log("nsp: warning: %s", why);
     }
     for (const Section& s : st->program.sections()) {
         if (s.fs_type == 0 && !st->romfs) st->romfs = &s;

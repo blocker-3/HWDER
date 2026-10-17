@@ -26,10 +26,11 @@ void reset();
 bool active();
 
 // Result of the last init(), for the startup screen.
-enum class Status { Ok, NoGame, NoKeys, WrongTitle, Unreadable };
+enum class Status { Ok, NoGame, NoKeys, Unreadable };
 struct Info {
     Status status = Status::NoGame;
     std::string error;            // plain-English reason when status != Ok
+    std::string warning;          // set with Ok when the title ID is not HWDE's: playable, but likely the wrong file
     std::string nsp_path;         // the file looked at ("" = none found by the search)
     bool nsp_found = false;       // the file exists and opened
     std::string keys_path;        // the prod.keys used, or the explicit path that is missing

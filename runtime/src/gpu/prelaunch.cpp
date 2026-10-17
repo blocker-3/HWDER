@@ -100,16 +100,16 @@ void game_section() {
     using hwfs::nsp::Status;
     const hwfs::nsp::Info& inf = hwfs::nsp::info();
     overlay::section("Game file");
-    if (inf.status == Status::Ok) status_line(kOk, "%s", "Ready");
-    else if (!inf.nsp_found) status_line(kError, "%s", "Not found");
-    else if (inf.status == Status::NoKeys) status_line(kPending, "%s", "Found - it is checked once your prod.keys is found");
-    else if (inf.status == Status::WrongTitle) {
+    if (inf.status == Status::Ok && !inf.warning.empty()) {
         char line[64];
         snprintf(line, sizeof(line), "%016llX", (unsigned long long)inf.title_id);
-        status_line(kError, "Not Hyrule Warriors: Definitive Edition (title %s)", line);
-    } else
+        status_line(kPending, "Doesn't look like Hyrule Warriors: Definitive Edition (title %s) - you can still try it", line);
+        ImGui::TextWrapped("Found %s.", inf.warning.c_str());
+    } else if (inf.status == Status::Ok) status_line(kOk, "%s", "Ready");
+    else if (!inf.nsp_found) status_line(kError, "%s", "Not found");
+    else if (inf.status == Status::NoKeys) status_line(kPending, "%s", "Found - it is checked once your prod.keys is found");
+    else
         status_line(kError, inf.error.find("key") != std::string::npos ? "Can't decrypt: %s" : "Can't read: %s", inf.error);
-    if (inf.status == Status::WrongTitle) ImGui::TextWrapped("Found %s.", inf.error.c_str());
     if (inf.nsp_path.empty()) ImGui::TextDisabled("No .nsp file next to hwder.exe or in its game folder.");
     else ImGui::TextWrapped("%s", inf.nsp_path.c_str());
     if (inf.title_id) {
@@ -150,7 +150,6 @@ const char* blocked_reason() {
     if (!inf.nsp_found && !inf.keys_found) return "Choose your game file and prod.keys to play.";
     if (!inf.nsp_found) return "Choose your game file to play.";
     if (!inf.keys_found || inf.key_count == 0) return "Choose your prod.keys to play.";
-    if (inf.status == Status::WrongTitle) return "Choose a Hyrule Warriors: Definitive Edition game file.";
     return "The game file can't be read with these keys.";
 }
 
@@ -207,10 +206,33 @@ void draw(VkExtent2D extent) {
         g_focus_play = false;
         ImGui::BeginDisabled(!ready);
         ImGui::PushFont(overlay::bold_font(), 0.0f);
-        if (ImGui::Button("Play", ImVec2(bw, 0)) && ready) g_play = true;
+        if (ImGui::Button("Play", ImVec2(bw, 0)) && ready) {
+            if (hwfs::nsp::info().warning.empty()) g_play = true;
+            else ImGui::OpenPopup("Unverified game file");
+        }
         ImGui::PopFont();
         ImGui::EndDisabled();
         if (g_first && ready) ImGui::SetItemDefaultFocus();
+        // A title ID that is not HWDE's is a warning, not a gate: confirm, then play anyway.
+        ImGui::SetNextWindowPos(ImVec2(extent.width * 0.5f, extent.height * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(std::min(extent.width * 0.9f, 560.0f * s), 0));
+        if (ImGui::BeginPopupModal("Unverified game file", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+            const hwfs::nsp::Info& inf = hwfs::nsp::info();
+            ImGui::TextWrapped("This file doesn't look like Hyrule Warriors: Definitive Edition (title ID %016llX, expected %016llX). "
+                               "It may crash or misbehave.",
+                               (unsigned long long)inf.title_id, (unsigned long long)hwfs::nsp::kTitleId);
+            ImGui::Spacing();
+            if (ImGui::Button("Cancel", ImVec2(bw, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+            ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+            if (ImGui::Button("Play anyway", ImVec2(bw, 0))) {
+                hw_log("prelaunch: playing with unverified game file (title ID %016llX)", (unsigned long long)inf.title_id);
+                g_play = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Quit", ImVec2(bw * 0.7f, 0))) g_quit = true;
         if (!ready) {
