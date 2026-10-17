@@ -302,6 +302,10 @@ static void init_vulkan() {
     cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     cpi.queueFamilyIndex = g_dev.queue_family;
     VKCHECK(vkCreateCommandPool(g_dev.dev, &cpi, nullptr, &g_pool));
+    VkSemaphoreTypeCreateInfo tci{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &tci};
+    VKCHECK(vkCreateSemaphore(g_dev.dev, &sci, nullptr, &g_present_timeline));
     create_swapchain();
 }
 
@@ -313,6 +317,12 @@ struct FrameSync {
 };
 static FrameSync g_frames[3];
 static u32 g_frame_idx;
+// Signalled (value = present sequence) when a presentation blit has finished reading its source image.
+// The blit runs on the present queue, which does not order against the renderer's later writes, so the
+// compositor waits on this before handing the guest buffer back.
+static VkSemaphore g_present_timeline = VK_NULL_HANDLE;
+static u64 g_present_seq = 0;                       // under g_present_lock
+static std::atomic<u64> g_last_image_ticket{0};     // last present_image's blit (0: nothing submitted)
 static std::mutex g_present_lock;
 static double g_trace_fence_ms, g_trace_acq_ms;  // HWDER_PACE_TRACE: last present's fence wait / acquire time
 static double g_trace_overshoot_ms;               // HWDER_PACE_TRACE: last limiter sleep's wake-up lateness
@@ -413,7 +423,8 @@ static void update_title(bool guest) {
 // Record + submit one frame: clear, optionally blit `src`, present.
 static std::mutex g_present_queue_lock;
 
-static void present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSemaphore wait_sem, u64 wait_value) {
+// Returns the g_present_timeline value that marks this blit's completion, 0 when nothing read `src`.
+static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSemaphore wait_sem, u64 wait_value) {
     std::lock_guard<std::mutex> pl(g_present_lock);
     if (overlay::swapchain_dirty()) g_resize = true;
     if (g_resize.exchange(false)) {
@@ -422,7 +433,7 @@ static void present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSe
         vkDeviceWaitIdle(g_dev.dev);
         create_swapchain();
     }
-    if (!g_swapchain || !g_extent.width) return;
+    if (!g_swapchain || !g_extent.width) return 0;
     FrameSync& fs = g_frames[g_frame_idx];
     g_frame_idx = (g_frame_idx + 1) % 3;
     if (!fs.fence) {
@@ -452,9 +463,9 @@ static void present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSe
         hw_log("display: slow: swapchain fence wait %.0f ms, acquire %.0f ms (result %d)", g_trace_fence_ms, g_trace_acq_ms, (int)r);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         g_resize = true;
-        return;
+        return 0;
     }
-    if (r == VK_TIMEOUT || r == VK_NOT_READY) return;
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) return 0;
     vkResetFences(g_dev.dev, 1, &fs.fence);
     vkResetCommandBuffer(fs.cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -515,8 +526,13 @@ static void present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSe
     si.pWaitDstStageMask = ws;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &fs.cb;
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &fs.rendered;
+    u64 ticket = ++g_present_seq;
+    VkSemaphore signals[2] = {fs.rendered, g_present_timeline};
+    u64 signal_values[2] = {0, ticket};
+    tsi.signalSemaphoreValueCount = 2;
+    tsi.pSignalSemaphoreValues = signal_values;
+    si.signalSemaphoreCount = 2;
+    si.pSignalSemaphores = signals;
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores = &fs.rendered;
@@ -537,6 +553,18 @@ static void present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSe
                (pq3.QuadPart - pq0.QuadPart) * 1000.0 / tf.QuadPart, (pq1.QuadPart - pq0.QuadPart) * 1000.0 / tf.QuadPart,
                (pq2.QuadPart - pq1.QuadPart) * 1000.0 / tf.QuadPart, (pq3.QuadPart - pq2.QuadPart) * 1000.0 / tf.QuadPart);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) g_resize = true;
+    return src ? ticket : 0;
+}
+
+u64 last_present_ticket() { return g_last_image_ticket.load(); }
+
+bool wait_present_done(u64 ticket, u64 timeout_ns) {
+    if (!ticket || !g_present_timeline) return true;
+    VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    wi.semaphoreCount = 1;
+    wi.pSemaphores = &g_present_timeline;
+    wi.pValues = &ticket;
+    return vkWaitSemaphores(g_dev.dev, &wi, timeout_ns) == VK_SUCCESS;
 }
 
 void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSemaphore wait_sem, u64 wait_value) {
@@ -573,7 +601,7 @@ void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSe
     // interpolation replays) overlaps the wait instead of delaying the present.
     frame_limit(swap_interval);
     QueryPerformanceCounter(&t1);
-    present(image, width, height, black, wait_sem, wait_value);
+    g_last_image_ticket = present(image, width, height, black, wait_sem, wait_value);
     update_title(true);
     QueryPerformanceCounter(&t2);
     g_limiter_ms += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
