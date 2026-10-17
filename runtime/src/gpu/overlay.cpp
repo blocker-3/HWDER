@@ -8,6 +8,7 @@
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_win32.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -43,11 +44,102 @@ static LARGE_INTEGER g_last_t;
 static bool g_close_armed = false;  // Escape / B must be released after opening before they close the menu
 static bool g_focus_menu = false;   // give the menu keyboard/gamepad focus on its first frame
 static int g_tab = 0;
+static ImFont* g_font_bold = nullptr;  // section headings and the title; null = the regular font
+static float g_style_scale = 0.0f;     // scale the style was last built for
+
+constexpr float kFontPx = 18.0f;  // base text size at scale 1
+const ImVec4 kGold(0.86f, 0.68f, 0.30f, 1.0f);
 
 static void set_visible(bool on);
 
 static void check_vk(VkResult r) {
     if (r != VK_SUCCESS) hw_log("overlay: vulkan error %d", (int)r);
+}
+
+// Dark panels with a gold accent. Sizes are for scale 1; the style is rebuilt whenever the scale changes.
+static void apply_theme(float scale) {
+    ImGuiStyle& st = ImGui::GetStyle();
+    st = ImGuiStyle();
+    st.FontSizeBase = kFontPx;
+    st.WindowPadding = ImVec2(22, 18);
+    st.FramePadding = ImVec2(10, 6);
+    st.ItemSpacing = ImVec2(10, 8);
+    st.ItemInnerSpacing = ImVec2(8, 6);
+    st.CellPadding = ImVec2(8, 5);
+    st.WindowRounding = 10;
+    st.ChildRounding = st.FrameRounding = st.PopupRounding = st.GrabRounding = st.TabRounding = st.ScrollbarRounding = 6;
+    st.WindowBorderSize = 1;
+    st.PopupBorderSize = 1;
+    st.FrameBorderSize = 0;
+    st.TabBorderSize = 0;
+    st.ScrollbarSize = 14;
+    st.GrabMinSize = 12;
+    st.SeparatorTextBorderSize = 2;
+    st.SeparatorTextPadding = ImVec2(0, 4);
+    auto a = [](ImVec4 c, float alpha) { return ImVec4(c.x, c.y, c.z, alpha); };
+    ImVec4* c = st.Colors;
+    c[ImGuiCol_Text] = ImVec4(0.93f, 0.92f, 0.89f, 1.0f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.56f, 0.57f, 0.61f, 1.0f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.10f, 0.96f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.09f, 0.10f, 0.12f, 0.98f);
+    c[ImGuiCol_Border] = a(kGold, 0.35f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.14f, 0.15f, 0.18f, 1.0f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.21f, 0.25f, 1.0f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.25f, 0.26f, 0.31f, 1.0f);
+    c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.07f, 0.08f, 0.10f, 1.0f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.24f, 0.25f, 0.29f, 1.0f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.32f, 0.33f, 0.38f, 1.0f);
+    c[ImGuiCol_ScrollbarGrabActive] = a(kGold, 0.8f);
+    c[ImGuiCol_CheckMark] = kGold;
+    c[ImGuiCol_SliderGrab] = a(kGold, 0.85f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.98f, 0.80f, 0.42f, 1.0f);
+    c[ImGuiCol_Button] = ImVec4(0.18f, 0.19f, 0.23f, 1.0f);
+    c[ImGuiCol_ButtonHovered] = a(kGold, 0.55f);
+    c[ImGuiCol_ButtonActive] = a(kGold, 0.80f);
+    c[ImGuiCol_Header] = a(kGold, 0.30f);
+    c[ImGuiCol_HeaderHovered] = a(kGold, 0.45f);
+    c[ImGuiCol_HeaderActive] = a(kGold, 0.60f);
+    c[ImGuiCol_Separator] = ImVec4(0.24f, 0.25f, 0.29f, 1.0f);
+    c[ImGuiCol_Tab] = ImVec4(0.13f, 0.14f, 0.17f, 1.0f);
+    c[ImGuiCol_TabHovered] = a(kGold, 0.55f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.58f, 0.44f, 0.17f, 1.0f);
+    c[ImGuiCol_TabSelectedOverline] = kGold;
+    c[ImGuiCol_TabDimmed] = c[ImGuiCol_Tab];
+    c[ImGuiCol_TabDimmedSelected] = c[ImGuiCol_TabSelected];
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.13f, 0.14f, 0.17f, 1.0f);
+    c[ImGuiCol_TableBorderLight] = c[ImGuiCol_TableBorderStrong] = ImVec4(0.22f, 0.23f, 0.27f, 1.0f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.03f);
+    c[ImGuiCol_NavCursor] = kGold;
+    c[ImGuiCol_TextSelectedBg] = a(kGold, 0.35f);
+    st.ScaleAllSizes(scale);
+    st.FontScaleMain = scale;
+}
+
+// Footer hint: the key in a rounded cap, then what it does.
+static void key_hint(const char* key, const char* action) {
+    const ImGuiStyle& st = ImGui::GetStyle();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 ts = ImGui::CalcTextSize(key);
+    const ImVec2 pad(st.FramePadding.x * 0.7f, st.FramePadding.y);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(ts.x + pad.x * 2, ts.y + pad.y * 2));
+    dl->AddRectFilled(p, ImVec2(p.x + ts.x + pad.x * 2, p.y + ts.y + pad.y * 2), ImGui::GetColorU32(ImGuiCol_FrameBg), st.FrameRounding);
+    dl->AddText(ImVec2(p.x + pad.x, p.y + pad.y), ImGui::GetColorU32(kGold), key);
+    ImGui::SameLine(0, st.ItemInnerSpacing.x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", action);
+    ImGui::SameLine(0, st.ItemSpacing.x * 2.5f);
+}
+
+// Section heading: bold gold text on a rule.
+static void section(const char* label) {
+    ImGui::Spacing();
+    if (g_font_bold) ImGui::PushFont(g_font_bold, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, kGold);
+    ImGui::SeparatorText(label);
+    ImGui::PopStyleColor();
+    if (g_font_bold) ImGui::PopFont();
 }
 
 void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, uint32_t queue_family, VkQueue queue,
@@ -62,8 +154,19 @@ void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, u
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // window positions are not worth a file
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
-    ImGui::StyleColorsDark();
-    ImGui::GetStyle().WindowRounding = 6.0f;
+    {
+        // Segoe UI (on every Windows install) instead of the 13-pixel bitmap default. Font sizes are dynamic
+        // in this ImGui, so one load covers every menu scale.
+        char win[MAX_PATH] = {};
+        GetWindowsDirectoryA(win, MAX_PATH);
+        const std::string dir = std::string(win) + "\\Fonts\\";
+        std::error_code ec;
+        if (std::filesystem::exists(dir + "segoeui.ttf", ec)) io.Fonts->AddFontFromFileTTF((dir + "segoeui.ttf").c_str(), kFontPx);
+        else io.Fonts->AddFontDefault();
+        if (std::filesystem::exists(dir + "seguisb.ttf", ec))
+            g_font_bold = io.Fonts->AddFontFromFileTTF((dir + "seguisb.ttf").c_str(), kFontPx);
+    }
+    apply_theme(1.0f);
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplVulkan_LoadFunctions(
         VK_API_VERSION_1_3,
@@ -201,7 +304,7 @@ static void restart_marker(bool pending) {
 
 static void tab_display(VkExtent2D extent, bool& changed) {
     settings::Video& v = settings::video();
-    ImGui::SeparatorText("Frame rate");
+    section("Frame rate");
     {
         // interp_hz: 0 off, -1 match the display, else a fixed output rate. Greyed out while the feature is stubbed.
         const int values[] = {0, -1, 120, 144};
@@ -239,7 +342,7 @@ static void tab_display(VkExtent2D extent, bool& changed) {
                        "speeds the whole game up. Presentation pacing is locked to 60 Hz; true 120/144 fps needs a "
                        "game-side timestep change (on the roadmap).");
 
-    ImGui::SeparatorText("Window");
+    section("Window");
     if (ImGui::Checkbox("Borderless fullscreen (F11)", &v.borderless)) {
         changed = true;
         post_window_change();
@@ -265,13 +368,13 @@ static void tab_display(VkExtent2D extent, bool& changed) {
         ImGui::EndDisabled();
     }
 
-    ImGui::SeparatorText("Overlay");
+    section("Overlay");
     if (ImGui::Checkbox("Show frame time", &v.show_fps)) changed = true;
     {
-        static const int scales[] = {100, 125, 150, 200};
+        static const int scales[] = {75, 90, 100, 115, 130, 150};
         char cur[16];
         snprintf(cur, sizeof(cur), "%d%%", v.menu_scale);
-        if (ImGui::BeginCombo("Menu text size", cur)) {
+        if (ImGui::BeginCombo("Menu size", cur)) {
             for (int s : scales) {
                 char item[16];
                 snprintf(item, sizeof(item), "%d%%", s);
@@ -339,7 +442,7 @@ static void tab_graphics(bool& changed) {
         }
     }
 
-    ImGui::SeparatorText("Shaders");
+    section("Shaders");
     settings::Debug& d = settings::debug();
     if (ImGui::Checkbox("Compile shaders in the background", &d.async_shaders)) changed = true;
     help("On: a new shader is compiled on a worker thread and its draws are skipped for the frames that takes\n"
@@ -367,7 +470,7 @@ static void tab_input(bool& changed) {
     if (ImGui::Checkbox("Read the controller while another window is active", &in.background_pad)) changed = true;
     help("Off: the game ignores the controller while it is in the background. The keyboard is always ignored then.");
 
-    ImGui::SeparatorText("Controls");
+    section("Controls");
     if (ImGui::BeginTable("##controls", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Switch");
         ImGui::TableSetupColumn("Xbox controller");
@@ -397,7 +500,7 @@ static void tab_input(bool& changed) {
 }
 
 static void tab_gameplay() {
-    ImGui::SeparatorText("Cheats (save file)");
+    section("Cheats (save file)");
     static std::string status;
     std::string sp = save_path();
     ImGui::TextDisabled("%s", sp.empty() ? "no save found under ./save" : sp.c_str());
@@ -423,12 +526,12 @@ static void tab_gameplay() {
 }
 
 static void tab_tools(bool& changed) {
-    ImGui::SeparatorText("Files");
+    section("Files");
     if (ImGui::Button("Open hwder.log")) ShellExecuteW(nullptr, L"open", L"hwder.log", nullptr, nullptr, SW_SHOWNORMAL);
     ImGui::SameLine();
     if (ImGui::Button("Open game folder")) ShellExecuteW(nullptr, L"open", L".", nullptr, nullptr, SW_SHOWNORMAL);
 
-    ImGui::SeparatorText("Debug switches");
+    section("Debug switches");
     ImGui::TextDisabled("Each writes extra detail to hwder.log and can slow the game down. Read once at startup.");
     {
         static const char* switches[][2] = {
@@ -454,7 +557,7 @@ static void tab_tools(bool& changed) {
         }
     }
 
-    ImGui::SeparatorText("Save file");
+    section("Save file");
     static std::string status;
     static std::vector<std::pair<size_t, size_t>> clusters;
     std::string sp = save_path();
@@ -502,13 +605,34 @@ static void build_ui(VkExtent2D extent) {
     }
     if (!g_visible) return;
 
-    // A fixed, centred menu: it sizes itself to the current tab, up to 90% of the window height.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float s = g_style_scale;
+    // Dim the game behind the menu.
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)extent.width, (float)extent.height),
+                                                  IM_COL32(0, 0, 0, 150));
+    // A fixed-size, centred panel; long tabs scroll inside it, so switching tabs never resizes it.
+    const float w = std::min(extent.width * 0.94f, 820.0f * s);
+    const float h = std::min(extent.height * 0.9f, 680.0f * s);
     ImGui::SetNextWindowPos(ImVec2(extent.width * 0.5f, extent.height * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(600 * v.menu_scale / 100.0f, 0), ImVec2(extent.width * 0.95f, extent.height * 0.9f));
+    ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
     if (g_focus_menu) ImGui::SetNextWindowFocus();
     g_focus_menu = false;
     bool open = true;
-    ImGui::Begin("HWDER", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Begin("HWDER", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+
+    {   // header: large title, game name beside it on the same baseline
+        const float y = ImGui::GetCursorPosY();
+        ImGui::PushFont(g_font_bold, st.FontSizeBase * 1.6f);
+        const float big = ImGui::GetTextLineHeight();
+        ImGui::TextColored(kGold, "HWDER");
+        ImGui::PopFont();
+        ImGui::SameLine(0.0f, st.ItemSpacing.x * 1.5f);
+        ImGui::SetCursorPosY(y + big - ImGui::GetTextLineHeight() - 2.0f * s);
+        ImGui::TextDisabled("Hyrule Warriors: Definitive Edition");
+    }
+    ImGui::Spacing();
+    const float footer = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2.0f + st.SeparatorSize + 2.0f * s;
 
     // LB / RB (and Q / E, Page Up / Page Down) switch tabs, like Dusklight's menu.
     enum { kDisplay, kGraphics, kAudio, kInput, kGameplay, kTools, kTabs };
@@ -518,10 +642,21 @@ static void build_ui(VkExtent2D extent) {
         select = (g_tab + kTabs - 1) % kTabs;
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1) || ImGui::IsKeyPressed(ImGuiKey_E) || ImGui::IsKeyPressed(ImGuiKey_PageDown))
         select = (g_tab + 1) % kTabs;
-    if (ImGui::BeginTabBar("##tabs")) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(st.FramePadding.x * 1.8f, st.FramePadding.y * 1.4f));
+    const bool tabs = ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_DrawSelectedOverline);
+    ImGui::PopStyleVar();
+    if (tabs) {
         for (int i = 0; i < kTabs; i++) {
-            if (!ImGui::BeginTabItem(names[i], nullptr, select == i ? ImGuiTabItemFlags_SetSelected : 0)) continue;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(st.FramePadding.x * 1.8f, st.FramePadding.y * 1.4f));
+            ImGui::PushFont(g_font_bold, 0.0f);
+            const bool sel = ImGui::BeginTabItem(names[i], nullptr, select == i ? ImGuiTabItemFlags_SetSelected : 0);
+            ImGui::PopFont();
+            ImGui::PopStyleVar();
+            if (!sel) continue;
             g_tab = i;
+            ImGui::BeginChild("##page", ImVec2(0, -footer), ImGuiChildFlags_NavFlattened);
+            ImGui::Spacing();
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
             switch (i) {
             case kDisplay: tab_display(extent, changed); break;
             case kGraphics: tab_graphics(changed); break;
@@ -530,12 +665,25 @@ static void build_ui(VkExtent2D extent) {
             case kGameplay: tab_gameplay(); break;
             case kTools: tab_tools(changed); break;
             }
+            ImGui::PopItemWidth();
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
+    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - st.WindowPadding.y - footer + st.ItemSpacing.y);
     ImGui::Separator();
-    ImGui::TextDisabled("Saved to hwder_settings.ini as you change them.   Esc / B / F1 / hold View closes.");
+    {   // footer: key hints on the left, a Close button on the right
+        const char* close = "Close";
+        const float bw = ImGui::CalcTextSize(close).x + st.FramePadding.x * 4.0f;
+        key_hint("LB / RB", "Tabs");
+        key_hint("A", "Select");
+        key_hint("B / Esc", "Close");
+        ImGui::TextDisabled("Changes save automatically");
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - bw));
+        if (ImGui::Button(close, ImVec2(bw, 0))) open = false;
+    }
 
     // Escape or B closes the menu, unless they were busy closing a dropdown or ending a slider edit: ImGui
     // handles that in NewFrame, so check what was open on the previous frame. They must also be released
@@ -565,7 +713,12 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
     if (!g_visible && !v.show_fps) return;
     auto vit = g_views.find(image);
     if (vit == g_views.end()) return;
-    ImGui::GetStyle().FontScaleMain = v.menu_scale / 100.0f;
+    // The menu grows with the window: scale 1 at 900 pixels high, times the user's menu size.
+    const float scale = std::clamp(extent.height / 900.0f, 0.75f, 3.0f) * v.menu_scale / 100.0f;
+    if (fabsf(scale - g_style_scale) > 0.001f) {
+        apply_theme(scale);
+        g_style_scale = scale;
+    }
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
