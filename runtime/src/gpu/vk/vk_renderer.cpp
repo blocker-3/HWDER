@@ -3613,7 +3613,9 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
             start = now + atof(battle);
             hw_log("filmstrip: battle frame seen, capturing from t=%.1f for %.1f s", start, dur);
         }
-        if (start < 0) start = now;
+        // HWDER_FILMSTRIP_AFTER=<s>: start at that time since boot instead.
+        static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
+        if (start < 0) start = std::max(now, after);
         if (now < start || now > start + dur) return;
     }
     static VkImage simg = VK_NULL_HANDLE;

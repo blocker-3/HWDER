@@ -309,7 +309,11 @@ void update_thread() {
                 // which hangs.
                 static bool skip_armed = false;  // + was pressed this cycle: Left selects Yes on its prompt
                 if (s6 < 120) {
-                    if (s6 < 10) skip_armed = hw_last_frame_draws.load() < 30;
+                    // After Select Mode (the first menu-sized frame plus 10 s) + also continues the
+                    // tutorial pop-ups.
+                    static u64 menu_since = 0;
+                    if (!menu_since && hw_last_frame_draws.load() >= 40) menu_since = t;
+                    if (s6 < 10) skip_armed = hw_last_frame_draws.load() < 30 || (menu_since && t - menu_since > 10000);
                     if (skip_armed) in.pad.buttons |= hid::kBtnPlus;
                 }
                 if (s6 >= 1000 && s6 < 1120 && skip_armed) in.pad.buttons |= hid::kBtnLeft;
