@@ -29,8 +29,9 @@ def main():
     ap.add_argument("--exefs", default=os.path.join(HERE, "..", "..", "data", "exefs"))
     ap.add_argument("--out", default=os.path.join(HERE, "..", "..", "generated"))
     ap.add_argument("--lines-per-file", type=int, default=12000)
-    ap.add_argument("--extra", default=os.path.join(HERE, "..", "..", "data", "extra_entries.txt"),
-                    help="extra entry points (hex, one per line) discovered at runtime")
+    ap.add_argument("--extra", action="append",
+                    help="extra entry points (hex, one per line) discovered at runtime; repeatable "
+                         "(default: tools/recomp/extra_entries.txt plus data/extra_entries.txt if present)")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -39,9 +40,12 @@ def main():
 
     proc = Process(a.exefs)
     extra = set()
-    if os.path.exists(a.extra):
-        extra = {int(x, 16) for x in open(a.extra).read().split() if x.strip()}
-        log(f"{len(extra)} extra entry points from {a.extra}")
+    for path in a.extra or [os.path.join(HERE, "extra_entries.txt"),
+                            os.path.join(HERE, "..", "..", "data", "extra_entries.txt")]:
+        if os.path.exists(path):
+            ents = {int(x, 16) for x in open(path).read().split() if x.strip()}
+            log(f"{len(ents)} extra entry points from {path}")
+            extra |= ents
     os.makedirs(a.out, exist_ok=True)
 
     all_starts, files, mod_infos, resumable = [], [], [], []

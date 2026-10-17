@@ -4,6 +4,7 @@
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 
@@ -11,9 +12,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msvc  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VSCM = r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake"
-CMAKE = os.path.join(VSCM, "CMake", "bin", "cmake.exe")
-NINJA = os.path.join(VSCM, "Ninja", "ninja.exe")
+
+
+def vs_tool(sub, exe, env):
+    """CMake/Ninja bundled with the located Visual Studio, else whichever the VS environment's PATH has."""
+    if msvc.vs_install():
+        cand = os.path.join(msvc.vs_install(), "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake", sub, exe)
+        if os.path.exists(cand):
+            return cand
+    found = shutil.which(exe, path=env["PATH"])
+    if not found:
+        sys.exit(f"{exe} not found: install the VS 'C++ CMake tools for Windows' component")
+    return found
 
 
 def main():
@@ -48,13 +58,15 @@ def main():
             break
         except OSError:
             time.sleep(1)
+    cmake = vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env)
+    ninja = vs_tool("Ninja", "ninja.exe", env)
     if not os.path.exists(os.path.join(bdir, "build.ninja")):
-        r = subprocess.run([CMAKE, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={NINJA}", "-DCMAKE_BUILD_TYPE=Release",
+        r = subprocess.run([cmake, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DCMAKE_BUILD_TYPE=Release",
                             "-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl", ROOT],
                            cwd=bdir, env=env)
         if r.returncode:
             sys.exit(r.returncode)
-    r = subprocess.run([NINJA, "-j", str(a.jobs), a.target], cwd=bdir, env=env)
+    r = subprocess.run([ninja, "-j", str(a.jobs), a.target], cwd=bdir, env=env)
     sys.exit(r.returncode)
 
 

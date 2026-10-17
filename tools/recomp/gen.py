@@ -523,10 +523,14 @@ def discover(mod, plt_stubs, log, extra=()):
             if mod.in_text(tgt):
                 seeds.add(tgt)
                 data_ptrs += 1
+    # PLT0: the unrelocated JUMP_SLOT entries all point at the lazy-binding resolver stub
+    plt0 = {mod.base + v for v in m.jump_slot_init.values() if mod.in_text(mod.base + v)}
+    seeds |= plt0
     seeds.update(plt_stubs)
     seeds.update(extra)  # runtime-discovered entry points (extra_entries.txt)
     seeds = {s for s in seeds if mod.in_text(s)}
-    log(f"  seeds: {len(fde_by_start)} FDEs, {data_ptrs} data code-pointers, {len(plt_stubs)} PLT stubs")
+    log(f"  seeds: {len(fde_by_start)} FDEs, {data_ptrs} data code-pointers, {len(plt_stubs)} PLT stubs, "
+        f"PLT0 {', '.join(hex(x) for x in sorted(plt0)) or 'none'}")
 
     def containing_fde(a):
         i = bisect.bisect_right(fde_starts, a) - 1

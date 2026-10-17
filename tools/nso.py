@@ -186,7 +186,12 @@ class Process:
         return sym.module.base + sym.value
 
     def _relocate(self, m):
+        # Link-time contents of the JUMP_SLOT GOT entries (module-relative): they point at PLT0, the
+        # lazy-binding resolver stub, which nothing else references and the relocation overwrites.
+        m.jump_slot_init = {}
         for r_off, r_type, r_sym, r_add in m.relas:
+            if r_type == R_AARCH64_JUMP_SLOT:
+                m.jump_slot_init[r_off] = m.u64(r_off)
             if r_type == R_AARCH64_RELATIVE:
                 val = m.base + r_add
             elif r_type in (R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_ABS64):

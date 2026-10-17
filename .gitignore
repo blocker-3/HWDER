@@ -23,6 +23,7 @@ pipeline_cache.bin
 cache/
 hwder_settings.ini
 extra_entries.txt
+!tools/recomp/extra_entries.txt
 
 # python
 *.pyc

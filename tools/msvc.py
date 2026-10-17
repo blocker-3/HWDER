@@ -7,14 +7,41 @@ import os
 import subprocess
 import tempfile
 
-VCVARS = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+VSWHERE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                       "Microsoft Visual Studio", "Installer", "vswhere.exe")
+_install_cache = None
 _env_cache = None
+
+
+def vs_install():
+    """Visual Studio installation directory with the x64 C++ tools (via vswhere), or None."""
+    global _install_cache
+    if _install_cache is None:
+        path = ""
+        if os.path.exists(VSWHERE):
+            path = subprocess.run([VSWHERE, "-latest", "-products", "*", "-requires",
+                                   "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                                   "-property", "installationPath"], capture_output=True, text=True).stdout.strip()
+        _install_cache = path.splitlines()[0] if path else ""
+    return _install_cache or None
+
+
+def vcvars():
+    """vcvars64.bat: HW_VCVARS if set, otherwise from the vswhere-located install."""
+    path = os.environ.get("HW_VCVARS")
+    if not path and vs_install():
+        path = os.path.join(vs_install(), "VC", "Auxiliary", "Build", "vcvars64.bat")
+    if not path or not os.path.exists(path):
+        raise RuntimeError("Visual Studio with the x64 C++ tools not found: install the 'Desktop development "
+                           "with C++' workload (with clang-cl) or set HW_VCVARS to vcvars64.bat"
+                           + (f" (tried {path})" if path else ""))
+    return path
 
 
 def vs_env():
     global _env_cache
     if _env_cache is None:
-        out = subprocess.run(f'cmd /c ""{VCVARS}" >nul && set"', capture_output=True, text=True,
+        out = subprocess.run(f'cmd /c ""{vcvars()}" >nul && set"', capture_output=True, text=True,
                              shell=False).stdout
         env = {}
         for line in out.splitlines():

@@ -65,7 +65,9 @@ python tools/make_dist.py
 
 If the game ever jumps to an address the recompiler did not know was code, the runtime logs it,
 appends it to `extra_entries.txt` and exits; `tools/iterate.sh` automates the
-regenerate-rebuild-rerun loop. The current entry list already covers normal play.
+regenerate-rebuild-rerun loop (it collects them in `data/extra_entries.txt`, which the generator
+merges with the tracked list in `tools/recomp/extra_entries.txt`). The tracked list already covers
+normal play.
 
 ---
 
