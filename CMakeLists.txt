@@ -19,6 +19,24 @@ add_library(hwder_game STATIC ${RECOMP_SOURCES} ${GEN_DIR}/functable.c ${GEN_DIR
 target_include_directories(hwder_game PUBLIC runtime/include ${GEN_DIR})
 target_compile_options(hwder_game PRIVATE ${HW_ARCH_FLAGS} /O2 /Z7 -Wno-everything -fno-strict-aliasing)
 
+# ---------------------------------------------------------------- SDL3: host gamepads only
+# Static, with only what controllers need (joystick/gamepad, haptic, sensors, HIDAPI drivers for
+# DualSense / DualShock 4 / Switch Pro). No window, renderer or audio: HWDER has its own.
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDL_LIBC ON CACHE BOOL "" FORCE)
+foreach(sub AUDIO VIDEO GPU RENDER CAMERA POWER DIALOG)
+    set(SDL_${sub} OFF CACHE BOOL "" FORCE)
+endforeach()
+foreach(sub JOYSTICK HAPTIC HIDAPI SENSOR)
+    set(SDL_${sub} ON CACHE BOOL "" FORCE)
+endforeach()
+add_subdirectory(${TP}/SDL ${CMAKE_BINARY_DIR}/SDL EXCLUDE_FROM_ALL)
+
 # ---------------------------------------------------------------- runtime: HOS kernel, services, GPU
 # Explicit lists: the checkout path may contain [ ] which CMake globs treat as patterns.
 set(RUNTIME_SOURCES
@@ -37,7 +55,7 @@ foreach(sub hid fs audio gpu gpu/vk shader video)
     include(${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/${sub}/sources.cmake)
 endforeach()
 add_executable(hwder ${RUNTIME_SOURCES})
-target_link_libraries(hwder PRIVATE hwder_game dbghelp winmm synchronization psapi bcrypt)
+target_link_libraries(hwder PRIVATE hwder_game SDL3::SDL3-static dbghelp winmm synchronization psapi bcrypt)
 target_include_directories(hwder PRIVATE runtime/src ${TP}/vulkan-headers/include ${TP}/spirv-headers/include ${TP}/imgui ${TP}/imgui/backends)
 target_compile_definitions(hwder PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN IMGUI_IMPL_VULKAN_NO_PROTOTYPES IMGUI_IMPL_VULKAN_USE_LOADER IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USER_CONFIG="gpu/hwder_imconfig.h")
 target_compile_options(hwder PRIVATE ${HW_ARCH_FLAGS} /Z7 /O2 /EHsc -Wno-everything)

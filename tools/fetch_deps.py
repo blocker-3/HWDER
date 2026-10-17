@@ -8,20 +8,23 @@ import subprocess
 
 TP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "third_party")
 
+# (name, url, ref): ref pins a tag for the shallow clone, None = default branch.
 DEPS = [
-    ("imgui", "https://github.com/ocornut/imgui.git"),
-    ("spirv-headers", "https://github.com/KhronosGroup/SPIRV-Headers.git"),
-    ("vulkan-headers", "https://github.com/KhronosGroup/Vulkan-Headers.git"),
+    ("SDL", "https://github.com/libsdl-org/SDL.git", "release-3.2.30"),
+    ("imgui", "https://github.com/ocornut/imgui.git", None),
+    ("spirv-headers", "https://github.com/KhronosGroup/SPIRV-Headers.git", None),
+    ("vulkan-headers", "https://github.com/KhronosGroup/Vulkan-Headers.git", None),
 ]
 
 
 def main():
     os.makedirs(TP, exist_ok=True)
-    for name, url in DEPS:
+    for name, url, ref in DEPS:
         dst = os.path.join(TP, name)
         if os.path.isdir(dst) and os.listdir(dst):
             continue
-        subprocess.run(["git", "clone", "--depth", "1", url, name], cwd=TP, check=True)
+        branch = ["--branch", ref] if ref else []
+        subprocess.run(["git", "clone", "--depth", "1"] + branch + [url, name], cwd=TP, check=True)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ Git submodules (`git submodule update --init --recursive`):
 
 | Path | Source | License |
 |---|---|---|
+| SDL | https://github.com/libsdl-org/SDL (tag release-3.2.30; host gamepads, gyro, rumble) | Zlib |
 | imgui | https://github.com/ocornut/imgui | MIT |
 | spirv-headers | https://github.com/KhronosGroup/SPIRV-Headers | MIT |
 | vulkan-headers | https://github.com/KhronosGroup/Vulkan-Headers | Apache-2.0 / MIT |
