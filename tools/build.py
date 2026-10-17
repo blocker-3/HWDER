@@ -48,15 +48,23 @@ def main():
         sys.exit(r.returncode)
     bdir = os.path.join(ROOT, "build", "release")
     os.makedirs(bdir, exist_ok=True)
-    # Several agents may build at once: serialize on a lock file.
+    # Several agents may build at once, possibly from different worktrees: serialize on one
+    # machine-wide lock file so their compilers don't compete for the same cores and memory.
     import msvcrt
     import time
-    lockf = open(os.path.join(ROOT, "build", "build.lock"), "a+")
+    lockdir = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "hwder")
+    os.makedirs(lockdir, exist_ok=True)
+    lockf = open(os.path.join(lockdir, "build.lock"), "a+")
+    lockf.seek(0)
+    waited = False
     while True:
         try:
             msvcrt.locking(lockf.fileno(), msvcrt.LK_NBLCK, 1)
             break
         except OSError:
+            if not waited:
+                print(f"build.py: waiting for another build to finish ({lockf.name})", flush=True)
+                waited = True
             time.sleep(1)
     cmake = vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env)
     ninja = vs_tool("Ninja", "ninja.exe", env)
