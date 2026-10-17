@@ -35,6 +35,11 @@ HWND window();
 void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSemaphore wait_sem = VK_NULL_HANDLE,
                    u64 wait_value = 0);
 
+// Completion ticket of the last present_image's blit (0 if it submitted none). wait_present_done blocks until
+// that blit has finished reading its source image (false on timeout).
+u64 last_present_ticket();
+bool wait_present_done(u64 ticket, u64 timeout_ns);
+
 // Status shown in the title bar while booting.
 void set_status(const std::string& s);
 // Frame interpolation: pace presents at `hz` (0 = the 60 Hz game grid with swap-interval slots).

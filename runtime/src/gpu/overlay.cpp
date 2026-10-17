@@ -449,9 +449,10 @@ void opt_internal_res(bool& changed) {
         ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-    if (ImGui::Checkbox("Unlocked resolution (render at the window's size)", &v.unlocked_res)) changed = true;
+    if (ImGui::Checkbox("Unlocked resolution (fit the window at 16:9)", &v.unlocked_res)) changed = true;
     help("Scene render targets are allocated at this scale (UI and small post-process targets stay native).\n"
-         "Unlocked = the window's own size and aspect (ultrawide fills the screen); it overrides the scale above.\n"
+         "Unlocked = the largest 16:9 size that fits the window; ultrawide gets black side bars, since the game's\n"
+         "camera is fixed at 16:9 and stretching it squeezes the picture. It overrides the scale above.\n"
          "On a 1920x1080 window that equals 1.00x, i.e. the game's native resolution. Applies immediately.");
 }
 

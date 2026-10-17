@@ -153,6 +153,7 @@ struct Slot {
     bool has_buffer = false;
     NvGraphicBuffer buffer{};
     u64 frame = 0;
+    u64 present_ticket = 0;  // display blit that last read this buffer (display::wait_present_done)
 };
 
 struct Queued {
@@ -378,8 +379,22 @@ private:
             fb.crop_bottom = q.in.crop_bottom;
             fb.swap_interval = q.in.swap_interval ? q.in.swap_interval : 1;
             if (fb.address) gpu::renderer()->present(fb);
+            u64 ticket = fb.address ? display::last_present_ticket() : 0;
+            // The previous buffer goes back to the guest below. Its screen blit runs on the present queue, which
+            // nothing orders against the renderer's later writes, so wait until it has read the buffer: otherwise
+            // the guest can draw a later frame into it before it reaches the screen.
+            if (presented >= 0 && presented != q.slot) {
+                u64 prev_ticket;
+                {
+                    std::lock_guard<std::mutex> l(m_);
+                    prev_ticket = slots_[presented].present_ticket;
+                }
+                if (!display::wait_present_done(prev_ticket, 1000000000ull))
+                    hw_log("vi: screen blit of slot %d not finished after 1 s - releasing it anyway", presented);
+            }
             {
                 std::lock_guard<std::mutex> l(m_);
+                slots_[q.slot].present_ticket = ticket;
                 if (presented >= 0 && presented != q.slot && slots_[presented].state == SlotState::Acquired)
                     slots_[presented].state = SlotState::Free;
                 slots_[q.slot].frame = ++frame;
