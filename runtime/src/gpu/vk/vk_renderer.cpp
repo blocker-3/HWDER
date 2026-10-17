@@ -1396,7 +1396,12 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // Light frames (menus, the first frames of a scene) compile synchronously: a 100 ms hitch behind a
     // fade is invisible, while skipping their draws shows a half-drawn scene. Heavy battle frames go
     // async so a new effect's pipeline does not stall the whole frame.
-    if (sync_pipes || st_.draws < 64 || pipe_retried_.count(h)) {
+    // Draws that sample a render target (screen copies, effect composites, post-processing) also
+    // compile synchronously: skipping one leaves its output, or the copy a later pass reads, empty,
+    // which showed as a one-frame black box the first time an attack effect was used.
+    // HWDER_ASYNC_RT_PIPELINES=1 restores async compiles for them (for comparison).
+    static const bool async_rt = getenv("HWDER_ASYNC_RT_PIPELINES") != nullptr;
+    if (sync_pipes || st_.draws < 64 || pipe_retried_.count(h) || (draw_samples_rt_ && !async_rt)) {
         VkPipeline pipe = create_pipeline(prog, key);
         pipelines_[h] = pipe;
         return pipe;
@@ -2356,6 +2361,15 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     if (!pipe) {
         skipped_++;
         st_.skipped++;
+        {   // diagnostics: which draws a pending pipeline hides, and whether they read render targets
+            static u32 logged = 0;
+            if (logged < 200) {
+                logged++;
+                hw_log("vk: async pipeline: skipped draw (present %llu, prog %016llx, rt0 %llx %ux%u, samples rt %d)",
+                       (unsigned long long)g_s.present_count, (unsigned long long)prog_key,
+                       fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)draw_samples_rt_);
+            }
+        }
         if (oprec) rec_cur_.pop_back();
         return;
     }
