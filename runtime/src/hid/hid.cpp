@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -154,6 +156,52 @@ void update_npad_styles() {
     }
 }
 
+// Six-axis fusion state for SixAxisSensorState: rotation is the integrated angle (in rotations) and
+// direction the orientation matrix (rows = the pad's axes), both driven by the host gyro.
+struct SixAxis {
+    float rotation[3] = {};
+    float dir[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    u64 last_ticks = 0;
+};
+SixAxis g_six;
+
+void integrate_six_axis(const hid::MotionInput& m, u64 ticks) {
+    const float dt = g_six.last_ticks ? std::min((ticks - g_six.last_ticks) / 19200000.0f, 0.1f) : 0.0f;  // 19.2 MHz counter
+    g_six.last_ticks = ticks;
+    if (!m.valid) {
+        g_six = SixAxis{};
+        g_six.last_ticks = ticks;
+        return;
+    }
+    // Rotate each axis row by the small angle w*dt (w in rad/s), then re-orthonormalise.
+    float w[3];
+    for (int i = 0; i < 3; i++) {
+        g_six.rotation[i] += m.gyro[i] * dt;
+        w[i] = m.gyro[i] * 6.2831853f * dt;
+    }
+    for (auto& r : g_six.dir) {
+        const float x = r[0], y = r[1], z = r[2];
+        r[0] = x + w[1] * z - w[2] * y;
+        r[1] = y + w[2] * x - w[0] * z;
+        r[2] = z + w[0] * y - w[1] * x;
+    }
+    auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    auto norm = [&](float* a) {
+        const float l = std::sqrt(dot(a, a));
+        if (l > 1e-6f) a[0] /= l, a[1] /= l, a[2] /= l;
+    };
+    float* x = g_six.dir[0];
+    float* y = g_six.dir[1];
+    float* z = g_six.dir[2];
+    norm(x);
+    const float d = dot(x, y);
+    for (int i = 0; i < 3; i++) y[i] -= d * x[i];
+    norm(y);
+    z[0] = x[1] * y[2] - x[2] * y[1];
+    z[1] = x[2] * y[0] - x[0] * y[2];
+    z[2] = x[0] * y[1] - x[1] * y[0];
+}
+
 void update_once(const hid::HostInput& in) {
     std::lock_guard<std::mutex> lk(g_hid.lock);
     u64 ticks = hw_cntvct();
@@ -182,6 +230,7 @@ void update_once(const hid::HostInput& in) {
     lifo_push_empty(m + kOffCapture, 0x18, s, ticks);
     lifo_push_empty(m + kOffGesture, 0x68, s, ticks);
     *(u64*)(m + kOffConsoleSixAxis) = s;
+    integrate_six_axis(in.motion, ticks);
 
     for (int i = 0; i < 10; i++) {
         u8* e = m + kOffNpad + (u64)i * kNpadEntrySize;
@@ -201,7 +250,8 @@ void update_once(const hid::HostInput& in) {
             }
             lifo_push(e + 0x28 + l * 0x350, 0x30, s, ticks, [&](u8* p) { memcpy(p, &st, sizeof(st)); });
         }
-        // Six-axis LIFOs: at rest, gravity on -Z, attributes IsConnected when the pad is.
+        // Six-axis LIFOs: the host controller's accelerometer and gyro when it has them, else at rest
+        // (gravity on -Z). Attributes IsConnected when the pad is.
         for (int l = 0; l < 6; l++) {
             lifo_push(e + 0x28 + 7 * 0x350 + l * 0x708, 0x68, s, ticks, [&](u8* p) {
                 // SixAxisSensorState: delta_time, sampling, acc, gyro, rotation, direction[3], attr.
@@ -209,9 +259,14 @@ void update_once(const hid::HostInput& in) {
                 *(u64*)(p - 8) = 5000000;
                 *(u64*)(p + 0) = s;
                 float* f = (float*)(p + 8);
-                f[2] = -1.0f;  // accel z
-                float* dir = (float*)(p + 0x2C);
-                dir[0] = 1.0f; dir[4] = 1.0f; dir[8] = 1.0f;
+                if (in.motion.valid) {
+                    memcpy(f + 0, in.motion.acc, sizeof(in.motion.acc));
+                    memcpy(f + 3, in.motion.gyro, sizeof(in.motion.gyro));
+                } else {
+                    f[2] = -1.0f;  // accel z
+                }
+                memcpy(f + 6, g_six.rotation, sizeof(g_six.rotation));
+                memcpy((float*)(p + 0x2C), g_six.dir, sizeof(g_six.dir));
                 *(u32*)(p + 0x50) = style ? 1 : 0;
             });
         }

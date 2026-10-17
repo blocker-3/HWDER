@@ -26,10 +26,24 @@ struct Audio {
     bool mute_background = false;  // silent while another window has focus
 };
 
+// Controller families with their own button remap (Settings > Input). hid::pad_family() sorts pads into them.
+enum PadFamily { kPadXbox, kPadPlayStation, kPadNintendo, kPadGeneric, kPadFamilies };
+constexpr int kRemapSlots = 16;  // Switch buttons in the remap table, see hid::switch_button_name()
+
 struct Input {
     bool hold_view_menu = true;  // holding View/Select opens the menu; a tap is the game's - button
     bool rumble = true;
+    int rumble_strength = 100;   // percent
     bool background_pad = true;  // read the controller while another window has focus
+    bool face_labels = false;    // face buttons by printed label (Xbox A = Switch A) instead of by position
+    int deadzone_l = 24;         // radial stick deadzones, percent (XInput's defaults)
+    int deadzone_r = 27;
+    bool invert_lx = false, invert_ly = false, invert_rx = false, invert_ry = false;
+    bool motion = true;          // pass the controller's gyro and accelerometer to the game
+    bool gyro_camera = false;    // also turn the camera with the gyro (adds to the right stick)
+    float gyro_sens = 1.0f;
+    int remap[kPadFamilies][kRemapSlots];  // host button (hid::HostButton) per Switch button, -1 = unbound
+    Input();
 };
 
 // Startup switches. Each is applied as its environment variable before the subsystems read it, so a
