@@ -46,6 +46,16 @@ static bool g_focus_menu = false;   // give the menu keyboard/gamepad focus on i
 static int g_tab = 0;
 static ImFont* g_font_bold = nullptr;  // section headings and the title; null = the regular font
 static float g_style_scale = 0.0f;     // scale the style was last built for
+// Input tab "press a button to bind": the Switch button (remap row) being bound, when it began, and the host
+// buttons already held then (they count once released). Afterwards menu navigation ignores the controller
+// until every button is up, so the press that was bound does not also act in the menu.
+struct Capture {
+    int slot = -1;
+    ULONGLONG started = 0;
+    uint32_t ignore = 0;
+};
+static Capture g_capture;
+static bool g_nav_hold = false;
 
 constexpr float kFontPx = 18.0f;  // base text size at scale 1
 const ImVec4 kGold(0.86f, 0.68f, 0.30f, 1.0f);
@@ -217,6 +227,7 @@ bool wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 // Opening clears ImGui's input and blocks the game's; closing hands input back to the game.
 static void set_visible(bool on) {
+    g_capture.slot = -1;
     if (on && !g_visible) {
         ImGuiIO& io = ImGui::GetIO();
         io.ClearEventsQueue();
@@ -237,6 +248,50 @@ bool swapchain_dirty() {
     bool d = g_swapchain_dirty;
     g_swapchain_dirty = false;
     return d;
+}
+
+// The host controller drives ImGui's gamepad navigation (the Win32 backend's XInput path is compiled out),
+// so PlayStation and Nintendo pads work too. Positional, as ImGui expects: South accepts, East goes back.
+// Mirrors imgui_impl_win32's mapping and thresholds.
+static void feed_gamepad() {
+    ImGuiIO& io = ImGui::GetIO();
+    const hid::RawPad p = hid::raw_pad();
+    if (p.connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    uint32_t b = p.buttons;
+    int lx = p.lx, ly = p.ly, rx = p.rx, ry = p.ry, lt = p.lt, rt = p.rt;
+    if (g_capture.slot < 0 && g_nav_hold && !b) g_nav_hold = false;
+    if (g_capture.slot >= 0 || g_nav_hold) b = 0, lx = ly = rx = ry = lt = rt = 0;
+    auto button = [&](ImGuiKey k, int host) { io.AddKeyEvent(k, (b >> host) & 1); };
+    auto analog = [&](ImGuiKey k, int v, int v0, int v1) {
+        const float vn = std::clamp((float)(v - v0) / (float)(v1 - v0), 0.0f, 1.0f);
+        io.AddKeyAnalogEvent(k, vn > 0.10f, vn);
+    };
+    button(ImGuiKey_GamepadStart, hid::kHostStart);
+    button(ImGuiKey_GamepadBack, hid::kHostBack);
+    button(ImGuiKey_GamepadFaceLeft, hid::kHostWest);
+    button(ImGuiKey_GamepadFaceRight, hid::kHostEast);
+    button(ImGuiKey_GamepadFaceUp, hid::kHostNorth);
+    button(ImGuiKey_GamepadFaceDown, hid::kHostSouth);
+    button(ImGuiKey_GamepadDpadLeft, hid::kHostDpadLeft);
+    button(ImGuiKey_GamepadDpadRight, hid::kHostDpadRight);
+    button(ImGuiKey_GamepadDpadUp, hid::kHostDpadUp);
+    button(ImGuiKey_GamepadDpadDown, hid::kHostDpadDown);
+    button(ImGuiKey_GamepadL1, hid::kHostLeftShoulder);
+    button(ImGuiKey_GamepadR1, hid::kHostRightShoulder);
+    button(ImGuiKey_GamepadL3, hid::kHostLeftStick);
+    button(ImGuiKey_GamepadR3, hid::kHostRightStick);
+    analog(ImGuiKey_GamepadL2, lt, 3855, 32767);  // XINPUT_GAMEPAD_TRIGGER_THRESHOLD, 30 of 255
+    analog(ImGuiKey_GamepadR2, rt, 3855, 32767);
+    const int dz = 8000;
+    analog(ImGuiKey_GamepadLStickLeft, lx, -dz, -32767);
+    analog(ImGuiKey_GamepadLStickRight, lx, dz, 32767);
+    analog(ImGuiKey_GamepadLStickUp, ly, dz, 32767);
+    analog(ImGuiKey_GamepadLStickDown, ly, -dz, -32767);
+    analog(ImGuiKey_GamepadRStickLeft, rx, -dz, -32767);
+    analog(ImGuiKey_GamepadRStickRight, rx, dz, 32767);
+    analog(ImGuiKey_GamepadRStickUp, ry, dz, 32767);
+    analog(ImGuiKey_GamepadRStickDown, ry, -dz, -32767);
 }
 
 void on_swapchain(const std::vector<VkImage>& images, VkFormat fmt) {
@@ -461,42 +516,174 @@ static void tab_audio(bool& changed) {
     if (getenv("HWDER_MUTE")) ImGui::TextDisabled("HWDER_MUTE is set: audio output is off for this run.");
 }
 
+// Binds the next host button pressed to the remap row being captured; Escape or 5 s cancels. A button
+// already bound to another row swaps with this row's old binding, so nothing is lost.
+static void update_capture(int family, bool& changed) {
+    if (g_capture.slot < 0) return;
+    const hid::RawPad p = hid::raw_pad();
+    g_capture.ignore &= p.buttons;
+    const uint32_t fresh = p.buttons & ~g_capture.ignore;
+    bool done = false;
+    if (fresh) {
+        int host = 0;
+        while (!((fresh >> host) & 1)) host++;
+        int* map = settings::input().remap[family];
+        for (int i = 0; i < settings::kRemapSlots; i++)
+            if (i != g_capture.slot && map[i] == host) map[i] = map[g_capture.slot];
+        map[g_capture.slot] = host;
+        changed = true;
+        done = true;
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || GetTickCount64() - g_capture.started > 5000) {
+        done = true;
+    }
+    if (done) {
+        g_capture.slot = -1;
+        g_nav_hold = true;
+        g_close_armed = false;  // the Escape that cancelled must not close the menu too
+    }
+}
+
 static void tab_input(bool& changed) {
     settings::Input& in = settings::input();
+    const hid::RawPad pad = hid::raw_pad();
+    const int family = pad.connected ? pad.family : settings::kPadXbox;
+    const int type = pad.connected ? pad.type : hid::kPadTypeXboxOne;
+    update_capture(family, changed);
+
+    section("Controller");
+    if (pad.connected) {
+        ImGui::TextUnformatted(pad.name);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s%s%s%s", hid::pad_type_name(pad.type), pad.has_gyro ? "  |  gyro" : "",
+                            pad.has_rumble ? "  |  rumble" : "", pad.sdl ? "" : "  |  XInput");
+    } else {
+        ImGui::TextDisabled("No controller connected. The button table edits the Xbox layout.");
+    }
     if (ImGui::Checkbox("Hold View / Select to open this menu", &in.hold_view_menu)) changed = true;
     help("Hold for half a second to open or close the menu. A tap is still the game's - button; the game sees it\n"
          "when you let go. Off: View is the - button straight away and the menu opens with Escape or F1 only.");
-    if (ImGui::Checkbox("Rumble", &in.rumble)) changed = true;
     if (ImGui::Checkbox("Read the controller while another window is active", &in.background_pad)) changed = true;
     help("Off: the game ignores the controller while it is in the background. The keyboard is always ignored then.");
 
-    section("Controls");
-    if (ImGui::BeginTable("##controls", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+    section("Buttons");
+    {
+        const bool fixed = hid::face_labels_fixed(family);
+        int mode = in.face_labels && !fixed ? 1 : 0;
+        static const char* modes[] = {"By position (Switch layout)", "By printed label"};
+        ImGui::BeginDisabled(fixed);
+        if (ImGui::Combo("Face buttons", &mode, modes, 2)) {
+            in.face_labels = mode == 1;
+            for (int f = 0; f < settings::kPadFamilies; f++) {
+                int def[settings::kRemapSlots];
+                hid::default_remap(def, f, in.face_labels);
+                for (int i = 0; i < 4; i++) in.remap[f][i] = def[i];
+            }
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        help(fixed ? "On Nintendo controllers the printed letters already sit where the Switch has them."
+                   : "By position: the bottom face button is Switch B and the right one Switch A, as on a Switch\n"
+                     "controller, so the game's button prompts match each button's place.\n"
+                     "By printed label: Xbox A / PlayStation Cross is Switch A, so prompts match the letter but\n"
+                     "A and B (and X and Y) swap places. Resets the four face buttons in the table below.");
+    }
+    if (ImGui::BeginTable("##remap", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+        char head[64];
+        snprintf(head, sizeof(head), "%s button", pad.connected ? hid::pad_type_name(type) : "Xbox");
+        ImGui::TableSetupColumn("Switch", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn(head, ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableHeadersRow();
+        int* map = in.remap[family];
+        for (int i = 0; i < settings::kRemapSlots; i++) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(hid::switch_button_name(i));
+            ImGui::TableSetColumnIndex(1);
+            char label[96];
+            const bool capturing = g_capture.slot == i;
+            if (capturing)
+                snprintf(label, sizeof(label), "Press a button... (%d s, Esc cancels)###bind%d",
+                         (int)(5 - std::min<ULONGLONG>(5, (GetTickCount64() - g_capture.started) / 1000)), i);
+            else
+                snprintf(label, sizeof(label), "%s###bind%d", map[i] < 0 ? "(none)" : hid::host_button_name(map[i], type), i);
+            if (capturing) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(label, ImVec2(-FLT_MIN, 0)) && g_capture.slot < 0) {
+                g_capture.slot = i;
+                g_capture.started = GetTickCount64();
+                g_capture.ignore = pad.buttons;
+            }
+            if (capturing) ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("Select, then press the controller button to use for Switch %s", hid::switch_button_name(i));
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Reset to defaults")) {
+        hid::default_remap(in.remap[family], family, in.face_labels);
+        changed = true;
+    }
+    help("Restores the default layout for this kind of controller (Xbox, PlayStation, Nintendo and other\n"
+         "controllers each keep their own). Holding View still opens this menu, whatever it is bound to.");
+
+    section("Sticks");
+    if (ImGui::SliderInt("Left stick deadzone", &in.deadzone_l, 0, 50, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    if (ImGui::SliderInt("Right stick deadzone", &in.deadzone_r, 0, 50, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("How far a stick must move before the game sees it. Raise it if the camera or character drifts.");
+    if (ImGui::Checkbox("Invert left X", &in.invert_lx)) changed = true;
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Invert left Y", &in.invert_ly)) changed = true;
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Invert right X", &in.invert_rx)) changed = true;
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Invert right Y", &in.invert_ry)) changed = true;
+
+    section("Rumble");
+    if (ImGui::Checkbox("Rumble", &in.rumble)) changed = true;
+    ImGui::BeginDisabled(!in.rumble);
+    if (ImGui::SliderInt("Rumble strength", &in.rumble_strength, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    ImGui::EndDisabled();
+    if (pad.connected && !pad.has_rumble) ImGui::TextDisabled("This controller reports no rumble motors.");
+
+    section("Motion");
+    if (ImGui::Checkbox("Motion controls", &in.motion)) changed = true;
+    help("Passes the controller's gyro and accelerometer to the game (DualSense, DualShock 4, Switch Pro and\n"
+         "others with motion sensors). Hyrule Warriors itself barely uses motion.");
+    if (ImGui::Checkbox("Gyro camera", &in.gyro_camera)) changed = true;
+    help("Turning and tilting the controller moves the camera, added to the right stick (the right stick's\n"
+         "invert settings apply to it too).");
+    ImGui::BeginDisabled(!in.gyro_camera);
+    if (ImGui::SliderFloat("Gyro sensitivity", &in.gyro_sens, 0.1f, 5.0f, "%.1fx", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    ImGui::EndDisabled();
+    if (pad.connected && !pad.has_gyro) ImGui::TextDisabled("This controller has no motion sensors.");
+
+    section("Keyboard");
+    if (ImGui::BeginTable("##keys", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Switch");
-        ImGui::TableSetupColumn("Xbox controller");
         ImGui::TableSetupColumn("Keyboard");
         ImGui::TableHeadersRow();
-        static const char* rows[][3] = {
-            {"A / B / X / Y", "B / A / Y / X (by position)", "K or Enter / J or Backspace / I / L"},
-            {"L / R", "LB / RB", "Q / E"},
-            {"ZL / ZR", "LT / RT", "U / O"},
-            {"+ / -", "Menu / View (tap)", "Space / Tab"},
-            {"Left stick", "Left stick", "W A S D"},
-            {"Right stick", "Right stick", "Arrow keys"},
-            {"D-pad", "D-pad", "1 2 3 4"},
-            {"Stick clicks", "LS / RS", "Z / C"},
-            {"HWDER menu", "Hold View", "Escape or F1"},
+        static const char* rows[][2] = {
+            {"A / B / X / Y", "K or Enter / J or Backspace / I / L"},
+            {"L / R", "Q / E"},
+            {"ZL / ZR", "U / O"},
+            {"+ / -", "Space / Tab"},
+            {"Left stick", "W A S D"},
+            {"Right stick", "Arrow keys"},
+            {"D-pad", "1 2 3 4"},
+            {"Stick clicks", "Z / C"},
+            {"HWDER menu", "Escape or F1"},
         };
         for (auto& r : rows) {
             ImGui::TableNextRow();
-            for (int c = 0; c < 3; c++) {
+            for (int c = 0; c < 2; c++) {
                 ImGui::TableSetColumnIndex(c);
                 ImGui::TextUnformatted(r[c]);
             }
         }
         ImGui::EndTable();
     }
-    ImGui::TextDisabled("In this menu: D-pad or left stick to move, A to select, B to go back or close, LB / RB to switch tabs.");
+    ImGui::TextDisabled("In this menu: D-pad or left stick to move, %s to select, %s to go back or close, %s / %s to switch tabs.",
+                        hid::host_button_name(hid::kHostSouth, type), hid::host_button_name(hid::kHostEast, type),
+                        hid::host_button_name(hid::kHostLeftShoulder, type), hid::host_button_name(hid::kHostRightShoulder, type));
 }
 
 static void tab_gameplay() {
@@ -671,14 +858,22 @@ static void build_ui(VkExtent2D extent) {
         }
         ImGui::EndTabBar();
     }
+    if (g_tab != kInput) g_capture.slot = -1;
     ImGui::SetCursorPosY(ImGui::GetWindowHeight() - st.WindowPadding.y - footer + st.ItemSpacing.y);
     ImGui::Separator();
     {   // footer: key hints on the left, a Close button on the right
         const char* close = "Close";
         const float bw = ImGui::CalcTextSize(close).x + st.FramePadding.x * 4.0f;
-        key_hint("LB / RB", "Tabs");
-        key_hint("A", "Select");
-        key_hint("B / Esc", "Close");
+        // Labels of the controller in hand: Cross / Circle on PlayStation, B / A on Nintendo.
+        const hid::RawPad pad = hid::raw_pad();
+        const int type = pad.connected ? pad.type : hid::kPadTypeXboxOne;
+        char tabs_key[32], close_key[32];
+        snprintf(tabs_key, sizeof(tabs_key), "%s / %s", hid::host_button_name(hid::kHostLeftShoulder, type),
+                 hid::host_button_name(hid::kHostRightShoulder, type));
+        snprintf(close_key, sizeof(close_key), "%s / Esc", hid::host_button_name(hid::kHostEast, type));
+        key_hint(tabs_key, "Tabs");
+        key_hint(hid::host_button_name(hid::kHostSouth, type), "Select");
+        key_hint(close_key, "Close");
         ImGui::TextDisabled("Changes save automatically");
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - bw));
@@ -719,6 +914,7 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
         apply_theme(scale);
         g_style_scale = scale;
     }
+    if (g_visible) feed_gamepad();
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
