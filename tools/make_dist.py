@@ -65,7 +65,7 @@ Troubleshooting
   title.keys file (rightsid = key) next to prod.keys.
 """
 
-DEFAULT_SETTINGS = """refresh=60
+DEFAULT_SETTINGS = """version=2
 vsync=1
 aniso=16
 window_w=0

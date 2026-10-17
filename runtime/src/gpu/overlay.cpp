@@ -159,16 +159,25 @@ static void build_ui(VkExtent2D extent) {
 
     ImGui::SeparatorText("Display");
     {
-        ImGui::BeginDisabled(true);
-        int dummy = 0;
-        const char* interp_items[] = {"Off (experimental, disabled)"};
-        ImGui::Combo("Frame interpolation", &dummy, interp_items, 1);
+        // interp_hz: 0 off, -1 match the display, else a fixed output rate. Greyed out while the feature is stubbed.
+        const int values[] = {0, -1, 120, 144};
+        const char* items[] = {"Off (60 fps)", "Match display refresh", "120 Hz", "144 Hz"};
+        int cur = 0;
+        if (settings::kInterpEnabled)
+            for (int i = 0; i < 4; i++)
+                if (values[i] == v.interp_hz) cur = i;
+        ImGui::BeginDisabled(!settings::kInterpEnabled);
+        if (ImGui::Combo("Frame interpolation (Experimental)", &cur, items, 4)) {
+            v.interp_hz = values[cur];
+            changed = true;
+        }
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Draw-level frame interpolation exists but is stubbed out: too janky in menus and gameplay. "
-                              "The game stays at its native 60 fps.");
+            ImGui::SetTooltip("Experimental: re-renders each game frame with blended 3D positions for 120/144 Hz panels.\n"
+                              "Expect flashing, ghosting and broken effects in menus and gameplay.%s",
+                              settings::kInterpEnabled ? "" : "\nDisabled in this build; the game stays at its native 60 fps.");
     }
     if (ImGui::Checkbox("Switch monitor to 60 Hz while playing", &v.display_60hz)) {
         changed = true;
@@ -239,7 +248,9 @@ static void build_ui(VkExtent2D extent) {
         for (int i = 0; i < 7; i++)
             if (fabsf(steps[i] - v.res_scale) < 0.01f) cur = i;
         char label[64];
-        snprintf(label, sizeof(label), "%.2fx  (%dx%d)", steps[cur], (int)(1920 * steps[cur]), (int)(1080 * steps[cur]));
+        if (v.unlocked_res) snprintf(label, sizeof(label), "Overridden by Unlocked resolution");
+        else snprintf(label, sizeof(label), "%.2fx  (%dx%d)", steps[cur], (int)(1920 * steps[cur]), (int)(1080 * steps[cur]));
+        ImGui::BeginDisabled(v.unlocked_res);
         if (ImGui::BeginCombo("Internal resolution", label)) {
             for (int i = 0; i < 7; i++) {
                 char item[64];
@@ -251,6 +262,7 @@ static void build_ui(VkExtent2D extent) {
             }
             ImGui::EndCombo();
         }
+        ImGui::EndDisabled();
         if (ImGui::Checkbox("Unlocked resolution (render at the window's size)", &v.unlocked_res)) changed = true;
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
@@ -258,10 +270,15 @@ static void build_ui(VkExtent2D extent) {
             ImGui::SetTooltip("Scene render targets are allocated at this scale (UI and small post-process targets stay native).\n"
                               "Unlocked = the window's own size and aspect (ultrawide fills the screen); it overrides the scale above.\n"
                               "On a 1920x1080 window that equals 1.00x, i.e. the game's native resolution. Applies immediately.");
-        {
+        {   // the scale actually in effect (also reflects HWDER_RES_SCALE* overrides and the 0.5x-4x clamp)
             float sx = ::hwder_render_scale_x(), sy = ::hwder_render_scale_y();
-            ImGui::TextDisabled("Rendering 3D at %dx%d (%.2fx x %.2fx)%s", (int)(1920 * sx + 0.5f), (int)(1080 * sy + 0.5f), sx, sy,
+            int rw = (int)(1920 * sx + 0.5f), rh = (int)(1080 * sy + 0.5f);
+            ImGui::TextDisabled("Rendering 3D at %dx%d (%.2fx x %.2fx)%s", rw, rh, sx, sy,
                                 v.unlocked_res ? "  [unlocked: follows the window]" : "");
+            float cost = sx * sy;  // pixel count relative to native 1920x1080
+            if ((double)rw * rh > 3840.0 * 2160.0 * 1.01)
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%dx%d: about %.0fx the native pixel count, expect a large fps drop",
+                                   rw, rh, cost);
         }
     }
 

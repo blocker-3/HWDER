@@ -3544,7 +3544,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     // Includes the frame limiter's wait (a full 33 ms at swap interval 2), hence the high threshold.
     SlowTimer timer("present", 60.0);
     ProfScope ps(kProfPresent);
-    int out_hz = settings::video().interp_hz;
+    int out_hz = settings::kInterpEnabled ? settings::video().interp_hz : 0;
     if (out_hz < 0) out_hz = (int)display::monitor_hz();
     static const char* env_interp = getenv("HWDER_INTERP");
     if (env_interp) out_hz = atoi(env_interp);

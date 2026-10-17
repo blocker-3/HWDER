@@ -25,8 +25,8 @@ Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AV
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
 
 In game: **F1** opens the options overlay (internal resolution scale, unlocked resolution for
-ultrawide, vsync, borderless, anisotropic filtering, FPS counter, 60 Hz monitor switch, and a
-save-file cheats tab). **F11** toggles borderless fullscreen. Any XInput controller works;
+ultrawide, vsync, borderless, anisotropic filtering, FPS counter, opt-in 60 Hz monitor switch, and
+a save-file cheats tab; frame interpolation is experimental and disabled). **F11** toggles borderless fullscreen. Any XInput controller works;
 keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, Q/E = L/R,
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 

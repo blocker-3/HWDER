@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -61,16 +62,25 @@ static void set_borderless(HWND h, bool on) {
     settings::video().borderless = on;
 }
 
-// Temporary (CDS_FULLSCREEN) 60 Hz mode on the window's monitor; Windows restores it when we exit.
+// Temporary (CDS_FULLSCREEN) 60 Hz mode on the window's monitor. Windows restores it when the process ends; we
+// also restore it explicitly on a normal exit so the desktop never stays at 60 Hz.
+static WCHAR g_60hz_device[CCHDEVICENAME];  // monitor we switched, empty when none
+
+static void restore_display_60hz() {
+    if (!g_60hz_device[0]) return;
+    ChangeDisplaySettingsExW(g_60hz_device, nullptr, nullptr, 0, nullptr);
+    g_60hz_device[0] = 0;
+    hw_log("display: monitor refresh restored");
+}
+
 static void set_display_60hz(HWND h, bool on) {
+    if (!on) {
+        restore_display_60hz();
+        return;
+    }
     MONITORINFOEXW mi{};
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi);
-    if (!on) {
-        ChangeDisplaySettingsExW(mi.szDevice, nullptr, nullptr, 0, nullptr);
-        hw_log("display: monitor refresh restored");
-        return;
-    }
     DEVMODEW cur{};
     cur.dmSize = sizeof(cur);
     EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &cur);
@@ -80,6 +90,11 @@ static void set_display_60hz(HWND h, bool on) {
     dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_BITSPERPEL;
     LONG r = ChangeDisplaySettingsExW(mi.szDevice, &dm, nullptr, CDS_FULLSCREEN, nullptr);
     hw_log("display: monitor %ls -> 60 Hz (%s)", mi.szDevice, r == DISP_CHANGE_SUCCESSFUL ? "ok" : "failed");
+    if (r == DISP_CHANGE_SUCCESSFUL) {
+        wcscpy_s(g_60hz_device, mi.szDevice);
+        static bool hooked = false;
+        if (!hooked) hooked = true, atexit(restore_display_60hz);
+    }
 }
 
 static void set_client_size(HWND h, int w, int h_) {
@@ -92,7 +107,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (overlay::wndproc(h, msg, wp, lp)) return 0;
     switch (msg) {
     case WM_SIZE: g_resize = true; return 0;
-    case WM_CLOSE: hw_log("window closed - exiting"); ExitProcess(0);
+    case WM_CLOSE: hw_log("window closed - exiting"); restore_display_60hz(); ExitProcess(0);
     case overlay::kMsgBorderless: set_borderless(h, lp != 0); return 0;
     case overlay::kMsgClientSize: set_client_size(h, (int)(lp >> 16), (int)(lp & 0xFFFF)); return 0;
     case overlay::kMsgDisplay60: set_display_60hz(h, lp != 0); return 0;
