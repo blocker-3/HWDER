@@ -78,6 +78,7 @@ void load() {
         else if (k == "borderless") g_video.borderless = atoi(v) != 0;
         else if (k == "res_scale") g_video.res_scale = (float)atof(v);
         else if (k == "unlocked_res") g_video.unlocked_res = atoi(v) != 0;
+        else if (k == "ultrawide") g_video.ultrawide = atoi(v) != 0;
         else if (k == "show_fps") g_video.show_fps = atoi(v) != 0;
         else if (k == "display_60hz") g_video.display_60hz = atoi(v) != 0;
         else if (k == "volume") g_audio.volume = std::clamp(atoi(v), 0, 100);
@@ -136,9 +137,9 @@ void load() {
 void save() {
     FILE* f = fopen(kFile, "w");
     if (!f) return;
-    fprintf(f, "version=%d\nvsync=%d\naniso=%d\nwindow_w=%d\nwindow_h=%d\nborderless=%d\nres_scale=%.3f\nunlocked_res=%d\nshow_fps=%d\ndisplay_60hz=%d\ninterp_hz=%d\n",
+    fprintf(f, "version=%d\nvsync=%d\naniso=%d\nwindow_w=%d\nwindow_h=%d\nborderless=%d\nres_scale=%.3f\nunlocked_res=%d\nshow_fps=%d\ndisplay_60hz=%d\ninterp_hz=%d\nultrawide=%d\n",
             kVersion, (int)g_video.vsync, g_video.aniso, g_video.window_w, g_video.window_h, (int)g_video.borderless,
-            g_video.res_scale, (int)g_video.unlocked_res, (int)g_video.show_fps, (int)g_video.display_60hz, g_video.interp_hz);
+            g_video.res_scale, (int)g_video.unlocked_res, (int)g_video.show_fps, (int)g_video.display_60hz, g_video.interp_hz, (int)g_video.ultrawide);
     fprintf(f, "volume=%d\nmute=%d\nmute_background=%d\nhold_view_menu=%d\nrumble=%d\nbackground_pad=%d\nmenu_scale=%d\nasync_shaders=%d\n",
             g_audio.volume, (int)g_audio.mute, (int)g_audio.mute_background, (int)g_input.hold_view_menu, (int)g_input.rumble,
             (int)g_input.background_pad, g_video.menu_scale, (int)g_debug.async_shaders);

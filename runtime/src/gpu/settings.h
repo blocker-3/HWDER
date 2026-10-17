@@ -14,6 +14,8 @@ struct Video {
     bool borderless = false;    // borderless fullscreen on the current monitor
     float res_scale = 1.0f;     // internal resolution scale for scene render targets (1.0 = 1920x1080)
     bool unlocked_res = false;  // render at the window's own size / aspect; overrides res_scale
+    bool ultrawide = false;     // with unlocked_res on a wider-than-16:9 window: widen the game's camera to fill it
+                                // (true 21:9) instead of pillarboxing; the HUD stays a centred 16:9
     bool show_fps = false;      // small frame-time readout in the corner
     int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)

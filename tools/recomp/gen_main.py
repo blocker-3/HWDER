@@ -32,6 +32,8 @@ def main():
     ap.add_argument("--extra", action="append",
                     help="extra entry points (hex, one per line) discovered at runtime; repeatable "
                          "(default: tools/recomp/extra_entries.txt plus data/extra_entries.txt if present)")
+    ap.add_argument("--hooks", default=os.path.join(HERE, "hooks.txt"),
+                    help="guest functions the runtime overrides (hex, one per line, # comments)")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -46,6 +48,10 @@ def main():
             ents = {int(x, 16) for x in open(path).read().split() if x.strip()}
             log(f"{len(ents)} extra entry points from {path}")
             extra |= ents
+    hooks = set()
+    if os.path.exists(a.hooks):
+        hooks = {int(ln.split("#")[0], 16) for ln in open(a.hooks) if ln.split("#")[0].strip()}
+        log(f"{len(hooks)} hooked functions from {a.hooks}")
     os.makedirs(a.out, exist_ok=True)
 
     all_starts, files, mod_infos, resumable = [], [], [], []
@@ -64,6 +70,12 @@ def main():
         for bucket, sts in sorted(buckets.items()):
             fname = f"rc_{name}_{bucket:03x}.c"
             body = "".join(em.emit_function(st, funcs[st]) for st in sts)
+            # Hooked functions keep their body as f_<addr>_orig; the runtime defines f_<addr>, so
+            # direct calls, tail calls and the dispatch table all reach the hook.
+            for st in sts:
+                if st in hooks:
+                    body = body.replace(f"void {fn_name(st)}(Ctx* restrict c) {{",
+                                        f"void {fn_name(st)}_orig(Ctx* restrict c) {{", 1)
             # Per-file prototypes (not a global header) so unrelated changes don't rebuild everything.
             protos = sorted(set(re.findall(r"\bf_[0-9a-f]+\b", body)))
             text = ('#include "hwder/cpu.h"\n#include "hwder/dispatch.h"\n'

@@ -669,9 +669,11 @@ Image* TextureCache::create(u64 addr, const ImageInfo& info) {
             const char* ex = getenv("HWDER_RES_SCALE_X");  // test aid: emulate another window aspect
             const char* ey = getenv("HWDER_RES_SCALE_Y");
             g_res_scale = g_res_scale_y = e ? (float)atof(e) : settings::video().res_scale;
-            if (!e && settings::video().unlocked_res)  // largest 16:9 that fits the screen (pillarboxed on ultrawide)
-                g_res_scale = g_res_scale_y = std::min(GetSystemMetrics(SM_CXSCREEN) / 1920.0f,
-                                                       GetSystemMetrics(SM_CYSCREEN) / 1080.0f);
+            if (!e && settings::video().unlocked_res) {
+                float sx = GetSystemMetrics(SM_CXSCREEN) / 1920.0f, sy = GetSystemMetrics(SM_CYSCREEN) / 1080.0f;
+                if (settings::video().ultrawide && sx > sy) g_res_scale = sx, g_res_scale_y = sy;  // the screen's aspect
+                else g_res_scale = g_res_scale_y = std::min(sx, sy);  // largest 16:9 that fits (pillarboxed on ultrawide)
+            }
             if (ex) g_res_scale = (float)atof(ex);
             if (ey) g_res_scale_y = (float)atof(ey);
             g_res_scale = std::clamp(g_res_scale, 0.5f, 4.0f);

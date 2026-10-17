@@ -454,6 +454,12 @@ void opt_internal_res(bool& changed) {
          "Unlocked = the largest 16:9 size that fits the window; ultrawide gets black side bars, since the game's\n"
          "camera is fixed at 16:9 and stretching it squeezes the picture. It overrides the scale above.\n"
          "On a 1920x1080 window that equals 1.00x, i.e. the game's native resolution. Applies immediately.");
+    ImGui::BeginDisabled(!v.unlocked_res);
+    if (ImGui::Checkbox("Fill ultrawide screens (wider camera)", &v.ultrawide)) changed = true;
+    ImGui::EndDisabled();
+    help("With Unlocked resolution on a screen wider than 16:9 (e.g. 21:9): widen the game's camera so the 3D view\n"
+         "fills the whole screen instead of showing black side bars. The HUD stays in a centred 16:9 area.\n"
+         "Applies to the next camera update.");
 }
 
 void opt_volume(bool& changed) {
