@@ -32,6 +32,8 @@ int snapshots(CamSnap* out, int max);
 // with the game's operation order, so a tick's own eye/at/up/roll reproduce its bytes.
 void build_view(const float eye[3], const float at[3], const float up[3], float roll, float out[16]);
 void mul_view_proj(const float view[16], const float proj[16], float out[16]);
+// The inverse view the game uploads as matV2W_1..4 (0x10003d0c14), bit-identical to the game's.
+void view_inverse(const float view[16], float out[16]);
 
 // The camera between ticks a (older) and b at alpha in [0, 1]: eye/at/up/roll lerped (up
 // renormalised), b's projection kept. False when the pair must not be blended (a cut, a projection

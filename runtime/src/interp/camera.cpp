@@ -106,6 +106,159 @@ void record(u64 scene, u32 slot) {
                s.up[0], s.up[1], s.up[2], s.fov * 57.29578f, s.aspect, s.near_, s.far_, s.roll);
 }
 
+// main's rodata used by the inverse below (shuffle tables at 0x10007e2070, signs at 0x100073e0f0),
+// at the same offsets from the table base as in the game.
+alignas(16) const u8 kRodataE2[160] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 6, 7, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+    8, 9, 10, 11, 8, 9, 10, 11, 4, 5, 6, 7, 4, 5, 6, 7, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 8, 9, 10, 11,
+};
+alignas(16) const u8 kRodata73E[272] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 128, 191, 0, 0, 128, 63, 0, 0, 128, 191,
+    0, 0, 128, 191, 0, 0, 128, 63, 0, 0, 128, 191, 0, 0, 128, 63,
+};
+
+}  // namespace
+
+// The inverse view the game uploads as matV2W_1..4 (f_10003d0a74, 0x10003d0c14..0x10003d0e04),
+// transcribed from the generated code so the result is bit-identical to what the shaders see.
+void view_inverse(const float view[16], float res[16]) {
+    alignas(16) u8 cambuf[192] = {};
+    memcpy(cambuf + 128, view, 64);
+    const u64 cam = (u64)(uintptr_t)cambuf, out = (u64)(uintptr_t)res;
+    Ctx cc;
+    memset(&cc, 0, sizeof(cc));
+    Ctx* c = &cc;
+      { u64 a_ = cam + 128; c->v[0] = LD128(a_); c->v[1] = LD128(a_ + 16);  }
+      { u64 a_ = cam + 160; c->v[2] = LD128(a_); c->v[3] = LD128(a_ + 16);  }
+      { V128 a_ = c->v[1], b_ = c->v[3], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[0 + i]; r_.s[2 * i + 1] = b_.s[0 + i]; } c->v[5] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[3], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[2 + i]; r_.s[2 * i + 1] = b_.s[2 + i]; } c->v[1] = r_; }
+      { V128 a_ = c->v[0], b_ = c->v[2], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[0 + i]; r_.s[2 * i + 1] = b_.s[0 + i]; } c->v[4] = r_; }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { u64 a_ = c->x[8] + 112; c->v[17] = V_ZERO; c->v[17].d[0] = LD64(a_); }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { V128 a_ = c->v[0], b_ = c->v[2], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[2 + i]; r_.s[2 * i + 1] = b_.s[2 + i]; } c->v[2] = r_; }
+      { V128 a_ = c->v[4], b_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[0 + i]; r_.s[2 * i + 1] = b_.s[0 + i]; } c->v[0] = r_; }
+      { u64 a_ = c->x[8] + 120; c->v[19] = V_ZERO; c->v[19].d[0] = LD64(a_); }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { u64 a_ = c->x[8] + 128; c->v[22] = V_ZERO; c->v[22].d[0] = LD64(a_); }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { u64 a_ = c->x[8] + 136; c->v[23] = V_ZERO; c->v[23].d[0] = LD64(a_); }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { V128 a_ = c->v[4], b_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[2 + i]; r_.s[2 * i + 1] = b_.s[2 + i]; } c->v[7] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[1], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[0 + i]; r_.s[2 * i + 1] = b_.s[0 + i]; } c->v[21] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[1], r_ = V_ZERO; for (int i = 0; i < 2; i++) { r_.s[2 * i] = a_.s[2 + i]; r_.s[2 * i + 1] = b_.s[2 + i]; } c->v[5] = r_; }
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[1] = r_; }
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[2] = r_; }
+      { u64 a_ = c->x[8] + 144; c->v[24] = V_ZERO; c->v[24].d[0] = LD64(a_); }
+      c->x[8] = (u64)(uintptr_t)kRodataE2;
+      { u64 a_ = c->x[8] + 152; c->v[25] = V_ZERO; c->v[25].d[0] = LD64(a_); }
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[3] = r_; }
+      c->v[1].d[1] = c->v[2].d[0];
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[2] = r_; }
+      c->v[2].d[1] = c->v[3].d[0];
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[3] = r_; }
+      { V128 t_[1] = { c->v[0] }; V128 i_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[4] = r_; }
+      c->v[3].d[1] = c->v[4].d[0];
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[4] = r_; }
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[6] = r_; }
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[16] = r_; }
+      c->v[4].d[1] = c->v[6].d[0];
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[6] = r_; }
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[18] = r_; }
+      { V128 t_[1] = { c->v[7] }; V128 i_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[7] = r_; }
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[20] = r_; }
+      c->v[6].d[1] = c->v[16].d[0];
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[16] = r_; }
+      c->v[18].d[1] = c->v[7].d[0];
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[7] = r_; }
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[17] = r_; }
+      c->v[7].d[1] = c->v[16].d[0];
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[16] = r_; }
+      c->v[16].d[1] = c->v[20].d[0];
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[20] = r_; }
+      { V128 t_[1] = { c->v[21] }; V128 i_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[21] = r_; }
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[19] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[6], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[26] = r_; }
+      c->x[8] = (u64)(uintptr_t)kRodata73E;
+      c->v[20].d[1] = c->v[21].d[0];
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[21] = r_; }
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[22] = r_; }
+      c->v[17].d[1] = c->v[19].d[0];
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[19] = r_; }
+      { V128 t_[1] = { c->v[5] }; V128 i_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 8; i++) { u32 x_ = i_.b[i]; if (x_ < 16) r_.b[i] = t_[x_ >> 4].b[x_ & 15]; } c->v[5] = r_; }
+      { u64 a_ = c->x[8] + 240; c->v[25] = LD128(a_); }
+      c->v[21].d[1] = c->v[22].d[0];
+      c->x[8] = (u64)(uintptr_t)kRodata73E;
+      c->v[19].d[1] = c->v[5].d[0];
+      { V128 a_ = c->v[16], b_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[24] = r_; }
+      { V128 a_ = c->v[20], b_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[23] = r_; }
+      { V128 a_ = c->v[16], b_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[5] = r_; }
+      { V128 a_ = c->v[20], b_ = c->v[21], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[22] = r_; }
+      { V128 a_ = c->v[5], b_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[5] = r_; }
+      { V128 a_ = c->v[7], b_ = c->v[19], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[22] = r_; }
+      { V128 a_ = c->v[22], b_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[22] = r_; }
+      { V128 a_ = c->v[7], b_ = c->v[21], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[23] = r_; }
+      { V128 a_ = c->v[23], b_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[23] = r_; }
+      { V128 a_ = c->v[4], b_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[24] = r_; }
+      { V128 a_ = c->v[6], b_ = c->v[22], d_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(-a_.f[i], b_.f[i], d_.f[i]); c->v[24] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[5] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[22], d_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(-a_.f[i], b_.f[i], d_.f[i]); c->v[5] = r_; }
+      { u64 a_ = c->x[8] + 256; c->v[22] = LD128(a_); }
+      { V128 a_ = c->v[23], b_ = c->v[18], d_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(a_.f[i], b_.f[i], d_.f[i]); c->v[24] = r_; }
+      { V128 a_ = c->v[23], b_ = c->v[3], d_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(a_.f[i], b_.f[i], d_.f[i]); c->v[5] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[18], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[23] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[18], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[18] = r_; }
+      { V128 a_ = c->v[24], b_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[24] = r_; }
+      { V128 a_ = c->v[23], b_ = c->v[26], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[23] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[6], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[1] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[2] = r_; }
+      { V128 a_ = c->v[18], b_ = c->v[3], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[2], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] - b_.f[i]; c->v[1] = r_; }
+      { V128 a_ = c->v[23], b_ = c->v[17], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[2] = r_; }
+      { V128 a_ = c->v[21], b_ = c->v[3], d_ = c->v[2], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(-a_.f[i], b_.f[i], d_.f[i]); c->v[2] = r_; }
+      { V128 a_ = c->v[7], b_ = c->v[23], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[4] = r_; }
+      { V128 a_ = c->v[16], b_ = c->v[3], d_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(-a_.f[i], b_.f[i], d_.f[i]); c->v[4] = r_; }
+      { V128 a_ = c->v[0], b_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[0] = r_; }
+      { V128 a_ = c->v[0], b_ = c->v[0], r_ = V_ZERO; u8 t_[32]; memcpy(t_, a_.b, 16); memcpy(t_ + 16, b_.b, 16); memcpy(r_.b, t_ + 8, 16); c->v[3] = r_; }
+      { V128 a_ = c->v[5], b_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[5] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 2; i++) r_.f[i] = a_.f[i] + b_.f[i]; c->v[0] = r_; }
+      { V128 a_ = c->v[0], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 1; i++) { r_.f[i] = a_.f[2 * i] + a_.f[2 * i + 1]; r_.f[1 + i] = b_.f[2 * i] + b_.f[2 * i + 1]; } c->v[0] = r_; }
+      c->v[0].d[1] = c->v[0].d[0];
+      { V128 a_ = c->v[1], b_ = c->v[20], d_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(a_.f[i], b_.f[i], d_.f[i]); c->v[4] = r_; }
+      { V128 a_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = (float)1.0 / a_.f[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[19], d_ = c->v[2], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FMAF(a_.f[i], b_.f[i], d_.f[i]); c->v[2] = r_; }
+      { V128 a_ = c->v[4], b_ = c->v[22], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[1] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FRECPSF(a_.f[i], b_.f[i]); c->v[4] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[25], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[2] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = FRECPSF(a_.f[i], b_.f[i]); c->v[4] = r_; }
+      { V128 a_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.s[i] = (a_.f[i] == 0) ? (u32)~(u32)0 : 0; c->v[0] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[4], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[24], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[4] = r_; }
+      { V128 a_ = c->v[3], b_ = c->v[5], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[5] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[3], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[2] = r_; }
+      { V128 a_ = c->v[2], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 2; i++) r_.d[i] = a_.d[i] & ~b_.d[i]; c->v[2] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[3], r_ = V_ZERO; for (int i = 0; i < 4; i++) r_.f[i] = a_.f[i] * b_.f[i]; c->v[1] = r_; }
+      { V128 a_ = c->v[4], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 2; i++) r_.d[i] = a_.d[i] & ~b_.d[i]; c->v[3] = r_; }
+      { V128 a_ = c->v[5], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 2; i++) r_.d[i] = a_.d[i] & ~b_.d[i]; c->v[4] = r_; }
+      { V128 a_ = c->v[1], b_ = c->v[0], r_ = V_ZERO; for (int i = 0; i < 2; i++) r_.d[i] = a_.d[i] & ~b_.d[i]; c->v[0] = r_; }
+      { u64 a_ = out + 0; ST128(a_, c->v[3]); ST128(a_ + 16, c->v[4]);  }
+      { u64 a_ = out + 32; ST128(a_, c->v[2]); ST128(a_ + 16, c->v[0]);  }
+}
+
+namespace {
+
 float dist(const float a[3], const float b[3]) {
     float d0 = a[0] - b[0], d1 = a[1] - b[1], d2 = a[2] - b[2];
     return std::sqrt(d0 * d0 + d1 * d1 + d2 * d2);

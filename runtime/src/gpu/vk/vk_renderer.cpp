@@ -741,7 +741,7 @@ private:
     };
     struct CamHit {  // a run of the frame's camera matrix in a constant buffer (camera mode)
         u32 word;        // float index into CbufRec::data
-        u8 mat, layout;  // kCamView/kCamViewProj, kCamLayouts index
+        u8 mat, layout;  // kCamView/kCamViewProj/kCamInv, kCamLayouts index
     };
     struct CbufRec {
         u32 buffer_index;      // StageRec::buffers entry to repoint
@@ -825,14 +825,14 @@ private:
     void replay_frame(float t);
     // ---- camera mode (HWDER_INTERP_MODE=camera): replays substitute only the camera's view and
     // viewProj, found in the frame's constant buffers by exact match against the tick snapshots.
-    static constexpr int kCamView = 0, kCamViewProj = 1, kCamLayouts = 4;
+    static constexpr int kCamView = 0, kCamViewProj = 1, kCamInv = 2, kCamMats = 3, kCamLayouts = 4;
     struct CamFrame {
         bool matched = false, have_prev = false;
         interp::CamSnap cur, prev;  // the frame's tick and the tick before it
     };
     CamFrame cam_frame_;
     bool cam_replay_ = false;          // replay_draw substitutes cam_words_ at the CamHits
-    u32 cam_words_[2][kCamLayouts][16];
+    u32 cam_words_[kCamMats][kCamLayouts][16];
     void cam_identify();
     bool cam_prepare(float alpha);
     void replay_draw(const DrawRec& d, const DrawRec* prev, float t);
@@ -3052,9 +3052,16 @@ static void cam_layout(const float m[16], int l, u32 out[16]) {
     memcpy(out, t, (l < 2 ? 16 : 12) * 4);
 }
 
+// HWDER_CAM_INV=1: also replace the inverse view (matV2W) in replays. Off by default: it is
+// searched and logged either way.
+static bool cam_inv_enabled() {
+    static const bool on = getenv("HWDER_CAM_INV") && atoi(getenv("HWDER_CAM_INV")) != 0;
+    return on;
+}
+
 // Which tick's camera this frame was drawn with: exact search of every constant buffer for each
-// recorded snapshot's view and viewProj (all layouts). The snapshot with the most hits wins; its
-// hits are stored on the CbufRecs for replay_draw to overwrite.
+// recorded snapshot's view, viewProj and inverse view (all layouts). The snapshot with the most
+// view/viewProj hits wins; its hits are stored on the CbufRecs for replay_draw to overwrite.
 void VkRenderer::cam_identify() {
     cam_frame_ = CamFrame{};
     interp::CamSnap snaps[8];
@@ -3064,13 +3071,16 @@ void VkRenderer::cam_identify() {
         u8 len, snap, mat, layout;
     };
     std::vector<Pat> pats;
-    for (int i = 0; i < ns; i++)
-        for (int m = 0; m < 2; m++)
+    for (int i = 0; i < ns; i++) {
+        float inv[16];
+        interp::view_inverse(snaps[i].view, inv);
+        const float* mats[kCamMats] = {snaps[i].view, snaps[i].viewproj, inv};
+        for (int m = 0; m < kCamMats; m++)
             for (int l = 0; l < kCamLayouts; l++) {
                 Pat p{};
                 p.len = l < 2 ? 16 : 12;
                 p.snap = (u8)i, p.mat = (u8)m, p.layout = (u8)l;
-                cam_layout(m == kCamView ? snaps[i].view : snaps[i].viewproj, l, p.w);
+                cam_layout(mats[m], l, p.w);
                 // Skip near-trivial matrices (an identity-like view would match every identity model matrix).
                 int distinct = 0;
                 for (int k = 0; k < p.len; k++) {
@@ -3080,6 +3090,7 @@ void VkRenderer::cam_identify() {
                 }
                 if (distinct >= 4) pats.push_back(p);
             }
+    }
     // 16-word layouts before their 12-word prefixes
     std::sort(pats.begin(), pats.end(), [](const Pat& a, const Pat& b) { return a.w[0] != b.w[0] ? a.w[0] < b.w[0] : a.len > b.len; });
     u64 bloom[64] = {};
@@ -3087,6 +3098,7 @@ void VkRenderer::cam_identify() {
     for (const Pat& p : pats) bloom[bslot(p.w[0]) >> 6] |= 1ull << (bslot(p.w[0]) & 63);
     struct Found {
         CbufRec* cr;
+        u32 op;
         CamHit h;
         u8 snap;
     };
@@ -3096,7 +3108,8 @@ void VkRenderer::cam_identify() {
     LARGE_INTEGER f, t0, t1;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
-    for (OpRec& o : rec_frame_) {
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        OpRec& o = rec_frame_[oi];
         if (o.is_clear) continue;
         for (u32 s = 0; s < 5; s++) {
             if (!o.draw.has_stage[s]) continue;
@@ -3113,8 +3126,8 @@ void VkRenderer::cam_identify() {
                     auto it = std::lower_bound(pats.begin(), pats.end(), w[i], [](const Pat& p, u32 v) { return p.w[0] < v; });
                     for (; it != pats.end() && it->w[0] == w[i]; ++it) {
                         if (i + it->len > n || memcmp(w + i, it->w, it->len * 4) != 0) continue;
-                        found.push_back({&cr, {(u32)i, it->mat, it->layout}, it->snap});
-                        per_snap[it->snap]++;
+                        found.push_back({&cr, oi, {(u32)i, it->mat, it->layout}, it->snap});
+                        if (it->mat != kCamInv) per_snap[it->snap]++;
                         i += it->len - 1;
                         break;
                     }
@@ -3126,7 +3139,9 @@ void VkRenderer::cam_identify() {
     int best = -1;
     for (int i = 0; i < ns; i++)
         if (per_snap[i] && (best < 0 || per_snap[i] > per_snap[best])) best = i;
-    u32 hits[2][kCamLayouts] = {};
+    u32 hits[kCamMats][kCamLayouts] = {};
+    u32 other_hits[kCamMats] = {}, other_older = 0, other_newer = 0;
+    std::vector<u8> op_hit(rec_frame_.size(), 0);  // bit m: the draw holds matrix m of the frame's tick
     if (best >= 0) {
         cam_frame_.matched = true;
         cam_frame_.cur = snaps[best];
@@ -3135,62 +3150,121 @@ void VkRenderer::cam_identify() {
                 cam_frame_.have_prev = true;
                 cam_frame_.prev = snaps[i];
             }
-        for (const Found& fd : found)
+        for (const Found& fd : found) {
             if (fd.snap == best) {
-                fd.cr->cam_hits.push_back(fd.h);
+                if (fd.h.mat != kCamInv || cam_inv_enabled()) fd.cr->cam_hits.push_back(fd.h);
                 hits[fd.h.mat][fd.h.layout]++;
+                op_hit[fd.op] |= 1 << fd.h.mat;
+            } else {
+                other_hits[fd.h.mat]++;
+                (snaps[fd.snap].tick < snaps[best].tick ? other_older : other_newer)++;
+            }
+        }
+    }
+    if (interp::cam_log_every() <= 0) return;
+    // ---- HWDER_CAM_LOG diagnostics, once per second
+    // Draws: how many carry the tick's view/viewProj (moved by the replay) or only its inverse view
+    // (whose world reconstruction then disagrees with the moved geometry unless HWDER_CAM_INV=1).
+    u32 draws = 0, draws_cam = 0, draws_inv_only = 0;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        if (rec_frame_[oi].is_clear) continue;
+        draws++;
+        if (op_hit[oi] & 3) draws_cam++;
+        else if (op_hit[oi] & 4) draws_inv_only++;
+    }
+    // History reads: render targets sampled before this frame writes them. A replay reads their
+    // current contents (synced from the real target, which already holds this frame's or a later
+    // result), so whatever accumulates across frames (exposure, TAA, ...) is applied twice.
+    std::unordered_map<Image*, u32> first_write;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        const OpRec& o = rec_frame_[oi];
+        const Framebuffer& fb = o.is_clear ? o.clear.fb : o.draw.fb;
+        for (u32 c = 0; c < fb.num_colors; c++)
+            if (fb.color[c]) first_write.emplace(fb.color[c], oi);
+        if (fb.depth) first_write.emplace(fb.depth, oi);
+    }
+    std::unordered_set<Image*> hist_imgs;
+    u32 hist_draws = 0;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        const OpRec& o = rec_frame_[oi];
+        if (o.is_clear) continue;
+        bool any = false;
+        for (u32 s = 0; s < 5; s++) {
+            if (!o.draw.has_stage[s]) continue;
+            for (const ImageRef& r : o.draw.stages[s].image_refs) {
+                auto it = r.img ? first_write.find(r.img) : first_write.end();
+                if (it != first_write.end() && it->second >= oi) {
+                    hist_imgs.insert(r.img);
+                    any = true;
+                }
+            }
+        }
+        if (any) hist_draws++;
+    }
+    static u64 frames, matched, other_frames, lag[3], sum_hits[kCamMats][kCamLayouts], sum_bytes, sum_bufs;
+    static u64 sum_other[kCamMats], sum_older, sum_newer, sum_draws, sum_draws_cam, sum_inv_only, sum_hist_imgs, sum_hist_draws;
+    static double scan_ms, scan_max, last_ms;
+    double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+    double now = t1.QuadPart * 1000.0 / f.QuadPart;
+    frames++;
+    if (best >= 0) {
+        matched++;
+        lag[std::min(best, 2)]++;
+        for (int i = 0; i < ns; i++)
+            if (i != best && per_snap[i]) {
+                other_frames++;
+                break;
             }
     }
-    // HWDER_CAM_LOG: match coverage once per second
-    if (interp::cam_log_every() > 0) {
-        static u64 frames, matched, other_frames, lag[3], sum_hits[2][kCamLayouts], sum_bytes, sum_bufs;
-        static double scan_ms, scan_max, last_ms;
-        double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
-        double now = t1.QuadPart * 1000.0 / f.QuadPart;
-        frames++;
-        if (best >= 0) {
-            matched++;
-            lag[std::min(best, 2)]++;
-            for (int i = 0; i < ns; i++)
-                if (i != best && per_snap[i]) {
-                    other_frames++;
-                    break;
-                }
-        }
-        for (int m = 0; m < 2; m++)
-            for (int l = 0; l < kCamLayouts; l++) sum_hits[m][l] += hits[m][l];
-        sum_bytes += bytes;
-        sum_bufs += nbufs;
-        scan_ms += ms;
-        scan_max = std::max(scan_max, ms);
-        if (!last_ms) last_ms = now;
-        if (now - last_ms >= 1000.0) {
-            double n = (double)frames;
-            hw_log("cam: match: %llu/%llu frames matched (tick lag 0/1/2+: %llu/%llu/%llu, %llu also hold another tick) | "
-                   "hits per frame: view 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, viewProj 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f | "
-                   "scan %.0f cbufs %.0f KiB per frame, %.2f ms avg %.2f max",
-                   (unsigned long long)matched, (unsigned long long)frames, (unsigned long long)lag[0], (unsigned long long)lag[1],
-                   (unsigned long long)lag[2], (unsigned long long)other_frames, sum_hits[0][0] / n, sum_hits[0][1] / n,
-                   sum_hits[0][2] / n, sum_hits[0][3] / n, sum_hits[1][0] / n, sum_hits[1][1] / n, sum_hits[1][2] / n,
-                   sum_hits[1][3] / n, sum_bufs / n, sum_bytes / n / 1024.0, scan_ms / n, scan_max);
-            frames = matched = other_frames = sum_bytes = sum_bufs = 0;
-            memset(lag, 0, sizeof(lag));
-            memset(sum_hits, 0, sizeof(sum_hits));
-            scan_ms = scan_max = 0;
-            last_ms = now;
-        }
+    for (int m = 0; m < kCamMats; m++) {
+        for (int l = 0; l < kCamLayouts; l++) sum_hits[m][l] += hits[m][l];
+        sum_other[m] += other_hits[m];
+    }
+    sum_older += other_older;
+    sum_newer += other_newer;
+    sum_draws += draws;
+    sum_draws_cam += draws_cam;
+    sum_inv_only += draws_inv_only;
+    sum_hist_imgs += hist_imgs.size();
+    sum_hist_draws += hist_draws;
+    sum_bytes += bytes;
+    sum_bufs += nbufs;
+    scan_ms += ms;
+    scan_max = std::max(scan_max, ms);
+    if (!last_ms) last_ms = now;
+    if (now - last_ms >= 1000.0) {
+        double n = (double)frames;
+        hw_log("cam: match: %llu/%llu frames matched (tick lag 0/1/2+: %llu/%llu/%llu, %llu also hold another tick) | "
+               "hits per frame: view 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, viewProj 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, "
+               "invView 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f%s | scan %.0f cbufs %.0f KiB per frame, %.2f ms avg %.2f max",
+               (unsigned long long)matched, (unsigned long long)frames, (unsigned long long)lag[0], (unsigned long long)lag[1],
+               (unsigned long long)lag[2], (unsigned long long)other_frames, sum_hits[0][0] / n, sum_hits[0][1] / n,
+               sum_hits[0][2] / n, sum_hits[0][3] / n, sum_hits[1][0] / n, sum_hits[1][1] / n, sum_hits[1][2] / n,
+               sum_hits[1][3] / n, sum_hits[2][0] / n, sum_hits[2][1] / n, sum_hits[2][2] / n, sum_hits[2][3] / n,
+               cam_inv_enabled() ? " (replaced)" : " (not replaced)", sum_bufs / n, sum_bytes / n / 1024.0, scan_ms / n, scan_max);
+        hw_log("cam: frame: %.0f draws per frame, %.0f with the tick's view/viewProj, %.0f with only its inverse view | "
+               "other ticks' matrices per frame: view %.1f viewProj %.1f invView %.1f (%.1f older, %.1f newer) | "
+               "history reads per frame: %.1f render targets sampled before written, by %.1f draws",
+               sum_draws / n, sum_draws_cam / n, sum_inv_only / n, sum_other[0] / n, sum_other[1] / n, sum_other[2] / n,
+               sum_older / n, sum_newer / n, sum_hist_imgs / n, sum_hist_draws / n);
+        frames = matched = other_frames = sum_bytes = sum_bufs = 0;
+        sum_older = sum_newer = sum_draws = sum_draws_cam = sum_inv_only = sum_hist_imgs = sum_hist_draws = 0;
+        memset(lag, 0, sizeof(lag));
+        memset(sum_hits, 0, sizeof(sum_hits));
+        memset(sum_other, 0, sizeof(sum_other));
+        scan_ms = scan_max = 0;
+        last_ms = now;
     }
 }
 
 // The interpolated camera for one replay, in every layout. False: show the tick unblended.
 bool VkRenderer::cam_prepare(float alpha) {
     if (!cam_frame_.matched || !cam_frame_.have_prev) return false;
-    float view[16], vp[16];
-    if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, view, vp)) return false;
-    for (int l = 0; l < kCamLayouts; l++) {
-        cam_layout(view, l, cam_words_[kCamView][l]);
-        cam_layout(vp, l, cam_words_[kCamViewProj][l]);
-    }
+    float mats[kCamMats][16];
+    if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, mats[kCamView], mats[kCamViewProj])) return false;
+    interp::view_inverse(mats[kCamView], mats[kCamInv]);
+    for (int m = 0; m < kCamMats; m++)
+        for (int l = 0; l < kCamLayouts; l++) cam_layout(mats[m], l, cam_words_[m][l]);
     return true;
 }
 
