@@ -2635,6 +2635,9 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         float fix = fb.scale_y / fb.scale;
         pc.viewport_scale[0] = fix;
         pc.viewport_scale[1] = draw_samples_rt_ ? 1.0f : fix;
+        // Fill ultrawide: the game's own projection already has the window's aspect, so perspective draws
+        // are not squeezed; the orthographic HUD is still pillarboxed to a centred 16:9.
+        if (settings::video().unlocked_res && settings::video().ultrawide) pc.viewport_scale[0] = 1.0f;
     }
     pc.base_vertex = p.base_vertex;
     pc.base_instance = p.base_instance - p.instance;
@@ -3502,6 +3505,9 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                     display::client_size(&cw, &chh);
                     if (!cw || !chh) cw = GetSystemMetrics(SM_CXSCREEN), chh = GetSystemMetrics(SM_CYSCREEN);
                     wx = wy = std::min(cw / 1920.0f, chh / 1080.0f);  // uneven X/Y squeezes the game's 16:9 projection
+                    // Fill ultrawide: the game's camera is widened to the window's aspect (runtime/src/game/
+                    // widescreen.cpp), so the targets take the window's shape too.
+                    if (settings::video().ultrawide && cw * 1080 > chh * 1920) wx = cw / 1920.0f, wy = chh / 1080.0f;
                 }
                 wx = std::clamp(wx, 0.5f, 4.0f);
                 wy = std::clamp(wy, 0.5f, 4.0f);
