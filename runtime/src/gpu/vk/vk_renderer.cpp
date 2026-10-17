@@ -1979,6 +1979,13 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     key.cull_mode = regs[GlCullFace] == 0x404 ? VK_CULL_MODE_FRONT_BIT
                     : regs[GlCullFace] == 0x408 ? VK_CULL_MODE_FRONT_AND_BACK
                                                 : VK_CULL_MODE_BACK_BIT;
+    if (regs[AlphaTestEnable]) {  // alpha test is not emulated: log each distinct func/ref once
+        static std::unordered_set<u64> seen_alpha;
+        u64 k = (u64)regs[AlphaTestFunc] << 32 | regs[AlphaTestRef];
+        if (seen_alpha.size() < 16 && seen_alpha.insert(k).second)
+            hw_log("vk: draw uses alpha test (not emulated): func 0x%x ref %.3f", regs[AlphaTestFunc],
+                   *(const float*)&regs[AlphaTestRef]);
+    }
     // Facing: the hardware evaluates the GL area formula in its window coordinates (y-up for a
     // lower-left origin, y-down for upper-left) and TRIANGLE_RAST_FLIP (WindowOrigin bit 4)
     // negates the result. Vulkan evaluates the visual orientation of the framebuffer picture, so
