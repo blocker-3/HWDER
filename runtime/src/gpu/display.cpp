@@ -24,6 +24,10 @@ static VkSwapchainKHR g_swapchain;
 static VkExtent2D g_extent;
 static std::vector<VkImage> g_images;
 static VkCommandPool g_pool;
+// Signalled (value = present sequence) when a presentation blit has finished reading its source image.
+// The blit runs on the present queue, which does not order against the renderer's later writes, so the
+// compositor waits on this before handing the guest buffer back.
+static VkSemaphore g_present_timeline = VK_NULL_HANDLE;
 static std::mutex g_status_lock;
 static std::string g_status = "booting";
 static std::atomic<u64> g_last_guest_frame{0};
@@ -317,10 +321,6 @@ struct FrameSync {
 };
 static FrameSync g_frames[3];
 static u32 g_frame_idx;
-// Signalled (value = present sequence) when a presentation blit has finished reading its source image.
-// The blit runs on the present queue, which does not order against the renderer's later writes, so the
-// compositor waits on this before handing the guest buffer back.
-static VkSemaphore g_present_timeline = VK_NULL_HANDLE;
 static u64 g_present_seq = 0;                       // under g_present_lock
 static std::atomic<u64> g_last_image_ticket{0};     // last present_image's blit (0: nothing submitted)
 static std::mutex g_present_lock;
