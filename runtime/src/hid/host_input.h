@@ -88,5 +88,7 @@ bool take_menu_request();
 // Rumble on the active pad, applied by the HID thread. Amplitudes 0..1 (low band -> big motor, high band ->
 // small motor), scaled by Settings > Input > Rumble strength.
 void set_rumble(float low, float high);
+// Short full-amplitude pulse at the current strength, so the Input tab's slider can be felt while it moves.
+void preview_rumble();
 
 }  // namespace hid

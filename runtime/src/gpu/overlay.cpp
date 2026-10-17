@@ -638,9 +638,15 @@ static void tab_input(bool& changed) {
     if (ImGui::Checkbox("Invert right Y", &in.invert_ry)) changed = true;
 
     section("Rumble");
-    if (ImGui::Checkbox("Rumble", &in.rumble)) changed = true;
+    if (ImGui::Checkbox("Rumble", &in.rumble)) {
+        changed = true;
+        if (in.rumble) hid::preview_rumble();
+    }
     ImGui::BeginDisabled(!in.rumble);
-    if (ImGui::SliderInt("Rumble strength", &in.rumble_strength, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    if (ImGui::SliderInt("Rumble strength", &in.rumble_strength, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+        changed = true;
+        hid::preview_rumble();  // pulses at the new strength while the slider moves
+    }
     ImGui::EndDisabled();
     if (pad.connected && !pad.has_rumble) ImGui::TextDisabled("This controller reports no rumble motors.");
 

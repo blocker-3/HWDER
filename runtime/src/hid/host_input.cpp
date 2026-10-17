@@ -36,6 +36,7 @@ RawPad g_raw;  // the HID thread writes it each poll, the overlay reads it
 
 // Rumble the game asked for (from its service threads), applied on the HID thread.
 std::atomic<float> g_rumble_low{0.0f}, g_rumble_high{0.0f};
+std::atomic<u64> g_preview_until{0};  // GetTickCount64() until which preview_rumble's pulse runs
 
 constexpr s16 kTriggerThreshold = 8192;  // ZL/ZR press point, 25% of the travel
 constexpr float kGravity = 9.80665f;
@@ -306,8 +307,9 @@ SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion) {
 void apply_rumble(SdlPad* active) {
     const settings::Input& cfg = settings::input();
     const float k = cfg.rumble ? cfg.rumble_strength / 100.0f : 0.0f;
-    const u16 lo = (u16)(std::clamp(g_rumble_low.load(), 0.0f, 1.0f) * k * 65535.0f);
-    const u16 hi = (u16)(std::clamp(g_rumble_high.load(), 0.0f, 1.0f) * k * 65535.0f);
+    const bool preview = GetTickCount64() < g_preview_until.load();
+    const u16 lo = (u16)((preview ? 1.0f : std::clamp(g_rumble_low.load(), 0.0f, 1.0f)) * k * 65535.0f);
+    const u16 hi = (u16)((preview ? 1.0f : std::clamp(g_rumble_high.load(), 0.0f, 1.0f)) * k * 65535.0f);
     if (g_sdl_ok) {
         const SDL_JoystickID id = active ? active->id : 0;
         if (id != g_rumble_pad) {
@@ -320,6 +322,8 @@ void apply_rumble(SdlPad* active) {
         if (!active || !active->rumble) return;
         // SDL rumble runs for a set time: refresh it while the game keeps it on.
         const u64 now = GetTickCount64();
+        // While the slider drags, send a new preview strength at most every 50 ms.
+        if (preview && now - g_rumble_at < 50) return;
         if (lo != g_rumble_sent[0] || hi != g_rumble_sent[1] || ((lo || hi) && now - g_rumble_at > 1000)) {
             SDL_RumbleGamepad(active->gp, lo, hi, (lo || hi) ? 2000 : 0);
             g_rumble_sent[0] = lo;
@@ -558,6 +562,8 @@ RawPad raw_pad() {
 
 void set_game_input_blocked(bool blocked) { g_blocked = blocked; }
 bool take_menu_request() { return g_menu_request.exchange(false); }
+
+void preview_rumble() { g_preview_until = GetTickCount64() + 250; }
 
 void set_rumble(float low, float high) {
     g_rumble_low = low;
