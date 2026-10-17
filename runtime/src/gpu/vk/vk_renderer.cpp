@@ -9,6 +9,7 @@
 //  * uniform, vertex and index data are copied per draw into a host-visible ring (snapshot semantics
 //    match the GPU's: constant buffer updates between draws are honored).
 #include "gpu/settings.h"
+#include "interp/camera.h"
 #include <unordered_set>
 #include <deque>
 #include <windows.h>
@@ -738,9 +739,14 @@ private:
         VkDescriptorType type;
         u32 binding, count, first;  // index into buffers/images/texels of the StageRec
     };
+    struct CamHit {  // a run of the frame's camera matrix in a constant buffer (camera mode)
+        u32 word;        // float index into CbufRec::data
+        u8 mat, layout;  // kCamView/kCamViewProj, kCamLayouts index
+    };
     struct CbufRec {
         u32 buffer_index;      // StageRec::buffers entry to repoint
         std::vector<u8> data;  // staged bytes (what the shader saw)
+        std::vector<CamHit> cam_hits;
     };
     struct TexelRec {
         u32 index;  // StageRec::texels entry to replace
@@ -817,6 +823,18 @@ private:
     u32 saved_w_ = 0, saved_h_ = 0;
     VkFormat saved_fmt_ = VK_FORMAT_UNDEFINED, pres_fmt_ = VK_FORMAT_UNDEFINED;
     void replay_frame(float t);
+    // ---- camera mode (HWDER_INTERP_MODE=camera): replays substitute only the camera's view and
+    // viewProj, found in the frame's constant buffers by exact match against the tick snapshots.
+    static constexpr int kCamView = 0, kCamViewProj = 1, kCamLayouts = 4;
+    struct CamFrame {
+        bool matched = false, have_prev = false;
+        interp::CamSnap cur, prev;  // the frame's tick and the tick before it
+    };
+    CamFrame cam_frame_;
+    bool cam_replay_ = false;          // replay_draw substitutes cam_words_ at the CamHits
+    u32 cam_words_[2][kCamLayouts][16];
+    void cam_identify();
+    bool cam_prepare(float alpha);
     void replay_draw(const DrawRec& d, const DrawRec* prev, float t);
     void replay_clear(const ClearRec& c);
     bool ensure_saved_image(u32 w, u32 h, VkFormat fmt);
@@ -2913,6 +2931,15 @@ void VkRenderer::replay_draw(const DrawRec& d, const DrawRec* prev, float t) {
                                  prev->stages[s].cbufs[ci].data.size() == cr.data.size())
                                     ? &prev->stages[s].cbufs[ci]
                                     : nullptr;
+            if (cam_replay_) {  // camera mode: the frame's bytes with only the camera matrices replaced
+                if (cr.cam_hits.empty()) continue;
+                Slice sl = g_rec.stage(std::max<u64>(cr.data.size(), 16), props.minUniformBufferOffsetAlignment);
+                memcpy(sl.ptr, cr.data.data(), cr.data.size());
+                for (const CamHit& h : cr.cam_hits)
+                    memcpy(sl.ptr + h.word * 4, cam_words_[h.mat][h.layout], (h.layout < 2 ? 16 : 12) * 4);
+                bufs[cr.buffer_index] = {sl.buf, sl.offset, (VkDeviceSize)cr.data.size()};
+                continue;
+            }
             if (!pr) continue;  // unchanged binding: the original slice is pinned in the ring
             Slice sl = g_rec.stage(std::max<u64>(cr.data.size(), 16), props.minUniformBufferOffsetAlignment);
             lerp_cbuf(pr->data.data(), cr.data.data(), sl.ptr, cr.data.size(), t);
@@ -2996,8 +3023,9 @@ void VkRenderer::replay_draw(const DrawRec& d, const DrawRec* prev, float t) {
 void VkRenderer::replay_frame(float t) {
     // match draws of the previous frame by signature, in order of occurrence
     std::unordered_map<u64, std::vector<const DrawRec*>> prev_by_key;
-    for (const OpRec& o : rec_prev_)
-        if (!o.is_clear) prev_by_key[o.draw.match_key].push_back(&o.draw);
+    if (!cam_replay_)  // camera mode blends nothing from the previous frame
+        for (const OpRec& o : rec_prev_)
+            if (!o.is_clear) prev_by_key[o.draw.match_key].push_back(&o.draw);
     std::unordered_map<u64, u32> used;
     sync_shadows(rec_frame_);
     for (const OpRec& o : rec_frame_) {
@@ -3013,6 +3041,157 @@ void VkRenderer::replay_frame(float t) {
         }
         replay_draw(o.draw, prev, t);
     }
+}
+
+// The camera matrix in layout l: 0 as stored (row-major 4x4), 1 transposed, 2 the first three rows
+// as stored, 3 the first three rows of the transpose (a column-major 3x4).
+static void cam_layout(const float m[16], int l, u32 out[16]) {
+    float t[16];
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) t[r * 4 + c] = (l & 1) ? m[c * 4 + r] : m[r * 4 + c];
+    memcpy(out, t, (l < 2 ? 16 : 12) * 4);
+}
+
+// Which tick's camera this frame was drawn with: exact search of every constant buffer for each
+// recorded snapshot's view and viewProj (all layouts). The snapshot with the most hits wins; its
+// hits are stored on the CbufRecs for replay_draw to overwrite.
+void VkRenderer::cam_identify() {
+    cam_frame_ = CamFrame{};
+    interp::CamSnap snaps[8];
+    int ns = interp::snapshots(snaps, 8);
+    struct Pat {
+        u32 w[16];
+        u8 len, snap, mat, layout;
+    };
+    std::vector<Pat> pats;
+    for (int i = 0; i < ns; i++)
+        for (int m = 0; m < 2; m++)
+            for (int l = 0; l < kCamLayouts; l++) {
+                Pat p{};
+                p.len = l < 2 ? 16 : 12;
+                p.snap = (u8)i, p.mat = (u8)m, p.layout = (u8)l;
+                cam_layout(m == kCamView ? snaps[i].view : snaps[i].viewproj, l, p.w);
+                // Skip near-trivial matrices (an identity-like view would match every identity model matrix).
+                int distinct = 0;
+                for (int k = 0; k < p.len; k++) {
+                    float fl;
+                    memcpy(&fl, &p.w[k], 4);
+                    if (fl != 0.0f && fl != 1.0f && fl != -1.0f) distinct++;
+                }
+                if (distinct >= 4) pats.push_back(p);
+            }
+    // 16-word layouts before their 12-word prefixes
+    std::sort(pats.begin(), pats.end(), [](const Pat& a, const Pat& b) { return a.w[0] != b.w[0] ? a.w[0] < b.w[0] : a.len > b.len; });
+    u64 bloom[64] = {};
+    auto bslot = [](u32 w) { return (u32)((w * 0x9E3779B1u) >> 20); };  // 4096 bits
+    for (const Pat& p : pats) bloom[bslot(p.w[0]) >> 6] |= 1ull << (bslot(p.w[0]) & 63);
+    struct Found {
+        CbufRec* cr;
+        CamHit h;
+        u8 snap;
+    };
+    std::vector<Found> found;
+    u32 per_snap[8] = {};
+    u64 bytes = 0, nbufs = 0;
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    for (OpRec& o : rec_frame_) {
+        if (o.is_clear) continue;
+        for (u32 s = 0; s < 5; s++) {
+            if (!o.draw.has_stage[s]) continue;
+            for (CbufRec& cr : o.draw.stages[s].cbufs) {
+                cr.cam_hits.clear();
+                if (pats.empty()) continue;
+                nbufs++;
+                bytes += cr.data.size();
+                const u32* w = (const u32*)cr.data.data();
+                size_t n = cr.data.size() / 4;
+                for (size_t i = 0; i + 12 <= n; i++) {
+                    u32 b = bslot(w[i]);
+                    if (!(bloom[b >> 6] & (1ull << (b & 63)))) continue;
+                    auto it = std::lower_bound(pats.begin(), pats.end(), w[i], [](const Pat& p, u32 v) { return p.w[0] < v; });
+                    for (; it != pats.end() && it->w[0] == w[i]; ++it) {
+                        if (i + it->len > n || memcmp(w + i, it->w, it->len * 4) != 0) continue;
+                        found.push_back({&cr, {(u32)i, it->mat, it->layout}, it->snap});
+                        per_snap[it->snap]++;
+                        i += it->len - 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    int best = -1;
+    for (int i = 0; i < ns; i++)
+        if (per_snap[i] && (best < 0 || per_snap[i] > per_snap[best])) best = i;
+    u32 hits[2][kCamLayouts] = {};
+    if (best >= 0) {
+        cam_frame_.matched = true;
+        cam_frame_.cur = snaps[best];
+        for (int i = 0; i < ns; i++)
+            if (snaps[i].tick + 1 == snaps[best].tick) {
+                cam_frame_.have_prev = true;
+                cam_frame_.prev = snaps[i];
+            }
+        for (const Found& fd : found)
+            if (fd.snap == best) {
+                fd.cr->cam_hits.push_back(fd.h);
+                hits[fd.h.mat][fd.h.layout]++;
+            }
+    }
+    // HWDER_CAM_LOG: match coverage once per second
+    if (interp::cam_log_every() > 0) {
+        static u64 frames, matched, other_frames, lag[3], sum_hits[2][kCamLayouts], sum_bytes, sum_bufs;
+        static double scan_ms, scan_max, last_ms;
+        double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+        double now = t1.QuadPart * 1000.0 / f.QuadPart;
+        frames++;
+        if (best >= 0) {
+            matched++;
+            lag[std::min(best, 2)]++;
+            for (int i = 0; i < ns; i++)
+                if (i != best && per_snap[i]) {
+                    other_frames++;
+                    break;
+                }
+        }
+        for (int m = 0; m < 2; m++)
+            for (int l = 0; l < kCamLayouts; l++) sum_hits[m][l] += hits[m][l];
+        sum_bytes += bytes;
+        sum_bufs += nbufs;
+        scan_ms += ms;
+        scan_max = std::max(scan_max, ms);
+        if (!last_ms) last_ms = now;
+        if (now - last_ms >= 1000.0) {
+            double n = (double)frames;
+            hw_log("cam: match: %llu/%llu frames matched (tick lag 0/1/2+: %llu/%llu/%llu, %llu also hold another tick) | "
+                   "hits per frame: view 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, viewProj 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f | "
+                   "scan %.0f cbufs %.0f KiB per frame, %.2f ms avg %.2f max",
+                   (unsigned long long)matched, (unsigned long long)frames, (unsigned long long)lag[0], (unsigned long long)lag[1],
+                   (unsigned long long)lag[2], (unsigned long long)other_frames, sum_hits[0][0] / n, sum_hits[0][1] / n,
+                   sum_hits[0][2] / n, sum_hits[0][3] / n, sum_hits[1][0] / n, sum_hits[1][1] / n, sum_hits[1][2] / n,
+                   sum_hits[1][3] / n, sum_bufs / n, sum_bytes / n / 1024.0, scan_ms / n, scan_max);
+            frames = matched = other_frames = sum_bytes = sum_bufs = 0;
+            memset(lag, 0, sizeof(lag));
+            memset(sum_hits, 0, sizeof(sum_hits));
+            scan_ms = scan_max = 0;
+            last_ms = now;
+        }
+    }
+}
+
+// The interpolated camera for one replay, in every layout. False: show the tick unblended.
+bool VkRenderer::cam_prepare(float alpha) {
+    if (!cam_frame_.matched || !cam_frame_.have_prev) return false;
+    float view[16], vp[16];
+    if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, view, vp)) return false;
+    for (int l = 0; l < kCamLayouts; l++) {
+        cam_layout(view, l, cam_words_[kCamView][l]);
+        cam_layout(vp, l, cam_words_[kCamViewProj][l]);
+    }
+    return true;
 }
 
 bool VkRenderer::ensure_saved_image(u32 w, u32 h, VkFormat fmt) {
@@ -3608,9 +3787,10 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     SlowTimer timer("present", 60.0);
     ProfScope ps(kProfPresent);
     int out_hz = settings::kInterpEnabled ? settings::video().interp_hz : 0;
-    if (out_hz < 0) out_hz = (int)display::monitor_hz();
-    static const char* env_interp = getenv("HWDER_INTERP");
+    static const char* env_interp = getenv("HWDER_INTERP");  // Hz, or -1 for the monitor's rate
     if (env_interp) out_hz = atoi(env_interp);
+    if (out_hz < 0) out_hz = (int)display::monitor_hz();
+    const bool cam_mode = interp::camera_mode();
     std::unique_lock<std::recursive_mutex> interp_lock(m_);
     Image* final_img = nullptr;
     if (out_hz > 0 && image) {
@@ -3639,20 +3819,22 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         int k = (int)interp_acc_;
         interp_acc_ -= k;
         if (k < 1) k = 1;
-        bool can = recording_ && !rec_prev_.empty() && !rec_frame_.empty() && tc_.destroy_count == rec_destroy_count_ &&
-                   g_s.pin_serial != 0 && !g_s.replay_unsafe && !prev_unsafe_ && final_img && shadows_.count(final_img) == 0 + shadows_.count(final_img);
+        // Camera mode reads nothing from the previous frame: rec_prev_ and its safety don't matter.
+        bool can = recording_ && (cam_mode || (!rec_prev_.empty() && !prev_unsafe_)) && !rec_frame_.empty() &&
+                   tc_.destroy_count == rec_destroy_count_ && g_s.pin_serial != 0 && !g_s.replay_unsafe && final_img &&
+                   shadows_.count(final_img) == 0 + shadows_.count(final_img);
         {
             static u32 skipped_frames = 0, total_frames = 0, why[8] = {};
             total_frames++;
             if (!can) {
                 skipped_frames++;
                 if (!recording_) why[0]++;
-                else if (rec_prev_.empty()) why[1]++;
+                else if (!cam_mode && rec_prev_.empty()) why[1]++;
                 else if (rec_frame_.empty()) why[2]++;
                 else if (tc_.destroy_count != rec_destroy_count_) why[3]++;
                 else if (g_s.pin_serial == 0) why[4]++;
                 else if (g_s.replay_unsafe) why[5]++;
-                else if (prev_unsafe_) why[6]++;
+                else if (!cam_mode && prev_unsafe_) why[6]++;
                 else why[7]++;
             }
             if (total_frames % 600 == 0) {
@@ -3663,11 +3845,47 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             }
         }
         interp_lock.unlock();  // the replays render into shadow targets: the renderer thread may continue
+        // rec_frame_ belongs to this thread until the swap below: scan it unlocked.
+        if (cam_mode && !rec_frame_.empty()) cam_identify();
         for (int j = 1; j < k; j++) {
             VkImage out = image;
-            if (can) {
+            bool replay = can;
+            if (can && cam_mode) {
+                // Render one tick behind: this frame's tick b is shown unblended at the last of its k
+                // output slots, so output j is (k - j) slots earlier on the game clock, measured
+                // against the host-time spacing of ticks a and b (not the fixed j/k).
+                const interp::CamSnap& a = cam_frame_.prev;
+                const interp::CamSnap& b = cam_frame_.cur;
+                double dt = b.t_ms - a.t_ms;
+                float alpha = dt > 0 ? (float)std::clamp(1.0 - (k - j) * (1000.0 / out_hz) / dt, 0.0, 1.0) : 1.0f;
+                replay = cam_prepare(alpha);
+                // HWDER_CAM_LOG: replay outcomes once per second
+                if (interp::cam_log_every() > 0) {
+                    static u64 blended, nomatch, noprev, gap, cut, last;
+                    static double asum;
+                    if (replay) blended++, asum += alpha;
+                    else if (!cam_frame_.matched) nomatch++;
+                    else if (!cam_frame_.have_prev) noprev++;
+                    else if (dt > 250.0 || b.tick != a.tick + 1) gap++;
+                    else cut++;  // a cut, a projection change or alpha 1
+                    u64 now = GetTickCount64();
+                    if (!last) last = now;
+                    if (now - last >= 1000) {
+                        hw_log("cam: replays: %llu blended (mean alpha %.2f), unblended: %llu no match, %llu no previous tick, "
+                               "%llu tick gap, %llu cut/projection change/alpha 1",
+                               (unsigned long long)blended, blended ? asum / blended : 0.0, (unsigned long long)nomatch,
+                               (unsigned long long)noprev, (unsigned long long)gap, (unsigned long long)cut);
+                        blended = nomatch = noprev = gap = cut = 0;
+                        asum = 0;
+                        last = now;
+                    }
+                }
+            }
+            if (replay) {
                 std::lock_guard<std::recursive_mutex> l(m_);  // the recorder itself is shared
+                cam_replay_ = cam_mode;
                 replay_frame((float)j / k);
+                cam_replay_ = false;
                 out = shadow_of(final_img)->image;
                 static const char* strip_dir2 = getenv("HWDER_FILMSTRIP");
                 if (strip_dir2) filmstrip_capture(out, w, h, strip_dir2);
