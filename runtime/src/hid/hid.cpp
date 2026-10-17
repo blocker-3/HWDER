@@ -14,6 +14,7 @@
 #include "service/common.h"
 
 extern "C" u64 hw_cntvct();
+extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last presented frame
 
 namespace ipc {
 
@@ -278,10 +279,66 @@ void update_thread() {
     hid::HostInput in;
     // HWDER_AUTOPLAY=1: tap A every 1.5 s (after 5 s) so unattended runs advance through the menus.
     static const bool autoplay = getenv("HWDER_AUTOPLAY") != nullptr;
+    // HWDER_AUTOPLAY=2: into a battle and keep fighting (performance runs): A until the battle has
+    // loaded, + (loading tips) followed by B (closes the pause menu if + opened one), then move and attack.
+    // No cutscene-skip sequence: its Left press moved the pre-battle menu's cursor off "Start Battle".
+    static const bool battle = autoplay && atoi(getenv("HWDER_AUTOPLAY")) == 2;
     const u64 t0 = GetTickCount64();
     for (;;) {
         hid::poll_host_input(in);
-        if (autoplay) {
+        if (battle) {
+            u64 t = GetTickCount64() - t0;
+            // Every 3 s: B (leaves a sub-screen such as Battlefield Info; nothing on the pre-battle menu),
+            // Up x3 (the menu's top entry is Start Battle), A (also: continue text, attack in battle).
+            u64 c = t % 3000;
+            // A 3D battle frame has hundreds of draws; once one is up, only fight (menu presses would
+            // open the pause menu's sub-screens).
+            static u64 battle_since = 0;
+            if (hw_last_frame_draws.load() > 450) {
+                if (!battle_since) battle_since = t;
+            } else if (hw_last_frame_draws.load() < 150) {
+                battle_since = 0;
+            }
+            const bool in_battle = battle_since && t - battle_since > 2000;
+            // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of
+            // + (skip prompt), Left (Yes), A, then A twice for the menus (the default entries lead into Legend Mode).
+            static const bool skip = getenv("HWDER_AUTOPLAY_SKIP") != nullptr;
+            if (skip && t > 8000 && !in_battle) {
+                u64 s6 = t % 6000;
+                // + only on movie/dialogue frames (few draws): on Select Mode it opens the Manual applet,
+                // which hangs.
+                static bool skip_armed = false;  // + was pressed this cycle: Left selects Yes on its prompt
+                if (s6 < 120) {
+                    // After Select Mode (the first menu-sized frame plus 10 s) + also continues the
+                    // tutorial pop-ups.
+                    static u64 menu_since = 0;
+                    if (!menu_since && hw_last_frame_draws.load() >= 40) menu_since = t;
+                    if (s6 < 10) skip_armed = hw_last_frame_draws.load() < 30 || (menu_since && t - menu_since > 10000);
+                    if (skip_armed) in.pad.buttons |= hid::kBtnPlus;
+                }
+                if (s6 >= 1000 && s6 < 1120 && skip_armed) in.pad.buttons |= hid::kBtnLeft;
+                if (s6 >= 1500 && s6 < 1620) in.pad.buttons |= hid::kBtnA;
+                if (s6 >= 3000 && s6 < 3120) in.pad.buttons |= hid::kBtnA;
+                if (s6 >= 4600 && s6 < 4720) in.pad.buttons |= hid::kBtnA;
+            }
+            if (!skip && t > 5000 && !in_battle) {
+                if (t > 25000 && c < 100) in.pad.buttons |= hid::kBtnB;
+                if (t > 25000 && ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)))
+                    in.pad.buttons |= hid::kBtnUp;
+                if (c >= 1500 && c < 1620) in.pad.buttons |= hid::kBtnA;
+            }
+            if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pad.buttons |= hid::kBtnPlus;  // loading tips
+            static const bool idle_in_battle = getenv("HWDER_AUTOPLAY_IDLE") != nullptr;  // experiments: no input in battle
+            if (in_battle && !idle_in_battle) {
+                if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
+                in.pad.ly = 20000;
+                in.pad.lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
+                // HWDER_AUTOPLAY_CAM=1: also turn the camera with the right stick (2 s right, 2 s left,
+                // 2 s still), for camera interpolation tests.
+                static const bool cam = getenv("HWDER_AUTOPLAY_CAM") != nullptr;
+                if (cam) in.pad.rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
+            }
+        } else if (autoplay) {
             u64 t = GetTickCount64() - t0;
             u64 c = t % 4000;
             // Generic advance: A every 1.5 s. Skip cutscenes: + opens "Skip cutscene?", Left selects Yes, A confirms.
