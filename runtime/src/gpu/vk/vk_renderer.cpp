@@ -860,6 +860,7 @@ private:
     std::deque<PipeJob> pipe_jobs_;
     std::vector<std::pair<u64, VkPipeline>> pipe_done_;
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
+    std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
     bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
@@ -915,7 +916,7 @@ private:
     };
     std::unordered_map<u64, SliceEntry> vb_cache_;
     struct IdxRange {
-        u64 sample;
+        u64 serial, sample;  // valid only within the submission that scanned it (the sample covers 128 bytes)
         u32 vmin, vmax;
     };
     std::unordered_map<u64, IdxRange> idx_range_cache_;  // index buffer scan results (vmin/vmax)
@@ -1380,8 +1381,9 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     {   // adopt pipelines finished by the worker threads
         std::lock_guard<std::mutex> l(pipe_m_);
         for (auto& [jh, jp] : pipe_done_) {
-            pipelines_[jh] = jp;
             pipe_pending_.erase(jh);
+            if (!jp && pipe_retried_.insert(jh).second) continue;  // not cached: the next draw retries synchronously
+            pipelines_[jh] = jp;
         }
         pipe_done_.clear();
     }
@@ -1394,7 +1396,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // Light frames (menus, the first frames of a scene) compile synchronously: a 100 ms hitch behind a
     // fade is invisible, while skipping their draws shows a half-drawn scene. Heavy battle frames go
     // async so a new effect's pipeline does not stall the whole frame.
-    if (sync_pipes || st_.draws < 64) {
+    if (sync_pipes || st_.draws < 64 || pipe_retried_.count(h)) {
         VkPipeline pipe = create_pipeline(prog, key);
         pipelines_[h] = pipe;
         return pipe;
@@ -2082,7 +2084,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             ikey = hash_bytes(kw, sizeof(kw), 0);
             isample = sample_hash(idx_src, (u64)p.count * isize);
             auto cit = idx_range_cache_.find(ikey);
-            if (cit != idx_range_cache_.end() && cit->second.sample == isample) cached = &cit->second;
+            if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample)
+                cached = &cit->second;
         }
         if (cached) {
             st_.idx_hit++;
@@ -2101,7 +2104,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             if (vmin == 0xFFFFFFFF) vmin = vmax = 0;
             if (!inline_idx) {
                 if (idx_range_cache_.size() > 32768) idx_range_cache_.clear();
-                idx_range_cache_[ikey] = {isample, vmin, vmax};
+                idx_range_cache_[ikey] = {g_rec.serial(), isample, vmin, vmax};
             }
         }
         vmin += p.base_vertex;
