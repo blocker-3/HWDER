@@ -3258,10 +3258,18 @@ void VkRenderer::cam_identify() {
 }
 
 // The interpolated camera for one replay, in every layout. False: show the tick unblended.
+// HWDER_CAM_REPLAY_ONLY=1 (test): replays use the tick's own camera, so each replay should look
+// exactly like the real frame; any flashing left comes from the replay itself, not the blend.
 bool VkRenderer::cam_prepare(float alpha) {
     if (!cam_frame_.matched || !cam_frame_.have_prev) return false;
+    static const bool replay_only = getenv("HWDER_CAM_REPLAY_ONLY") && atoi(getenv("HWDER_CAM_REPLAY_ONLY")) != 0;
     float mats[kCamMats][16];
-    if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, mats[kCamView], mats[kCamViewProj])) return false;
+    if (replay_only) {
+        memcpy(mats[kCamView], cam_frame_.cur.view, 64);
+        memcpy(mats[kCamViewProj], cam_frame_.cur.viewproj, 64);
+    } else if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, mats[kCamView], mats[kCamViewProj])) {
+        return false;
+    }
     interp::view_inverse(mats[kCamView], mats[kCamInv]);
     for (int m = 0; m < kCamMats; m++)
         for (int l = 0; l < kCamLayouts; l++) cam_layout(mats[m], l, cam_words_[m][l]);
