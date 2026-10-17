@@ -103,10 +103,13 @@ void game_section() {
     if (inf.status == Status::Ok) status_line(kOk, "%s", "Ready");
     else if (!inf.nsp_found) status_line(kError, "%s", "Not found");
     else if (inf.status == Status::NoKeys) status_line(kPending, "%s", "Found - it is checked once your prod.keys is found");
-    else if (inf.status == Status::WrongTitle) status_line(kError, "%s", "Not Hyrule Warriors: Definitive Edition");
-    else
+    else if (inf.status == Status::WrongTitle) {
+        char line[64];
+        snprintf(line, sizeof(line), "%016llX", (unsigned long long)inf.title_id);
+        status_line(kError, "Not Hyrule Warriors: Definitive Edition (title %s)", line);
+    } else
         status_line(kError, inf.error.find("key") != std::string::npos ? "Can't decrypt: %s" : "Can't read: %s", inf.error);
-    if (inf.status == Status::WrongTitle) ImGui::TextWrapped("The file is %s.", inf.error.c_str());
+    if (inf.status == Status::WrongTitle) ImGui::TextWrapped("Found %s.", inf.error.c_str());
     if (inf.nsp_path.empty()) ImGui::TextDisabled("No .nsp file next to hwder.exe or in its game folder.");
     else ImGui::TextWrapped("%s", inf.nsp_path.c_str());
     if (inf.title_id) {

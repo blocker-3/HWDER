@@ -549,6 +549,7 @@ bool init(const std::string& exe_dir, std::string& error) {
         if (nca.content_type() != 0) continue;
         st->program = std::move(nca);
         found = true;
+        inf.title_source = "program NCA " + e.name + " header";
         hw_log("nsp: program NCA %s (title %016llx, %zu sections)", e.name.c_str(), (unsigned long long)st->program.title_id(),
                st->program.sections().size());
         break;
@@ -557,14 +558,15 @@ bool init(const std::string& exe_dir, std::string& error) {
     inf.title_id = st->program.title_id();
     inf.has_version = read_cnmt_version(*st, files, inf.title_id, inf.version);
     if (inf.has_version) hw_log("nsp: version %u", inf.version);
+    if (inf.has_version) inf.title_source += " (matches the CNMT)";
     if (inf.title_id != kTitleId) {
-        char why[160];
-        if ((inf.title_id & ~0xFFFull) == kTitleId)
-            snprintf(why, sizeof(why), "this is an update or DLC (title %016llX), not the base game %016llX",
-                     (unsigned long long)inf.title_id, (unsigned long long)kTitleId);
-        else
-            snprintf(why, sizeof(why), "title %016llX is not Hyrule Warriors: Definitive Edition (%016llX)",
-                     (unsigned long long)inf.title_id, (unsigned long long)kTitleId);
+        // Updates are the base ID | 0x800; add-on content is the base ID + 0x1000 + index.
+        const char* what = inf.title_id == (kTitleId | 0x800) ? "an update, not the base game"
+                         : (inf.title_id & ~0xFFFull) == kTitleId + 0x1000 ? "add-on content (DLC), not the base game"
+                                                                          : "not Hyrule Warriors: Definitive Edition";
+        char why[512];
+        snprintf(why, sizeof(why), "title %016llX from the %s is %s (expected %016llX)", (unsigned long long)inf.title_id,
+                 inf.title_source.c_str(), what, (unsigned long long)kTitleId);
         return fail(Status::WrongTitle, why);
     }
     for (const Section& s : st->program.sections()) {

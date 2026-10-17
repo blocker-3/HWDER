@@ -9,8 +9,8 @@
 
 namespace hwfs::nsp {
 
-// Hyrule Warriors: Definitive Edition's application (program) ID.
-constexpr uint64_t kTitleId = 0x01002B00111A2000ull;
+// Hyrule Warriors: Definitive Edition's application (program) ID, as in kernel.h and the README.
+constexpr uint64_t kTitleId = 0x0100AE00096EA000ull;
 
 // Paths picked on the startup screen (empty = search). Used after HWDER_NSP / HWDER_KEYS and before
 // the automatic search; a set path that does not exist counts as missing, with no fallback.
@@ -36,6 +36,7 @@ struct Info {
     bool keys_found = false;
     size_t key_count = 0, title_key_count = 0;
     uint64_t title_id = 0;        // program NCA title ID (0 = not read)
+    std::string title_source;     // where title_id was read, e.g. "program NCA <name>.nca header"
     uint32_t version = 0;         // from the CNMT
     bool has_version = false;
     bool nsp_explicit = false, keys_explicit = false;  // set by an env var or the picked path
