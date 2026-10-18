@@ -850,6 +850,9 @@ private:
     };
     CamFrame cam_frame_;
     bool cam_replay_ = false;          // replay_draw substitutes cam_words_ at the CamHits
+    int cur_stage_ = 0;                // stage being bound (cbuf dump)
+    u64 cur_draw_key_ = 0;             // program + vertex/index addresses + counts of the draw being bound
+    u32 dump_draw_ = 0;                // draws so far in the dumped frame
     u32 cam_words_[kCamMats][kCamLayouts][16];
     void cam_identify();
     bool cam_prepare(float alpha);
@@ -899,6 +902,7 @@ private:
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
+    void cbuf_dump(u32 index, u64 va, const u8* data, u64 bytes);
     bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
                         const std::function<u32(u32, u32)>& cbuf, const std::function<bool(u32, u64&, u32&)>& cb_range,
                         const u32* tic_pool_regs, bool linked_tsc, std::vector<std::function<void()>>& post, StageRec* rec_out = nullptr);
@@ -1638,6 +1642,52 @@ bool VkRenderer::read_tic(u64 pool_va, u32 limit, u32 index, u32* out) {
     return true;
 }
 
+
+// HWDER_CBUF_DUMP=<present number> (stage c research): for every draw of that frame, log each bound
+// constant buffer: size, where the newest tick's camera viewProj/view sit (4 layouts), and the offsets
+// of 3x4 affine transforms (three rows of rotation/scale with a translation in the 4th column).
+void VkRenderer::cbuf_dump(u32 index, u64 va, const u8* data, u64 bytes) {
+    static const u64 target = getenv("HWDER_CBUF_DUMP") ? strtoull(getenv("HWDER_CBUF_DUMP"), nullptr, 10) : 0;
+    if (!target || g_s.present_count != target) return;
+    static u64 last_pc = 0;
+    static u32 lines = 0;
+    if (lines > 4000) return;
+    interp::CamSnap cs[1];
+    bool cam = interp::snapshots(cs, 1) == 1;
+    const float* f = (const float*)data;
+    u64 nf = bytes / 4;
+    std::string camhits, aff;
+    if (cam) {
+        float vpt[16], vt[16];
+        for (int r = 0; r < 4; r++)
+            for (int k = 0; k < 4; k++) vpt[r * 4 + k] = cs[0].viewproj[k * 4 + r], vt[r * 4 + k] = cs[0].view[k * 4 + r];
+        const float* pats[4] = {cs[0].viewproj, vpt, cs[0].view, vt};
+        const char* names[4] = {"VP", "VPt", "V", "Vt"};
+        for (u64 i = 0; i + 12 <= nf; i++)
+            for (int k = 0; k < 4; k++)
+                if (!memcmp(f + i, pats[k], 48)) camhits += " " + std::string(names[k]) + "@" + std::to_string(i * 4);
+    }
+    int naff = 0;
+    for (u64 i = 0; i + 12 <= nf; i += 4) {
+        const float* m = f + i;
+        bool ok = true;
+        for (int r = 0; r < 3 && ok; r++) {
+            float n2 = m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2];
+            ok = n2 > 0.04f && n2 < 25.0f && std::isfinite(m[r * 4 + 3]);
+        }
+        if (ok && (std::fabs(m[3]) + std::fabs(m[7]) + std::fabs(m[11])) > 10.0f) {
+            if (naff < 8) aff += " " + std::to_string(i * 4);
+            naff++;
+            i += 8;  // skip the rest of this matrix
+        }
+    }
+    hw_log("cbufdump: draw %u key %016llx stage %d c%u va %llx %llu bytes | camera%s | %d affine 3x4:%s%s", dump_draw_,
+           (unsigned long long)cur_draw_key_, cur_stage_, index, (unsigned long long)va, (unsigned long long)bytes,
+           camhits.empty() ? " -" : camhits.c_str(), naff, aff.c_str(), naff > 8 ? " ..." : "");
+    lines++;
+    (void)last_pc;
+}
+
 // Fill descriptor set `set` for a program's resources. cbuf(index, offset) reads bound cbuf words;
 // cb_range(index, va_lo/hi...) gives the bound range of c[index]. pools: [tic va, tic limit, tsc va, tsc limit].
 bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
@@ -1688,6 +1738,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         dw.buffers.push_back({s.buf, s.offset, bytes});
         add_write(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1).pBufferInfo = &dw.buffers.back();
         if (rec_out) rec_out->cbufs.push_back({(u32)dw.buffers.size() - 1, std::vector<u8>(s.ptr, s.ptr + bytes)});
+        cbuf_dump(c.index, va, s.ptr, bytes);
     }
     // storage buffers
     for (const auto& sb : res.storage_buffers) {
@@ -1698,6 +1749,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         if (bytes > (1u << 20)) VK_LOG_ONCE("vk: storage buffer of %llu KiB bound (copied per draw, written %d)", (unsigned long long)(bytes >> 10), (int)sb.written);
         u8* src = va ? host(va) : nullptr;
         u64 avail = src ? mm_->contiguous_size(va, size) : 0;
+        if (src && avail >= 48) cbuf_dump(100 + sb.cbuf_index, va, src, std::min<u64>(avail, size));
         if (sb.written && src) {
             g_s.replay_unsafe = true;
             Buffer* b = new Buffer(create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true));
@@ -2383,6 +2435,11 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     u32 pools[6] = {regs[TexHeader], regs[TexHeader + 1], regs[TexHeader + 2],
                     regs[TexSampler], regs[TexSampler + 1], regs[TexSampler + 2]};
     bool linked = regs[SamplerBinding] == 1;
+    {
+        u64 kw[5] = {prog_key, addr(regs, VertexStreams + 1), addr(regs, IndexBuffer), ((u64)p.count << 32) | p.first, p.topology};
+        cur_draw_key_ = hash_bytes(kw, sizeof(kw), 0x1e1e);
+        dump_draw_++;
+    }
     for (u32 s = 0; s < 5; s++) {
         if (!prog->stages[s]) continue;
         StageLayout* sl = prog->layouts[s];
@@ -2405,6 +2462,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             size = b.size;
             return b.valid;
         };
+        cur_stage_ = (int)s;
         bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post, oprec ? &oprec->draw.stages[s] : nullptr);
         if (oprec) oprec->draw.has_stage[s] = true;
     }

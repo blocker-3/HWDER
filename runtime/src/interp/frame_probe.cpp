@@ -22,6 +22,7 @@
 extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last presented frame
 extern "C" bool hw_draw_writes_begin(u64 self);
 extern "C" void hw_draw_writes_end(u64 self, double ms);
+extern "C" void hw_mat_probe_after_draw();
 
 namespace {
 
@@ -188,6 +189,7 @@ void around(Ctx* c, void (*orig)(Ctx*)) {
     }
     double t1 = now_ms();
     if (census) hw_draw_writes_end(self, t1 - t0);
+    if (Fn == kSlot5) hw_mat_probe_after_draw();
     event(Fn, self, false, t1, t1 - t0);
 }
 
@@ -209,7 +211,9 @@ PROBE(10002d9878, kB5)
 // camera constants upload (render side)
 PROBE(10003d0a74, kCam)
 // MainThread's frame loop f_10002ad35c: the Draw stage and the calls after it (stage b)
-PROBE(10002acb54, kDrawStage)
+// (the tick hook itself is in interp_draw.cpp; it calls this probed original)
+extern "C" void f_10002acb54_orig(Ctx* c);
+extern "C" void probe_10002acb54(Ctx* c) { around<kDrawStage>(c, f_10002acb54_orig); }
 PROBE(100045de0c, kSignal)
 PROBE(10003d2da4, kD2da4)
 PROBE(10003d7028, kD7028)

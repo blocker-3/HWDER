@@ -156,3 +156,40 @@ faster.
   run in series on MainThread); they slowed the game itself to 53-55 ticks/s. Now a tick that ran
   late (> 17.5 ms) skips the next extra frame, so the game keeps 59-60 ticks/s and the display shows
   a single 60 Hz frame instead (autoplay: 107-118 fps, 0-64 skipped per 295 ticks).
+
+## Steady 120 (2026-10-19)
+
+Per-tick timing (`HWDER_GI_LOG=1`, "gi: per tick"): update 3 ms mean but up to 11-15 ms, extra draw
+~2 ms, real draw ~2 ms; the rest was waiting. The game could only run one frame ahead: the
+compositor freed a swap buffer only when the next frame arrived, so "update + extra draw" had to fit
+one 8.3 ms slot, and every update spike missed it.
+
+* **Triple buffering under stage b** (`vi.cpp`): a buffer goes back to the game as soon as its screen
+  blit has run, so the game can queue two frames ahead; the 120 Hz release grid still paces it. The
+  extra frame's present wait dropped from 4.4 ms to ~0.2 ms.
+* **Skip rule**: a running "behind the 60 Hz grid" budget (decaying, capped) instead of single late
+  ticks, never two skips in a row.
+* Result (autoplay battle): 295 of 295 ticks with an extra frame, frames every 8.47 ms on average
+  (the 120 grid), none over 20 ms; a heavy stretch still skips ~16 of 295.
+* The autoplay script no longer leaves "battle" on a single light frame (it opened the pause menu).
+
+## Stage d: side effects of the extra frame
+
+* Service calls during extra frames (`hw_gi_note_ipc`): only `IHOSBinderDriver#3` (Queue/Dequeue
+  buffer) and `nvdrv#1` (GPU submits), two per frame. No audio, input or file calls: sounds and inputs
+  cannot repeat.
+* Draw-twice experiment and Max's playtest: no effects running at double speed seen.
+* Menus, loading and pause: no extra frames, display back at 60 (see above).
+
+## Stage c research notes
+
+* Per-object constant blocks live in GPU-visible ring pages (e.g. `0x2005124000..`), 0x100 apart,
+  copied by the sdk memcpy `f_10027971c4` during Draw. Each holds a 3x4 world matrix (`mL2W`, rows
+  with the translation in the 4th column) followed by the camera's viewProj (`mW2P`); the shader
+  parameter table at `0x1000bf1718` names the group: `mL2W, mW2P, mW2S, mP2S, mL2WPrev`, then the skin
+  group `mL2P, mL2WT, bSkin, nBLoop`.
+* The ring keeps older frames' blocks, so matching game-side sources by value is ambiguous. Plan:
+  blend in the renderer: tag the extra frame's GPU submissions, keep the previous real frame's
+  constant data per draw (key: program + vertex/index buffers + counts), and blend the 3x4 world
+  matrices in the extra frame's copy. `HWDER_CBUF_DUMP=<present number>` dumps every draw's constant
+  buffers (camera positions, 3x4 transforms) to learn the bone-matrix layout first.

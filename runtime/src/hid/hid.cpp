@@ -293,11 +293,17 @@ void update_thread() {
             u64 c = t % 3000;
             // A 3D battle frame has hundreds of draws; once one is up, only fight (menu presses would
             // open the pause menu's sub-screens).
-            static u64 battle_since = 0;
+            static u64 battle_since = 0, low_since = 0;
             if (hw_last_frame_draws.load() > 450) {
                 if (!battle_since) battle_since = t;
+                low_since = 0;
             } else if (hw_last_frame_draws.load() < 150) {
-                battle_since = 0;
+                // Out of battle only after a full second of small frames: a single light frame (a hitch, a
+                // transition) must not send menu presses into the battle, which opens the pause menu.
+                if (!low_since) low_since = t;
+                if (t - low_since > 1000) battle_since = 0;
+            } else {
+                low_since = 0;
             }
             const bool in_battle = battle_since && t - battle_since > 2000;
             // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of

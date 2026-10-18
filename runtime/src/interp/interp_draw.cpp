@@ -21,7 +21,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <atomic>
+#include <string>
+#include <mutex>
+#include <map>
 
 #include "hwder/runtime.h"
 #include "interp/camera.h"
@@ -29,6 +33,7 @@
 #pragma clang fp contract(off)
 
 extern "C" void probe_100051e9c4(Ctx* c);  // frame_probe.cpp: the original BeginFrame, probed
+extern "C" void probe_10002acb54(Ctx* c);  // frame_probe.cpp: the original battle tick, probed
 extern "C" void f_100057cb78(Ctx* c);      // Camera::Update(cam, view dirty, proj dirty)
 extern "C" void f_1000387f9c(Ctx* c);      // Draw
 extern "C" void f_100052f6bc(Ctx* c);
@@ -49,6 +54,7 @@ namespace {
 constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;  // return address of the BeginFrame call in f_10002acb54
 
 bool g_in_extra = false;  // MainThread only
+DWORD g_extra_tid = 0;    // the thread running the extra frame
 std::atomic<u64> g_last_extra_ms{0};  // GetTickCount64 of the last extra frame
 
 struct Stats {
@@ -56,9 +62,16 @@ struct Stats {
     u64 pair_ticks = 0, pair_gap = 0;  // why no pair: tick not consecutive, > 250 ms apart
     u64 pair_addr = 0;                 // pairs whose ticks used different render buffer slots (blended anyway)
     u64 late = 0;                      // skipped: the previous tick ran late
+    // Per-tick timing (ms): tick entry -> BeginFrame (update jobs), extra frame's draw part and present
+    // part (includes DequeueBuffer's wait), BeginFrame -> tick exit (real frame), tick exit -> next entry.
+    double t_update = 0, t_xdraw = 0, t_xpresent = 0, t_real = 0, t_loop = 0;
+    double m_update = 0, m_xdraw = 0, m_xpresent = 0, m_real = 0, m_loop = 0;
+    u64 ticks = 0;
     double ms = 0;
 };
 Stats g_st;
+
+void report_ipc();
 
 void report() {
     static const bool on = getenv("HWDER_GI_LOG") != nullptr;
@@ -69,11 +82,29 @@ void report() {
     if (on)
         hw_log("gi: %llu extra frames (mean %.2f ms each, %llu without a present), skipped: %llu begin failed, "
                "%llu no previous tick (%llu not consecutive, %llu gap), %llu cut/projection change, "
-               "%llu camera moved since its tick, %llu previous tick late; %llu pairs across buffer slots",
+               "%llu camera moved since its tick, %llu behind the 60 Hz grid; %llu pairs across buffer slots",
                g_st.extra, g_st.extra ? g_st.ms / g_st.extra : 0.0, g_st.no_present, g_st.begin_failed, g_st.no_pair,
                g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
+    if (on && g_st.ticks)
+        hw_log("gi: per tick (mean/max ms): update %.2f/%.1f, extra draw %.2f/%.1f, extra present %.2f/%.1f, "
+               "real frame %.2f/%.1f, loop %.2f/%.1f", g_st.t_update / g_st.ticks, g_st.m_update,
+               g_st.t_xdraw / g_st.ticks, g_st.m_xdraw, g_st.t_xpresent / g_st.ticks, g_st.m_xpresent,
+               g_st.t_real / g_st.ticks, g_st.m_real, g_st.t_loop / g_st.ticks, g_st.m_loop);
     g_st = Stats{};
+    if (on) report_ipc();
 }
+
+double now_ms() {
+    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart * 1000.0 / f.QuadPart;
+}
+void add(double& sum, double& mx, double v) {
+    sum += v;
+    if (v > mx) mx = v;
+}
+double g_tick_in = 0, g_tick_out = 0, g_begin = 0, g_xdraw = 0, g_xpresent = 0;
 
 float dist(const float a[3], const float b[3]) {
     float d0 = a[0] - b[0], d1 = a[1] - b[1], d2 = a[2] - b[2];
@@ -139,6 +170,7 @@ void extra_frame(const Ctx* c) {
     u.x[2] = 1;
     call(&u, f_100057cb78, 0);
 
+    g_extra_tid = GetCurrentThreadId();
     g_in_extra = true;
     Ctx e = *c;
     const u64 scene = c->x[19], state = c->x[20], dev = c->x[21];
@@ -170,6 +202,7 @@ void extra_frame(const Ctx* c) {
         e.x[1] = 1;
         ok = call(&e, f_100051ea20, 0x10002ACDECULL);
     }
+    g_xdraw = now_ms();
     if (ok) {
         u64 skip_present = *GUESTP(u8, *GUESTP(u64, state + 544) + 0x2d420);
         if (skip_present) {
@@ -181,6 +214,7 @@ void extra_frame(const Ctx* c) {
         }
     }
     g_in_extra = false;
+    g_xpresent = now_ms();
 
     memcpy(cam, saved, sizeof saved);
     QueryPerformanceCounter(&t1);
@@ -190,6 +224,28 @@ void extra_frame(const Ctx* c) {
 }
 
 }  // namespace
+
+extern "C" bool hw_game_interp_on() { return interp::game_interp(); }
+
+// Stage d: service calls the game makes from inside an extra frame (sound, input, files would be side
+// effects that a second frame per tick repeats). Counted per service and command, logged every 5 s.
+namespace {
+std::mutex g_ipc_m;
+std::map<std::string, u64> g_ipc_extra;
+void report_ipc() {
+    std::lock_guard<std::mutex> l(g_ipc_m);
+    if (g_ipc_extra.empty()) return;
+    std::string sum;
+    for (auto& [k, n] : g_ipc_extra) sum += " " + k + " x" + std::to_string(n);
+    hw_log("gi: service calls during extra frames:%s", sum.c_str());
+    g_ipc_extra.clear();
+}
+}  // namespace
+extern "C" void hw_gi_note_ipc(const char* service, u32 command) {
+    if (!g_in_extra || GetCurrentThreadId() != g_extra_tid) return;
+    std::lock_guard<std::mutex> l(g_ipc_m);
+    g_ipc_extra[std::string(service) + "#" + std::to_string(command)]++;
+}
 
 // display.cpp's frame limiter: with HWDER_GAME_INTERP on, release frames at 60 Hz whenever the game
 // has not drawn an in-between frame for 100 ms (menus, loading, pause), so frame-locked screens keep
@@ -202,23 +258,52 @@ extern "C" bool hw_game_interp_hold_60() {
 // the extra frame; menus and loading screens draw through other paths and stay at one frame per tick.
 extern "C" void f_100051e9c4(Ctx* c) {
     if (interp::game_interp() && !g_in_extra && c->x[30] == kBeginFrameRet) {
-        // Game speed first: the game is frame-locked, so when the previous tick (BeginFrame to BeginFrame)
-        // took longer than its 16.7 ms the extra frame is what made it late. Skip one, then try again.
+        // Game speed first: the game is frame-locked, so when ticks fall behind 60 per second the extra
+        // frames are what slow it down. Track how far behind the 16.67 ms grid the ticks are (with triple
+        // buffering single ticks jitter without the game being late) and skip an extra frame while behind.
         static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
         static LARGE_INTEGER prev;
-        static bool skipped_last = false;
+        static double debt = 0;
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         double dt = prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0.0;
         prev = now;
-        if (dt > 17.5 && dt < 100.0 && !skipped_last) {
+        static bool skipped_last = false;
+        if (dt > 100.0) debt = 0;  // a pause or load, not lateness
+        else if (dt > 0) debt = std::min(50.0, std::max(0.0, debt * 0.95 + dt - 1000.0 / 60.0));
+        // Never two ticks in a row: a skipped tick saves about half a tick, and the display must keep
+        // seeing extra frames or it falls back to 60 Hz release.
+        const bool behind = debt > 8.0 && !skipped_last;
+        if (behind) debt = std::max(0.0, debt - 1000.0 / 120.0);
+        skipped_last = behind;
+        g_begin = now_ms();
+        g_xdraw = g_xpresent = g_begin;
+        if (behind) {
             g_st.late++;
-            skipped_last = true;
         } else {
-            skipped_last = false;
             extra_frame(c);
+        }
+        if (g_tick_in > 0) {
+            g_st.ticks++;
+            add(g_st.t_update, g_st.m_update, g_begin - g_tick_in);
+            add(g_st.t_xdraw, g_st.m_xdraw, g_xdraw - g_begin);
+            add(g_st.t_xpresent, g_st.m_xpresent, g_xpresent - g_xdraw);
         }
         report();
     }
     probe_100051e9c4(c);
+}
+
+// Hook (tools/recomp/hooks.txt): the battle tick on MainThread, for the per-tick timing above.
+extern "C" void f_10002acb54(Ctx* c) {
+    if (!interp::game_interp()) {
+        probe_10002acb54(c);
+        return;
+    }
+    double in = now_ms();
+    if (g_tick_out > 0 && in - g_tick_out < 100.0) add(g_st.t_loop, g_st.m_loop, in - g_tick_out);
+    g_tick_in = in;
+    probe_10002acb54(c);
+    g_tick_out = now_ms();
+    if (g_xpresent > 0 && g_tick_out - g_xpresent < 100.0) add(g_st.t_real, g_st.m_real, g_tick_out - g_xpresent);
 }
