@@ -1,3 +1,5 @@
 # Guest functions overridden by the runtime (see gen_main.py --hooks). The generator emits each
 # one's body as f_<addr>_orig and the runtime provides f_<addr>.
 0x100057cee0  # main: Camera::BuildProj (runtime/src/game/widescreen.cpp)
+0x10003d0a74  # main: post effect uniforms incl. depth of field (runtime/src/game/post_effects.cpp)
+0x10003d0928  # main: post effect SetBlurParam, radial blur (runtime/src/game/post_effects.cpp)
