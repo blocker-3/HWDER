@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 
 #include "hwder/runtime.h"
 #include "interp/camera.h"
@@ -48,11 +49,13 @@ namespace {
 constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;  // return address of the BeginFrame call in f_10002acb54
 
 bool g_in_extra = false;  // MainThread only
+std::atomic<u64> g_last_extra_ms{0};  // GetTickCount64 of the last extra frame
 
 struct Stats {
     u64 extra = 0, begin_failed = 0, no_pair = 0, cut = 0, mismatch = 0, no_present = 0;
     u64 pair_ticks = 0, pair_gap = 0;  // why no pair: tick not consecutive, > 250 ms apart
     u64 pair_addr = 0;                 // pairs whose ticks used different render buffer slots (blended anyway)
+    u64 late = 0;                      // skipped: the previous tick ran late
     double ms = 0;
 };
 Stats g_st;
@@ -66,9 +69,9 @@ void report() {
     if (on)
         hw_log("gi: %llu extra frames (mean %.2f ms each, %llu without a present), skipped: %llu begin failed, "
                "%llu no previous tick (%llu not consecutive, %llu gap), %llu cut/projection change, "
-               "%llu camera moved since its tick; %llu pairs across buffer slots",
+               "%llu camera moved since its tick, %llu previous tick late; %llu pairs across buffer slots",
                g_st.extra, g_st.extra ? g_st.ms / g_st.extra : 0.0, g_st.no_present, g_st.begin_failed, g_st.no_pair,
-               g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.pair_addr);
+               g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
     g_st = Stats{};
 }
 
@@ -181,17 +184,40 @@ void extra_frame(const Ctx* c) {
 
     memcpy(cam, saved, sizeof saved);
     QueryPerformanceCounter(&t1);
+    g_last_extra_ms = GetTickCount64();
     g_st.extra++;
     g_st.ms += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
 }
 
 }  // namespace
 
+// display.cpp's frame limiter: with HWDER_GAME_INTERP on, release frames at 60 Hz whenever the game
+// has not drawn an in-between frame for 100 ms (menus, loading, pause), so frame-locked screens keep
+// their speed.
+extern "C" bool hw_game_interp_hold_60() {
+    return interp::game_interp() && GetTickCount64() - g_last_extra_ms.load() > 100;
+}
+
 // Hook (tools/recomp/hooks.txt): BeginFrame. Only the battle tick's call (from f_10002acb54) gets
 // the extra frame; menus and loading screens draw through other paths and stay at one frame per tick.
 extern "C" void f_100051e9c4(Ctx* c) {
     if (interp::game_interp() && !g_in_extra && c->x[30] == kBeginFrameRet) {
-        extra_frame(c);
+        // Game speed first: the game is frame-locked, so when the previous tick (BeginFrame to BeginFrame)
+        // took longer than its 16.7 ms the extra frame is what made it late. Skip one, then try again.
+        static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+        static LARGE_INTEGER prev;
+        static bool skipped_last = false;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double dt = prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0.0;
+        prev = now;
+        if (dt > 17.5 && dt < 100.0 && !skipped_last) {
+            g_st.late++;
+            skipped_last = true;
+        } else {
+            skipped_last = false;
+            extra_frame(c);
+        }
         report();
     }
     probe_100051e9c4(c);

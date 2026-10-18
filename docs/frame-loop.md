@@ -142,3 +142,17 @@ ticks at 59–60/s, presents every 8.5 ms on average (about 118 fps), no frame o
 5.5–7 ms including the present wait. Not yet judged by eye: whether the in-between frames look
 right (camera only; characters still move at 60), and whether effects, animations or sounds run
 faster.
+
+### After Max's first playtest (2026-10-18)
+
+* Max: camera very smooth; texture flashes and artifacts in battle gone; Link blurry when running fast
+  (expected until stage c: he moves in 60 Hz steps while the camera moves at 120); an occasional
+  one-frame black flash in menus; dips to about 100 fps with the GPU at 30 %.
+* Menus ran at double speed: outside battle there is no extra frame, but the display still released
+  frames at 120 and the game is frame-locked. Now the 120 Hz release only applies while extra frames
+  are drawn (`hw_game_interp_hold_60`, 100 ms grace); menus are back to 16.67 ms. Likely the cause of
+  the menu flash (to be confirmed by Max).
+* The dips were ticks that did not fit 16.7 ms (update, extra frame, real frame and two present waits
+  run in series on MainThread); they slowed the game itself to 53-55 ticks/s. Now a tick that ran
+  late (> 17.5 ms) skips the next extra frame, so the game keeps 59-60 ticks/s and the display shows
+  a single 60 Hz frame instead (autoplay: 107-118 fps, 0-64 skipped per 295 ticks).
