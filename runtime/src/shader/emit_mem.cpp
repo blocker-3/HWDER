@@ -366,15 +366,15 @@ void Translator::emit_tex(Inst in, Op op) {
         default: break;
         }
         if (aoffi) {
-            // R255 is a literal zero; every other R() emits a non-constant OpLoad.
-            // Count translated TEX instructions, not runtime samples or draws.
-            if (m < 255 && ++gpu::audit::tex_dynamic_offsets == 1)
-                log_once("TEX AOFFI non-constant offset register R" + std::to_string(m));
             Id v = R(m++);
             auto sx = [&](u32 off) { return b.bitcast(t_s32, bfe(v, u(off), u(4), true)); };
             if (ty_bits <= 1) a.offset = sx(0);
             else if (ty_bits <= 3) a.offset = b.op(spv::OpCompositeConstruct, b.t_vec(t_s32, 2), {sx(0), sx(4)});
             else if (ty_bits <= 5) a.offset = b.op(spv::OpCompositeConstruct, b.t_vec(t_s32, 3), {sx(0), sx(4), sx(8)});
+            // Extract/bitcast instructions are non-constant SPIR-V even for literal-zero R255.
+            // Count only emitted offsets (cube forms leave offset unset), once per translation.
+            if (a.offset && ++gpu::audit::tex_dynamic_offsets == 1)
+                log_once("TEX AOFFI non-constant SPIR-V offset from R" + std::to_string(m - 1));
         }
         if (dc) a.dref = F(m++);
         Tex& tex = texture(in.bits(36, 13) * 4, tex_type(ty_bits), dc);
