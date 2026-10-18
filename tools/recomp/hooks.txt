@@ -2,3 +2,12 @@
 # one's body as f_<addr>_orig and the runtime provides f_<addr>.
 0x100057cee0  # main: Camera::BuildProj (runtime/src/game/widescreen.cpp)
 0x10003d45cc  # main: render camera sync, once per game tick (runtime/src/interp/camera.cpp)
+# stage 2.1 frame probe (runtime/src/interp/frame_probe.cpp): pass-through, logs thread and order
+0x10001766a4  # scene A vtable slot 3 (publishes render cameras)
+0x10001767e8  # scene A vtable slot 5
+0x100017672c  # scene A vtable slot 18
+0x1000176490  # scene A vtable slot 2
+0x10001763bc  # scene A vtable slot 4
+0x10002d96b4  # scene B vtable slot 3
+0x10002d9878  # scene B vtable slot 5
+0x10003d0a74  # camera constants upload (render side)
