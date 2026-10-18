@@ -575,6 +575,7 @@ void TextureCache::alloc_image(Image* img) {
     if (info.type == ImageType::e2D && info.layers >= 6 && info.width == info.height)
         ci.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     if (info.type == ImageType::e3D) ci.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+    img->usage = ci.usage;
     VkResult r = vkCreateImage(dev(), &ci, nullptr, &img->image);
     if (r != VK_SUCCESS) {
         hw_log("vk: vkCreateImage failed (%d) fmt %d %ux%ux%u layers %u levels %u", (int)r, (int)ci.format,
@@ -1036,13 +1037,14 @@ VkImageView TextureCache::view(Image* img, VkFormat fmt, VkImageViewType type, u
     // (e.g. the sRGB form of RGBA8) must leave that usage out (validation: VUID-VkImageViewCreateInfo-usage-02275).
     VkImageViewUsageCreateInfo uci{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
     const FormatInfo& ifmt = img->info.fmt;
-    if (!ifmt.depth && !ifmt.stencil && !ifmt.compressed && fmt != img->info.fmt.vk) {
+    if (!ifmt.depth && !ifmt.stencil && !ifmt.compressed) {
         VkFormatFeatureFlags vf = format_features(fmt);
         if (!(vf & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
             uci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
             if (vf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) uci.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
             if (vf & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) uci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-            ci.pNext = &uci;
+            uci.usage &= img->usage;
+            if (uci.usage) ci.pNext = &uci;
         }
     }
     VkImageView v = VK_NULL_HANDLE;
