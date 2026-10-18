@@ -127,10 +127,10 @@ Id Translator::io_var(spv::StorageClass sc, Id type, int location, int builtin) 
 
 Id Translator::push_member(u32 index, Id type) {
     if (!push_var) {
-        Id st = b.t_struct_fresh({t_v4f, t_u32, t_u32, t_u32, t_u32});
+        Id st = b.t_struct_fresh({t_v4f, t_u32, t_u32, t_u32, t_u32, t_v4f});
         b.decorate(st, spv::DecorationBlock);
-        const u32 offs[] = {0, 16, 20, 24, 28};
-        for (u32 i = 0; i < 5; i++) b.member_decorate(st, i, spv::DecorationOffset, {offs[i]});
+        const u32 offs[] = {0, 16, 20, 24, 28, 32};
+        for (u32 i = 0; i < 6; i++) b.member_decorate(st, i, spv::DecorationOffset, {offs[i]});
         push_var = b.id();
         b.put(b.globals, spv::OpVariable,
               {b.t_ptr(spv::StorageClassPushConstant, st), push_var, u32(spv::StorageClassPushConstant)});
@@ -297,6 +297,10 @@ Id Translator::cbuf_load(u32 index, u32 offset) {
     Id p = b.op(spv::OpAccessChain, cbuf_ptr_u32, {var, u(0), u(offset >> 4), u((offset >> 2) & 3)});
     Id v = b.load(t_u32, p);
     if (offset & 3) v = op2(spv::OpShiftRightLogical, t_u32, v, u((offset & 3) * 8));
+    if (is_fs && opt.picture_controls && index == opt.bloom_cbuf && offset == opt.bloom_offset) {
+        Id scale = b.op(spv::OpCompositeExtract, t_f32, {push_member(5, t_v4f), 1});
+        v = bc_u(fop(spv::OpFMul, t_f32, {bc_f(v), scale}));
+    }
     return v;
 }
 
@@ -408,6 +412,13 @@ void Translator::emit_epilogue() {
             for (u32 i = 0; i < 4; i++) c[i] = at == AttributeType::Float ? F(reg + i)
                                                 : at == AttributeType::SignedInt ? b.bitcast(t_s32, R(reg + i))
                                                                                  : R(reg + i);
+            if (opt.picture_controls && rt == 0 && at == AttributeType::Float) {
+                // contrast around mid-grey on the final (gamma-encoded) colour: (c - 0.5) * k + 0.5
+                Id k = b.op(spv::OpCompositeExtract, t_f32, {push_member(5, t_v4f), 0});
+                for (u32 i = 0; i < 3; i++)
+                    c[i] = glsl(t_f32, GLSLstd450FMax,
+                                {glsl(t_f32, GLSLstd450Fma, {fop(spv::OpFSub, t_f32, {c[i], fc(0.5f)}), k, fc(0.5f)}), fc(0.0f)});
+            }
             Id t = at == AttributeType::SignedInt ? t_v4s : at == AttributeType::UnsignedInt ? t_v4u : t_v4f;
             b.store(frag_out[rt], b.op(spv::OpCompositeConstruct, t, {c[0], c[1], c[2], c[3]}));
             reg += 4;

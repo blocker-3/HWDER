@@ -544,6 +544,17 @@ struct ShaderEntry {
     u64 key = 0;  // HWDER_DUMP_SHADERS file name
 };
 
+// The game's final tonemap pass, by fragment shader key: exposure x scene -> filmic curve, then
+// + bloom (the 240x135 blur chain) x c3[0x20], colour balance/saturation, gamma, into the frame the
+// HUD is drawn over. Settings > Graphics contrast and bloom are patched into it (shader::Options).
+struct PictureShader {
+    u64 key;
+    u32 bloom_cbuf, bloom_offset;
+};
+static const PictureShader kPictureShaders[] = {
+    {0x0fd5e74182e59ceaull, 3, 0x20},  // battles (Legend Mode, Sealed Grounds)
+};
+
 struct GfxProgram {
     ShaderEntry* stages[5] = {};  // VertexB, TessControl, TessEval, Geometry, Fragment
     StageLayout* layouts[5] = {};
@@ -1192,9 +1203,17 @@ ShaderEntry* VkRenderer::get_shader(GuestEnv& env, shader::Stage stage, const sh
     ShaderEntry* e = new ShaderEntry;
     shaders_[key] = e;
     e->key = key;
+    shader::Options topt = opt;
+    for (const PictureShader& ps : kPictureShaders)
+        if (stage == shader::Stage::Fragment && key == ps.key) {
+            topt.picture_controls = true;
+            topt.bloom_cbuf = ps.bloom_cbuf;
+            topt.bloom_offset = ps.bloom_offset;
+            hw_log("vk: shader %016llx is the final tonemap pass: contrast/bloom controls apply", (unsigned long long)key);
+        }
     {
         SlowTimer timer("shader translation", 30.0);
-        e->prog = shader::translate(env, stage, opt, va);
+        e->prog = shader::translate(env, stage, topt, va);
     }
     if (e->prog.spirv.empty()) {
         hw_log("vk: shader %016llx (stage %u) translated to empty SPIR-V", (unsigned long long)key, (u32)stage);
@@ -2655,6 +2674,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     pc.base_instance = p.base_instance - p.instance;
     for (u32 i = 0; i < fb.num_colors; i++)
         if (fb.color_view[i]) pc.rt_mask |= 1u << i;
+    pc.picture[0] = settings::video().contrast / 100.0f;  // read only by the final tonemap pass (kPictureShaders)
+    pc.picture[1] = settings::video().bloom / 100.0f;
     if (rs_.pc_layout != prog->layout || memcmp(&rs_.pc, &pc, sizeof(pc)) != 0) {
         vkCmdPushConstants(cb, prog->layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(pc), &pc);
         rs_.pc_layout = prog->layout;

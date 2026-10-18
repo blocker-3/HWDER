@@ -545,6 +545,20 @@ static void tab_graphics(bool& changed) {
         }
     }
 
+    section("Picture");
+    if (ImGui::SliderInt("Contrast", &v.contrast, 50, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast of the 3D picture around mid-grey, applied in the game's own tonemap pass, so the HUD and\n"
+         "menus keep their colours. 100% = the game's look. Applies immediately.");
+    if (ImGui::SliderInt("Bloom", &v.bloom, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Strength of the glow around bright areas, relative to the game's own (0% = off, 100% = unchanged).\n"
+         "Applies immediately.");
+    if (v.contrast != 100 || v.bloom != 100) {
+        if (ImGui::Button("Reset picture")) {
+            v.contrast = v.bloom = 100;
+            changed = true;
+        }
+    }
+
     section("Shaders");
     settings::Debug& d = settings::debug();
     if (ImGui::Checkbox("Compile shaders in the background", &d.async_shaders)) changed = true;
