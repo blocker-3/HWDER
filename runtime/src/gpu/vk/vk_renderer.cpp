@@ -871,6 +871,7 @@ private:
     VkPipeline get_pipeline(GfxProgram* prog, const PipelineKey& key);
     VkPipeline create_pipeline(GfxProgram* prog, const PipelineKey& key);  // worker-thread safe
     void pipeline_worker();
+    void adopt_pipeline_results();  // renderer thread, pipe_m_ held
     struct PipeJob {
         u64 hash;
         GfxProgram* prog;
@@ -883,6 +884,7 @@ private:
     std::unordered_map<u64, u64> audit_skips_by_program_;
     std::mutex pipe_m_;
     std::condition_variable pipe_cv_;
+    std::condition_variable pipe_done_cv_;
     std::deque<PipeJob> pipe_jobs_;
     std::vector<std::pair<u64, VkPipeline>> pipe_done_;
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
@@ -1423,16 +1425,20 @@ GfxProgram* VkRenderer::get_program_slow(const u32* regs, u64* key_out) {
     return gp;
 }
 
+void VkRenderer::adopt_pipeline_results() {
+    for (auto& [jh, jp] : pipe_done_) {
+        pipe_pending_.erase(jh);
+        if (!jp && pipe_retried_.insert(jh).second) continue;  // next draw retries synchronously once
+        pipelines_[jh] = jp;
+    }
+    pipe_done_.clear();
+}
+
 VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     u64 h = hash_bytes(&key, sizeof(key));
     {   // adopt pipelines finished by the worker threads
         std::lock_guard<std::mutex> l(pipe_m_);
-        for (auto& [jh, jp] : pipe_done_) {
-            pipe_pending_.erase(jh);
-            if (!jp && pipe_retried_.insert(jh).second) continue;  // not cached: the next draw retries synchronously
-            pipelines_[jh] = jp;
-        }
-        pipe_done_.clear();
+        adopt_pipeline_results();
     }
     auto it = pipelines_.find(h);
     if (it != pipelines_.end()) return it->second;
@@ -1449,6 +1455,29 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // HWDER_ASYNC_RT_PIPELINES=1 restores async compiles for them (for comparison).
     static const bool async_rt = getenv("HWDER_ASYNC_RT_PIPELINES") != nullptr;
     if (sync_pipes || st_.draws < 64 || pipe_retried_.count(h) || (draw_samples_rt_ && !async_rt)) {
+        if (pipe_pending_.count(h)) {
+            // A heavy frame may have queued this key before a light frame or RT-sampling
+            // draw needs it synchronously. Reuse that job rather than create twice and
+            // overwrite/leak one pipeline. Workers publish using pipe_m_ only; wait
+            // releases it and is safe while the caller owns the renderer mutex.
+            std::unique_lock<std::mutex> l(pipe_m_);
+            auto queued = std::find_if(pipe_jobs_.begin(), pipe_jobs_.end(),
+                                       [h](const PipeJob& job) { return job.hash == h; });
+            if (queued != pipe_jobs_.end() && queued != pipe_jobs_.begin()) {
+                // A synchronous demand should not wait behind unrelated queued keys.
+                // Move the whole job so its original enqueue timestamp is preserved.
+                std::rotate(pipe_jobs_.begin(), queued, std::next(queued));
+                pipe_cv_.notify_one();
+            }
+            pipe_done_cv_.wait(l, [this, h] {
+                return std::any_of(pipe_done_.begin(), pipe_done_.end(),
+                                   [h](const auto& done) { return done.first == h; });
+            });
+            adopt_pipeline_results();
+            auto ready = pipelines_.find(h);
+            if (ready != pipelines_.end()) return ready->second;
+            // Failed async creation was marked for its one synchronous retry above.
+        }
         VkPipeline pipe = create_pipeline(prog, key);
         pipelines_[h] = pipe;
         return pipe;
@@ -1493,6 +1522,7 @@ void VkRenderer::pipeline_worker() {
                    (unsigned long long)job.hash, (unsigned long long)pending_ms, pipe != VK_NULL_HANDLE);
         }
         pipe_done_.push_back({job.hash, pipe});
+        pipe_done_cv_.notify_one();
     }
 }
 
