@@ -11,3 +11,14 @@
 0x10002d96b4  # scene B vtable slot 3
 0x10002d9878  # scene B vtable slot 5
 0x10003d0a74  # camera constants upload (render side)
+# stage b probe: MainThread's frame loop f_10002ad35c, the calls after the Draw stage
+0x10002acb54  # Draw stage (calls scene A slot 5)
+0x100045de0c  # called twice after Draw (x22, x23)
+0x10003d2da4  # after Draw
+0x10003d7028  # after Draw
+0x100051e9c4  # gfx device call (x21)
+0x100052f6bc  # gfx device call with the window
+0x100051ea20  # gfx device call (x21, 1)
+0x10001dee94  # end of the present block
+0x100052ab10  # loop tail
+0x10003878d0  # update job body (slot 2), also called on MainThread

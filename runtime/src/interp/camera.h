@@ -9,6 +9,7 @@ namespace interp {
 // Screen 0's render camera as Camera::Update left it at the end of one game tick.
 struct CamSnap {
     u64 tick = 0;      // hook call count
+    u64 addr = 0;      // guest address of the render camera it was read from (screen 0)
     double t_ms = 0;   // host QPC time of the hook, ms
     float eye[3], at[3], up[3];
     float roll;
@@ -20,6 +21,10 @@ struct CamSnap {
 // HWDER_INTERP_MODE=camera: frame interpolation replaces only the camera matrices (default: lerp every
 // constant). Read once.
 bool camera_mode();
+
+// HWDER_GAME_INTERP=1 (stage b, interp_draw.cpp): the game draws an extra frame per tick with a
+// blended camera. Read once.
+bool game_interp();
 
 // HWDER_CAM_LOG=<n>: n > 0 enables camera logging (the hook logs every n-th tick; the renderer logs
 // match coverage once per second).

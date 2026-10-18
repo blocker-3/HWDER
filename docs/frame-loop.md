@@ -95,3 +95,50 @@ Experiment: after slot 5 returns, run it again with the same entry registers (sa
 
 Markers `* gpfifo`, `* queue`, `* dequeue` in the trace come from `nvdrv.cpp` (SubmitGPFIFO) and
 `vi.cpp` (QueueBuffer, DequeueBuffer).
+
+## Correction and the present path (stage b probing)
+
+The Draw caller chain above stops one level short. MainThread's frame loop `f_10002ad35c` calls
+`f_10002acb54` once per tick in battle, and that function **is the whole tick**:
+
+```
+f_10002acb54(scene x19, frame state x20, graphics device x21)
+  wait for / run the update jobs (scene slots 2, 4, 3 on the job workers)
+  f_100051e9c4(dev, w, h, ..)   BeginFrame                         call at 0x10002acd08
+  f_10001e2f7c                  profiler marker (when [x20+662] == 0)
+  f_1000387f9c(scene)           Draw: scene slot 5, camera constants
+  f_10001e301c, lock/copy/unlock, f_10001df06c x2, f_10001df624   end-of-frame bookkeeping
+  vcall scene+192 -> f_100052f6bc(dev, 0, 0, window target, 0)    when the scene asks
+  f_100051ea20(dev, 1)          EndFrame
+  f_100051e67c(dev, 0)          Present: SubmitGPFIFO x3, QueueBuffer, DequeueBuffer (unless [[x20+544]+0x2d420])
+  f_10003cf0a8, f_1000389044(scene), f_10004598dc, vcall scene+136, tail call scene+152
+```
+
+Menus and other non-battle screens draw through `f_10002ac87c` instead (everything on MainThread;
+the present is again `f_100051e67c`, from `0x10002acb2c`).
+
+The render camera buffer index `S + 0x710dc` does rotate at times in battle: consecutive ticks can
+publish into different slots (up to half of the ticks in some stretches).
+
+## Stage b: the game draws the in-between frame (`HWDER_GAME_INTERP=1`)
+
+`runtime/src/interp/interp_draw.cpp` hooks BeginFrame. On the battle call (return address
+`0x10002acd0c`), before the real frame of tick n, it:
+
+1. takes ticks n-1 and n from the camera ring (camera.cpp records each published camera and now its
+   guest address), skips on a cut (eye or target > 500 units), a projection change, non-consecutive
+   ticks or > 250 ms between them, and checks tick n's render camera is still unchanged;
+2. writes eye/at/up/roll halfway between the two into tick n's render camera and rebuilds its
+   matrices with the game's own `Camera::Update` (`f_100057cb78(cam, 1, 1)`);
+3. runs BeginFrame, Draw, the scene+192 / `f_100052f6bc` step, EndFrame and Present on a copy of the
+   registers (profiler markers and the end-of-frame bookkeeping are not repeated);
+4. restores the camera bytes and lets the real frame run unchanged.
+
+The host releases frames at `HWDER_FPS=120`, so the two presents share each 60 Hz tick; the game's
+DequeueBuffer wait keeps logic at 60.
+
+Measured (autoplay battle, 5 s windows, `HWDER_GI_LOG=1`): 294–295 extra frames per 295 ticks, game
+ticks at 59–60/s, presents every 8.5 ms on average (about 118 fps), no frame over 20 ms, extra frame
+5.5–7 ms including the present wait. Not yet judged by eye: whether the in-between frames look
+right (camera only; characters still move at 60), and whether effects, animations or sounds run
+faster.

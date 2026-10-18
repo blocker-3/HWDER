@@ -3,4 +3,5 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/interp/camera.cpp
     runtime/src/interp/frame_probe.cpp
     runtime/src/interp/draw_writes.cpp
+    runtime/src/interp/interp_draw.cpp
 )

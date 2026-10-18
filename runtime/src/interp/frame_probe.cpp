@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <set>
+#include <string>
 
 #include "hwder/runtime.h"
 #include "kernel/kernel.h"
@@ -24,8 +25,10 @@ extern "C" void hw_draw_writes_end(u64 self, double ms);
 
 namespace {
 
-enum { kSlot3, kSlot5, kSlot18, kSlot2, kSlot4, kB3, kB5, kCam, kCount };
-const char* kNames[kCount] = {"A.slot3", "A.slot5", "A.slot18", "A.slot2", "A.slot4", "B.slot3", "B.slot5", "cam-constants"};
+enum { kSlot3, kSlot5, kSlot18, kSlot2, kSlot4, kB3, kB5, kCam, kDrawStage, kSignal, kD2da4, kD7028, kE9c4, kF6bc, kEa20,
+       kDee94, kAb10, kJob, kCount };
+const char* kNames[kCount] = {"A.slot3", "A.slot5", "A.slot18", "A.slot2", "A.slot4", "B.slot3", "B.slot5", "cam-constants",
+                           "tick", "45de0c", "3d2da4", "3d7028", "begin-frame", "52f6bc", "end-frame", "1dee94", "52ab10", "job-3878d0"};
 
 int env_int(const char* k, int d) { return getenv(k) ? atoi(getenv(k)) : d; }
 int budget() { static const int n = env_int("HWDER_FRAME_PROBE", 0); return n; }
@@ -42,6 +45,10 @@ void slots(u32* w, u32* r) {
     u64 s = *(u64*)0x1000c2b5e8 ? *(u64*)*(u64*)0x1000c2b5e8 : 0;
     *w = s ? *(u32*)(s + 0x710dc) : ~0u;
     *r = s ? *(u32*)(s + 0x710e0) : ~0u;
+}
+
+bool guest_stack(u64 fp) {
+    return (fp >= 0x4000000000ull && fp < 0x4080000000ull) || (fp >= 0x2000000000ull && fp < 0x2180000000ull);
 }
 
 std::atomic<int> g_state{0};  // 0 waiting for battle, 1 delay, 2 armed
@@ -114,7 +121,7 @@ void event(int fn, u64 self, bool enter, double t, double dur) {
         }
         if (t - g_t_window >= 5000.0) report_window(t);
     }
-    if (g_left.fetch_sub(1) > 0) {
+    if (fn != kD2da4 && g_left.fetch_sub(1) > 0) {  // 3d2da4 runs dozens of times per tick: stats only
         u32 w, r;
         slots(&w, &r);
         hw_log("probe: %s %-14s thread %5lu t=%9.3f self=%llx slot w=%u r=%u%s", enter ? ">" : "<", kNames[fn], tid,
@@ -130,6 +137,19 @@ extern "C" void hw_frame_probe_mark(const char* what) {
     std::lock_guard<std::mutex> l(g_mu);
     if (g_left.fetch_sub(1) > 0)
         hw_log("probe: * %-14s thread %5lu t=%9.3f", what, GetCurrentThreadId(), now_ms() - g_t_arm);
+    // Once per marker: the guest caller chain of the thread that reached it.
+    static std::set<std::string> chained;
+    auto* t = kern::current_thread();
+    if (t && t->ctx && chained.insert(what).second) {
+        char buf[768];
+        int n = snprintf(buf, sizeof buf, "probe: callers of * %s: lr %llx", what, (unsigned long long)t->ctx->x[30]);
+        u64 fp = t->ctx->x[29];
+        for (int i = 0; i < 20 && fp && (fp & 7) == 0 && guest_stack(fp); i++) {
+            n += snprintf(buf + n, sizeof buf - n, " <- %llx", (unsigned long long)*(u64*)(fp + 8));
+            fp = *(u64*)fp;
+        }
+        hw_log("%s", buf);
+    }
 }
 
 namespace {
@@ -138,10 +158,10 @@ namespace {
 void log_chain(int fn, const Ctx* c) {
     static std::atomic<bool> done[kCount];
     if (done[fn].exchange(true)) return;
-    char buf[512];
+    char buf[768];
     int n = snprintf(buf, sizeof buf, "probe: callers of %s: lr %llx", kNames[fn], (unsigned long long)c->x[30]);
     u64 fp = c->x[29];
-    for (int i = 0; i < 10 && fp && (fp & 7) == 0 && ((fp >= 0x4000000000ull && fp < 0x4080000000ull) || (fp >= 0x2000000000ull && fp < 0x2180000000ull)); i++) {
+    for (int i = 0; i < 20 && fp && (fp & 7) == 0 && guest_stack(fp); i++) {
         n += snprintf(buf + n, sizeof buf - n, " <- %llx", (unsigned long long)*(u64*)(fp + 8));
         fp = *(u64*)fp;
     }
@@ -188,3 +208,16 @@ PROBE(10002d96b4, kB3)
 PROBE(10002d9878, kB5)
 // camera constants upload (render side)
 PROBE(10003d0a74, kCam)
+// MainThread's frame loop f_10002ad35c: the Draw stage and the calls after it (stage b)
+PROBE(10002acb54, kDrawStage)
+PROBE(100045de0c, kSignal)
+PROBE(10003d2da4, kD2da4)
+PROBE(10003d7028, kD7028)
+// (the BeginFrame hook itself is in interp_draw.cpp; it calls this probed original)
+extern "C" void f_100051e9c4_orig(Ctx* c);
+extern "C" void probe_100051e9c4(Ctx* c) { around<kE9c4>(c, f_100051e9c4_orig); }
+PROBE(100052f6bc, kF6bc)
+PROBE(100051ea20, kEa20)
+PROBE(10001dee94, kDee94)
+PROBE(100052ab10, kAb10)
+PROBE(10003878d0, kJob)

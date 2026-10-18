@@ -74,10 +74,11 @@ void record(u64 scene, u32 slot) {
     static u64 count;
     u64 n = count++;
     int every = cam_log_every();
-    if (!camera_mode() && every <= 0) return;
+    if (!camera_mode() && every <= 0 && !game_interp()) return;
     const u8* cam = GUESTP(u8, scene + kSlotBase + (slot % 3) * kBufStride);
     CamSnap s;
     s.tick = n;
+    s.addr = scene + kSlotBase + (slot % 3) * kBufStride;
     s.t_ms = now_ms();
     memcpy(s.eye, cam + 0x10, 12);
     memcpy(s.at, cam + 0x20, 12);
