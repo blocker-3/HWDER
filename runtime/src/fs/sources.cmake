@@ -4,4 +4,5 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/fs/romfs.cpp
     runtime/src/fs/hostfs.cpp
     runtime/src/fs/nsp.cpp
+    runtime/src/fs/save_dir.cpp
 )

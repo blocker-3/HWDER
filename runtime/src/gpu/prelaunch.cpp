@@ -188,6 +188,8 @@ void draw(VkExtent2D extent) {
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
     game_section();
     keys_section();
+    overlay::section("Save folder");
+    overlay::opt_save_folder(false, changed);
     overlay::section("Quick settings");
     overlay::opt_borderless(changed);
     overlay::opt_window_size(extent, changed);

@@ -120,10 +120,13 @@ void load() {
             }
         }
         else if (k == "interp_hz") g_video.interp_hz = atoi(v);
-        else if (k == "nsp_path" || k == "keys_path") {
+        else if (k == "nsp_path" || k == "keys_path" || k == "save_dir" || k == "save_copy_from") {
             std::string path = v;  // UTF-8, as written by save()
             while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
-            (k == "nsp_path" ? g_launch.nsp_path : g_launch.keys_path) = path;
+            (k == "nsp_path"    ? g_launch.nsp_path
+             : k == "keys_path" ? g_launch.keys_path
+             : k == "save_dir"  ? g_launch.save_dir
+                                : g_launch.save_copy_from) = path;
         }
         else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
@@ -164,6 +167,8 @@ void save() {
     fprintf(f, "debug_env=%s\n", env.c_str());
     fprintf(f, "nsp_path=%s\nkeys_path=%s\nskip_prelaunch=%d\n", g_launch.nsp_path.c_str(), g_launch.keys_path.c_str(),
             (int)g_launch.skip_prelaunch);
+    fprintf(f, "save_dir=%s\n", g_launch.save_dir.c_str());
+    if (!g_launch.save_copy_from.empty()) fprintf(f, "save_copy_from=%s\n", g_launch.save_copy_from.c_str());
     fclose(f);
 }
 

@@ -23,6 +23,7 @@
 #include "gpu/prelaunch.h"
 #include "gpu/settings.h"
 #include "fs/nsp.h"
+#include "fs/save_dir.h"
 
 // ------------------------------------------------------------------ dispatch
 // One dense table per module text segment: (addr - text_lo) / 4 -> host function.
@@ -593,6 +594,7 @@ int main(int argc, char** argv) {
         // Game data: an NSP (decrypted in-process with the user's prod.keys) or an extracted exefs/ +
         // romfs/ pair. Nothing is written out either way. Files picked on the startup screen are in the settings.
         settings::load();
+        hwfs::run_pending_save_copy();  // a save folder change made in the menu last session
         hwfs::nsp::set_paths(settings::launch().nsp_path, settings::launch().keys_path);
         std::string err;
         bool nsp = hwfs::nsp::init(dir, err);
