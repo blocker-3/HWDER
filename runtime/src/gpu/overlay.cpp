@@ -567,10 +567,6 @@ static void tab_graphics(bool& changed) {
     if (ImGui::SliderInt("Sharpening", &v.sharpen, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
     help("Contrast-adaptive sharpening of the 3D picture (0% = off). Counters the game's soft look,\n"
          "and the softening from FXAA. The HUD is not affected.");
-    if (ImGui::Checkbox("Depth of field", &v.dof)) changed = true;
-    help("The game's background blur. Off keeps the whole scene in focus.");
-    if (ImGui::Checkbox("Radial blur", &v.radial_blur)) changed = true;
-    help("The zoom blur during special attacks. Off keeps the picture sharp while they play.");
 
     section("Shaders");
     settings::Debug& d = settings::debug();
