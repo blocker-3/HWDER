@@ -389,6 +389,7 @@ struct FrameSync {
 };
 static FrameSync g_frames[3];
 static u32 g_frame_idx;
+static std::vector<VkSemaphore> g_rendered;  // per swapchain image: signalled by the blit submit, waited on by its present
 static u64 g_present_seq = 0;                       // under g_present_lock
 static std::atomic<u64> g_last_image_ticket{0};     // last present_image's blit (0: nothing submitted)
 static std::mutex g_present_lock;
@@ -552,6 +553,13 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     VkImageSubresourceRange rr{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(fs.cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &bg, 1, &rr);
     if (src) {
+        // the blit overwrites part of the cleared image: order the two transfer writes
+        VkImageMemoryBarrier cb2 = b;
+        cb2.oldLayout = cb2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        cb2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        cb2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(fs.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &cb2);
         float s = std::min((float)g_extent.width / w, (float)g_extent.height / h);
         s32 dw = (s32)(w * s), dh = (s32)(h * s);
         s32 x0 = ((s32)g_extent.width - dw) / 2, y0 = ((s32)g_extent.height - dh) / 2;
@@ -595,7 +603,14 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     si.commandBufferCount = 1;
     si.pCommandBuffers = &fs.cb;
     u64 ticket = ++g_present_seq;
-    VkSemaphore signals[2] = {fs.rendered, g_present_timeline};
+    if (g_rendered.size() < g_images.size()) {
+        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        size_t old = g_rendered.size();
+        g_rendered.resize(g_images.size());
+        for (size_t i = old; i < g_rendered.size(); i++) vkCreateSemaphore(g_dev.dev, &sci, nullptr, &g_rendered[i]);
+    }
+    VkSemaphore rendered = g_rendered[idx];
+    VkSemaphore signals[2] = {rendered, g_present_timeline};
     u64 signal_values[2] = {0, ticket};
     tsi.signalSemaphoreValueCount = 2;
     tsi.pSignalSemaphoreValues = signal_values;
@@ -603,7 +618,7 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     si.pSignalSemaphores = signals;
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &fs.rendered;
+    pi.pWaitSemaphores = &rendered;
     pi.swapchainCount = 1;
     pi.pSwapchains = &g_swapchain;
     pi.pImageIndices = &idx;

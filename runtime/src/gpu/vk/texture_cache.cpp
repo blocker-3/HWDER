@@ -1032,6 +1032,19 @@ VkImageView TextureCache::view(Image* img, VkFormat fmt, VkImageViewType type, u
     ci.format = fmt;
     ci.components = swz;
     ci.subresourceRange = {aspect, base_level, levels, base_layer, layers};
+    // Colour images are created mutable with storage usage. A view in a format without storage support
+    // (e.g. the sRGB form of RGBA8) must leave that usage out (validation: VUID-VkImageViewCreateInfo-usage-02275).
+    VkImageViewUsageCreateInfo uci{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    const FormatInfo& ifmt = img->info.fmt;
+    if (!ifmt.depth && !ifmt.stencil && !ifmt.compressed && fmt != img->info.fmt.vk) {
+        VkFormatFeatureFlags vf = format_features(fmt);
+        if (!(vf & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+            uci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (vf & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) uci.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+            if (vf & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) uci.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            ci.pNext = &uci;
+        }
+    }
     VkImageView v = VK_NULL_HANDLE;
     VkResult r = vkCreateImageView(dev(), &ci, nullptr, &v);
     if (r != VK_SUCCESS) {
