@@ -2637,7 +2637,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
                 hw_log("gfx-audit: first disabled viewport transform: present %llu physical %ux%u scale %.3fx%.3f",
                        (unsigned long long)g_s.present_count, fb.width, fb.height, fb.scale, fb.scale_y);
         }
-        if (fb.scale != 1.0f || fb.scale_y != 1.0f) {
+        // A disabled transform uses the framebuffer's physical dimensions already.
+        if (regs[0x64B] && (fb.scale != 1.0f || fb.scale_y != 1.0f)) {
             x *= fb.scale;
             y *= fb.scale_y;
             w *= fb.scale;
