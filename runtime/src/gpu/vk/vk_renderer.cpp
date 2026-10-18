@@ -3239,6 +3239,50 @@ void VkRenderer::cam_identify() {
         if (op_hit[oi] & 3) draws_cam++;
         else if (op_hit[oi] & 4) draws_inv_only++;
     }
+    // Near matches: 3D draws (depth bound) with no exact camera hit, whose constant buffers hold a run
+    // of 12+ floats within 0.1% of the tick's view / viewProj (any layout) - matrices the game builds
+    // slightly differently, which a replay leaves at the tick's camera. Logged per second with the
+    // most common draw signatures.
+    static u64 near_draws = 0, unmatched_3d = 0, near_runs[2][kCamLayouts] = {};
+    static std::unordered_map<u64, u32> near_keys, plain_keys;
+    if (best >= 0) {
+        u32 pat[2][kCamLayouts][16];
+        for (int l = 0; l < kCamLayouts; l++) {
+            cam_layout(snaps[best].view, l, pat[0][l]);
+            cam_layout(snaps[best].viewproj, l, pat[1][l]);
+        }
+        for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+            const OpRec& o = rec_frame_[oi];
+            if (o.is_clear || op_hit[oi] || !o.draw.fb.depth) continue;
+            unmatched_3d++;
+            bool any = false;
+            for (u32 st = 0; st < 5 && !any; st++) {
+                if (!o.draw.has_stage[st]) continue;
+                for (const CbufRec& cr : o.draw.stages[st].cbufs) {
+                    const float* w = (const float*)cr.data.data();
+                    size_t n = cr.data.size() / 4;
+                    for (size_t i = 0; i + 12 <= n && !any; i++)
+                        for (int m = 0; m < 2 && !any; m++)
+                            for (int l = 0; l < kCamLayouts && !any; l++) {
+                                int len = l < 2 ? 16 : 12;
+                                if (i + len > n) continue;
+                                const float* q = (const float*)pat[m][l];
+                                int k = 0;
+                                for (; k < len; k++) {
+                                    float tol = 1e-3f * std::max(1.0f, std::fabs(q[k]));
+                                    if (!(std::fabs(w[i + k] - q[k]) <= tol)) break;
+                                }
+                                if (k == len && memcmp(w + i, q, len * 4) != 0) {
+                                    any = true;
+                                    near_runs[m][l]++;
+                                }
+                            }
+                }
+            }
+            (any ? near_keys : plain_keys)[o.draw.match_key >> 32]++;
+            if (any) near_draws++;
+        }
+    }
     // History reads: render targets sampled before this frame writes them. A replay reads their
     // current contents (synced from the real target, which already holds this frame's or a later
     // result), so whatever accumulates across frames (exposure, TAA, ...) is applied twice.
@@ -3314,6 +3358,30 @@ void VkRenderer::cam_identify() {
                "history reads per frame: %.1f render targets sampled before written, by %.1f draws",
                sum_draws / n, sum_draws_cam / n, sum_inv_only / n, sum_other[0] / n, sum_other[1] / n, sum_other[2] / n,
                sum_older / n, sum_newer / n, sum_hist_imgs / n, sum_hist_draws / n);
+        {
+            auto top = [](std::unordered_map<u64, u32>& m) {
+                std::vector<std::pair<u32, u64>> v;
+                for (auto& [k, c] : m) v.push_back({c, k});
+                std::sort(v.rbegin(), v.rend());
+                std::string t;
+                for (size_t i = 0; i < v.size() && i < 6; i++) {
+                    char b[48];
+                    snprintf(b, sizeof(b), " %08llx x%u", (unsigned long long)v[i].second, v[i].first);
+                    t += b;
+                }
+                m.clear();
+                return t;
+            };
+            std::string nk = top(near_keys), pk = top(plain_keys);
+            hw_log("cam: near: %.1f unmatched 3D draws per frame, %.1f hold a near-copy of the camera (view 4x4 %llu 4x4T %llu 3x4 %llu 3x4T %llu, "
+                   "viewProj 4x4 %llu 4x4T %llu 3x4 %llu 3x4T %llu runs) | near-copy signatures:%s | other unmatched:%s",
+                   unmatched_3d / n, near_draws / n, (unsigned long long)near_runs[0][0], (unsigned long long)near_runs[0][1],
+                   (unsigned long long)near_runs[0][2], (unsigned long long)near_runs[0][3], (unsigned long long)near_runs[1][0],
+                   (unsigned long long)near_runs[1][1], (unsigned long long)near_runs[1][2], (unsigned long long)near_runs[1][3], nk.c_str(),
+                   pk.c_str());
+            near_draws = unmatched_3d = 0;
+            memset(near_runs, 0, sizeof(near_runs));
+        }
         frames = matched = other_frames = sum_bytes = sum_bufs = 0;
         sum_older = sum_newer = sum_draws = sum_draws_cam = sum_inv_only = sum_hist_imgs = sum_hist_draws = 0;
         memset(lag, 0, sizeof(lag));
