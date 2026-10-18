@@ -17,11 +17,14 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
+#include <memory>
 #include <thread>
 
 #include "shader/shader.h"
 #include "gpu/gpu.h"
 #include "gpu/graphics_audit.h"
+#include "gpu/vk/pipeline_warmup_cache.h"
+#include "hwder_version.h"
 #include "vk_common.h"
 #include "post_spv.h"
 
@@ -557,31 +560,45 @@ static const PictureShader kPictureShaders[] = {
     {0x0fd5e74182e59ceaull, 3, 0x20},  // battles (Legend Mode, Sealed Grounds)
 };
 
+struct WarmProgram;
 struct GfxProgram {
     ShaderEntry* stages[5] = {};  // VertexB, TessControl, TessEval, Geometry, Fragment
     StageLayout* layouts[5] = {};
     VkPipelineLayout layout = VK_NULL_HANDLE;
     u32 attributes = 0;
     bool ok = false;
+    std::shared_ptr<warmup::ProgramRecord> recipe;
+    u32 recipe_index = ~0u;
+    WarmProgram* matched_warm = nullptr;
 };
 
-struct PipelineKey {
-    u64 program;
-    u32 color_formats[8];
-    u32 depth_format;
-    u32 num_colors;
-    u32 topology;
-    u32 patch_points;
-    u32 attrib_format[32];
-    u32 attrib_offset[32];
-    u32 attrib_binding[32];
-    u32 binding_stride[32];
-    u32 cull_enable, cull_mode, front_face, polygon_mode, depth_bias, discard, depth_clamp;
-    u32 depth_test, depth_write, depth_func, depth_bounds;
-    u32 stencil_enable, front[4], back[4];
-    u32 blend_enable[8], blend[8][6], color_mask[8];
-    u32 logic_enable, logic;
-    u32 prim_restart;
+using warmup::PipelineKey;
+struct WarmProgram {
+    u32 record_index;
+    GfxProgram gfx;  // separate modules/layouts; never inserted into live program/shader maps
+    bool canceled = false;  // pipe_m_ protects cancellation and worker state
+    ~WarmProgram() {
+        if (gfx.layout) vkDestroyPipelineLayout(dev(), gfx.layout, nullptr);
+        for (u32 s = 0; s < 5; s++) {
+            if (gfx.stages[s]) {
+                if (gfx.stages[s]->module) vkDestroyShaderModule(dev(), gfx.stages[s]->module, nullptr);
+                delete gfx.stages[s];
+            }
+            if (gfx.layouts[s]) {
+                vkDestroyDescriptorSetLayout(dev(), gfx.layouts[s]->layout, nullptr);
+                delete gfx.layouts[s];
+            }
+        }
+    }
+};
+enum class WarmState { Queued, Building, Ready, Failed, Adopted, Canceled };
+struct WarmPipeline {
+    WarmProgram* program;
+    PipelineKey key;
+    WarmState state = WarmState::Queued;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    bool demanded = false;
+    u64 demanded_ms = 0;
 };
 
 struct Framebuffer {
@@ -608,6 +625,22 @@ struct Framebuffer {
 extern "C" std::atomic<u32> hw_last_frame_draws{0};
 
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
+static const char* kWarmupFile = "pipeline_warmup.bin";
+static bool prewarm_enabled() {
+    const char* value = getenv("HWDER_PIPELINE_PREWARM");
+    return !value || strcmp(value, "0") != 0;
+}
+static u64 warmup_compatibility() {
+    // Bump the renderer ABI epoch for changes to translation/layout semantics not
+    // already separated by the compiled build identity. No guest path is trusted.
+    constexpr char epoch[] = "HWDER graphics warmup ABI 1";
+    u64 tag = hash_bytes(epoch, sizeof(epoch));
+    tag = hash_bytes(HWDER_COMMIT, sizeof(HWDER_COMMIT), tag);
+    const auto& p = display::device().props;
+    const u32 host[] = {p.vendorID, p.deviceID, p.driverVersion, sizeof(shader::PushConstants)};
+    tag = hash_bytes(host, sizeof(host), tag);
+    return hash_bytes(p.pipelineCacheUUID, sizeof(p.pipelineCacheUUID), tag);
+}
 static const u64 g_start_ms = GetTickCount64();
 
 using gpu::vk::g_prof;
@@ -657,6 +690,8 @@ public:
         create_dummies();
         hw_log("vk: renderer ready (ring %llu MiB)", (unsigned long long)(kRingSize >> 20));
     }
+
+    void start_prewarm(warmup::Cache&& cache, u64 load_ms);
 
     // -------------------------------------------------------------- Renderer interface
     void bind_const_buffer(u32 stage, u32 slot, u64 va, u32 size, bool valid) override {
@@ -865,18 +900,32 @@ private:
     VkImageView dummy_view(VkImageViewType t);
     Framebuffer resolve_framebuffer(const u32* regs, bool for_clear, u32 clear_rt);
     void begin_rendering(const Framebuffer& fb);
-    StageLayout* stage_layout(const shader::Resources& r, VkShaderStageFlags stages);
+    StageLayout* stage_layout(const shader::Resources& r, VkShaderStageFlags stages, bool live = true);
     ShaderEntry* get_shader(GuestEnv& env, shader::Stage stage, const shader::Options& opt, GuestEnv* va);
     GfxProgram* get_program(const u32* regs, u64* key_out);
     VkPipeline get_pipeline(GfxProgram* prog, const PipelineKey& key);
     VkPipeline create_pipeline(GfxProgram* prog, const PipelineKey& key);  // worker-thread safe
     void pipeline_worker();
     void adopt_pipeline_results();  // renderer thread, pipe_m_ held
+    void start_pipeline_worker();  // pipe_m_ held; one worker for speculative and demanded work
+    void prepare_program(GfxProgram* prog, u64 key);
+    void record_pipeline(GfxProgram* prog, const PipelineKey& key);
+    void ensure_warmup_records();
+    void save_warmup_records();
+    void log_warmup(const char* phase);
+    void cancel_warm_program(WarmProgram* prog);  // pipe_m_ held
     struct PipeJob {
         u64 hash;
         GfxProgram* prog;
         PipelineKey key;
         u64 enqueued_ms;
+        WarmPipeline* warm = nullptr;
+    };
+    struct PipeDone {
+        u64 hash;
+        VkPipeline pipe;
+        GfxProgram* prog;
+        PipelineKey key;
     };
     u64 audit_pending_max_ms_ = 0; // pipe_m_ protects worker writes and report reads
     u64 audit_report_ms_ = 0;
@@ -886,10 +935,22 @@ private:
     std::condition_variable pipe_cv_;
     std::condition_variable pipe_done_cv_;
     std::deque<PipeJob> pipe_jobs_;
-    std::vector<std::pair<u64, VkPipeline>> pipe_done_;
+    std::vector<PipeDone> pipe_done_;
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
+    warmup::Cache warmup_records_;  // retained historical successes plus observed new successes
+    bool warmup_records_loaded_ = false, warmup_dirty_ = false, warmup_first_draw_ = false;
+    std::unordered_set<u32> invalid_warm_programs_;
+    std::vector<std::unique_ptr<WarmProgram>> warm_programs_;
+    std::vector<std::unique_ptr<WarmPipeline>> warm_pipelines_;
+    std::unordered_multimap<u64, WarmPipeline*> warm_lookup_;
+    std::unordered_multimap<u64, u32> recipe_lookup_;
+    u64 warmup_start_ms_ = 0, warmup_loaded_ = 0, warmup_recorded_ = 0, warmup_observed_ = 0;
+    u64 warmup_queued_ = 0, warmup_finished_ = 0, warmup_succeeded_ = 0, warmup_adopted_ = 0;
+    u64 warmup_mismatched_ = 0, warmup_failed_ = 0, warmup_canceled_ = 0, warmup_demand_hits_ = 0;
+    u64 warmup_pending_max_ms_ = 0;
+    size_t warmup_storage_bytes_ = 0;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
     bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
                         const std::function<u32(u32, u32)>& cbuf, const std::function<bool(u32, u64&, u32&)>& cb_range,
@@ -971,11 +1032,23 @@ private:
     bool fb_cache_valid_ = false;
     size_t pcache_saved_ = 0;  // pipelines_.size() at the last save
     void save_pipeline_cache() {
+        save_warmup_records();
         if (pipelines_.size() == pcache_saved_) return;
         size_t n = 0;
-        if (vkGetPipelineCacheData(dev(), pcache_, &n, nullptr) != VK_SUCCESS || !n) return;
-        std::vector<u8> blob(n);
-        if (vkGetPipelineCacheData(dev(), pcache_, &n, blob.data()) != VK_SUCCESS) return;
+        std::vector<u8> blob;
+        bool complete = false;
+        // flags=0 caches synchronize internally. A worker may grow the cache between
+        // queries; retry a bounded number of times, then leave saving to a later epoch.
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (vkGetPipelineCacheData(dev(), pcache_, &n, nullptr) != VK_SUCCESS || !n) return;
+            blob.resize(n);
+            const VkResult result = vkGetPipelineCacheData(dev(), pcache_, &n, blob.data());
+            if (result == VK_INCOMPLETE) continue;
+            if (result != VK_SUCCESS) return;
+            complete = true;
+            break;
+        }
+        if (!complete) return;
         if (FILE* f = fopen(kPipelineCacheFile, "wb")) {
             fwrite(blob.data(), 1, n, f);
             fclose(f);
@@ -1190,7 +1263,7 @@ void VkRenderer::begin_rendering(const Framebuffer& fb) {
     cur_fb_ = fb;
 }
 
-StageLayout* VkRenderer::stage_layout(const shader::Resources& r, VkShaderStageFlags stages) {
+StageLayout* VkRenderer::stage_layout(const shader::Resources& r, VkShaderStageFlags stages, bool live) {
     StageLayout tmp;
     auto add = [&](VkDescriptorType t, u32 n) {
         tmp.types.push_back(t);
@@ -1204,7 +1277,7 @@ StageLayout* VkRenderer::stage_layout(const shader::Resources& r, VkShaderStageF
     u64 key = hash_bytes(tmp.types.data(), tmp.types.size() * 4, stages);
     key = hash_bytes(tmp.counts.data(), tmp.counts.size() * 4, key);
     auto it = set_layouts_.find(key);
-    if (it != set_layouts_.end()) return it->second;
+    if (live && it != set_layouts_.end()) return it->second;
     std::vector<VkDescriptorSetLayoutBinding> b(tmp.types.size());
     for (size_t i = 0; i < b.size(); i++) {
         b[i] = {};
@@ -1217,8 +1290,10 @@ StageLayout* VkRenderer::stage_layout(const shader::Resources& r, VkShaderStageF
     ci.bindingCount = (u32)b.size();
     ci.pBindings = b.data();
     StageLayout* sl = new StageLayout(tmp);
-    VK_CHECK(vkCreateDescriptorSetLayout(dev(), &ci, nullptr, &sl->layout));
-    set_layouts_[key] = sl;
+    VkResult result = vkCreateDescriptorSetLayout(dev(), &ci, nullptr, &sl->layout);
+    if (!live && result != VK_SUCCESS) { delete sl; return nullptr; }
+    VK_CHECK(result);
+    if (live) set_layouts_[key] = sl;
     return sl;
 }
 
@@ -1422,14 +1497,307 @@ GfxProgram* VkRenderer::get_program_slow(const u32* regs, u64* key_out) {
     pli.pPushConstantRanges = &pc;
     VK_CHECK(vkCreatePipelineLayout(dev(), &pli, nullptr, &gp->layout));
     gp->ok = true;
+    prepare_program(gp, key);
     return gp;
 }
 
+static size_t recipe_bytes(const warmup::ProgramRecord& record) {
+    size_t bytes = sizeof(record);
+    for (const auto& stage : record.stages) {
+        if (!stage.present) continue;
+        const auto& r = stage.program.resources;
+        bytes += stage.program.spirv.size() * sizeof(u32) +
+            r.const_buffers.size() * sizeof(shader::ConstBufferUse) +
+            r.storage_buffers.size() * sizeof(shader::StorageBufferUse) +
+            (r.texel_buffers.size() + r.textures.size()) * sizeof(shader::TextureUse) +
+            r.images.size() * sizeof(shader::ImageUse);
+    }
+    return bytes;
+}
+
+void VkRenderer::ensure_warmup_records() {
+    if (warmup_records_loaded_) return;
+    warmup_records_loaded_ = true;
+    const auto status = warmup::load(kWarmupFile, warmup_compatibility(), warmup_records_);
+    if (status != warmup::Status::Ok) {
+        hw_log("vk: prewarm recording starts empty (%s)", warmup::name(status));
+        return;
+    }
+    warmup_loaded_ = warmup_records_.pipelines.size();
+    warmup_storage_bytes_ = warmup_records_.pipelines.size() * sizeof(warmup::PipelineRecord);
+    for (const auto& program : warmup_records_.programs) warmup_storage_bytes_ += recipe_bytes(program);
+    for (u32 i = 0; i < warmup_records_.pipelines.size(); i++) {
+        const auto& key = warmup_records_.pipelines[i].key;
+        recipe_lookup_.emplace(hash_bytes(&key, sizeof(key)), i);
+    }
+    hw_log("vk: prewarm retained %zu historical recipes; prebuild %s", warmup_records_.pipelines.size(),
+           prewarm_enabled() ? "not started early" : "disabled (recording enabled)");
+}
+
+void VkRenderer::start_pipeline_worker() {
+    if (pipe_workers_.empty()) pipe_workers_.emplace_back([this] { pipeline_worker(); });
+}
+
+void VkRenderer::start_prewarm(warmup::Cache&& cache, u64 load_ms) {
+    const u64 begin = GetTickCount64();
+    warmup_start_ms_ = begin;
+    warmup_records_ = std::move(cache);
+    warmup_records_loaded_ = true;
+    warmup_loaded_ = warmup_records_.pipelines.size();
+    warmup_storage_bytes_ = warmup_records_.pipelines.size() * sizeof(warmup::PipelineRecord);
+    for (const auto& program : warmup_records_.programs) warmup_storage_bytes_ += recipe_bytes(program);
+    try {
+        std::vector<WarmProgram*> by_index(warmup_records_.programs.size(), nullptr);
+        static const VkShaderStageFlagBits stages[5] = {VK_SHADER_STAGE_VERTEX_BIT,
+            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+            VK_SHADER_STAGE_GEOMETRY_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
+        for (u32 i = 0; i < warmup_records_.programs.size(); i++) {
+            const auto& record = warmup_records_.programs[i];
+            // A valid cache can contain repeated recipes; share immutable hydration and
+            // never queue two warm jobs for the same full program/static state.
+            for (u32 previous = 0; previous < i; previous++) {
+                const auto& candidate = warmup_records_.programs[previous];
+                if (by_index[previous] && candidate.fingerprint == record.fingerprint && warmup::equal(candidate, record)) {
+                    by_index[i] = by_index[previous];
+                    break;
+                }
+            }
+            if (by_index[i]) continue;
+            auto program = std::make_unique<WarmProgram>();
+            program->record_index = i;
+            bool ok = true;
+            VkDescriptorSetLayout layouts[5]{};
+            for (u32 s = 0; s < 5 && ok; s++) {
+                const auto& stage = record.stages[s];
+                if (stage.present) {
+                    auto* entry = new ShaderEntry;
+                    program->gfx.stages[s] = entry;
+                    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+                    ci.codeSize = stage.program.spirv.size() * sizeof(u32);
+                    ci.pCode = stage.program.spirv.data();
+                    ok = vkCreateShaderModule(dev(), &ci, nullptr, &entry->module) == VK_SUCCESS;
+                    if (!ok) { entry->module = VK_NULL_HANDLE; break; }
+                    entry->ok = true;
+                }
+                const shader::Resources empty;
+                // Warm layouts are private: they cannot populate a live layout cache.
+                auto* layout = stage_layout(stage.present ? stage.program.resources : empty, stages[s], false);
+                program->gfx.layouts[s] = layout;
+                ok = layout != nullptr;
+                if (ok) layouts[s] = layout->layout;
+            }
+            if (ok) {
+                VkPushConstantRange pc{VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(shader::PushConstants)};
+                VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                ci.setLayoutCount = 5;
+                ci.pSetLayouts = layouts;
+                ci.pushConstantRangeCount = 1;
+                ci.pPushConstantRanges = &pc;
+                ok = vkCreatePipelineLayout(dev(), &ci, nullptr, &program->gfx.layout) == VK_SUCCESS;
+                if (!ok) program->gfx.layout = VK_NULL_HANDLE;
+            }
+            if (!ok) {
+                hw_log("vk: prewarm program %016llx hydration failed; live translation will be used",
+                       (unsigned long long)record.key);
+                continue;
+            }
+            program->gfx.attributes = record.stages[0].program.attributes_read;
+            program->gfx.ok = true;
+            by_index[i] = program.get();
+            warm_programs_.push_back(std::move(program));
+        }
+        {
+            std::lock_guard<std::mutex> l(pipe_m_);
+            for (u32 i = 0; i < warmup_records_.pipelines.size(); i++) {
+                const auto& record = warmup_records_.pipelines[i];
+                const u64 hash = hash_bytes(&record.key, sizeof(record.key));
+                recipe_lookup_.emplace(hash, i);
+                WarmProgram* program = by_index[record.program_index];
+                if (!program) { ++warmup_failed_; continue; }
+                bool duplicate = false;
+                auto [first, last] = warm_lookup_.equal_range(hash);
+                for (; first != last; ++first) {
+                    if (first->second->program == program && memcmp(&first->second->key, &record.key, sizeof(record.key)) == 0) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+                auto pipeline = std::make_unique<WarmPipeline>();
+                pipeline->program = program;
+                pipeline->key = record.key;
+                WarmPipeline* entry = pipeline.get();
+                warm_pipelines_.push_back(std::move(pipeline));
+                warm_lookup_.emplace(hash, entry);
+                pipe_jobs_.push_back({hash, &program->gfx, record.key, GetTickCount64(), entry});
+                ++warmup_queued_;
+            }
+        }
+    } catch (const std::exception& error) {
+        // No worker has started: all optional objects and partially queued jobs can
+        // be discarded safely. Retain the loaded historical recipes for recording.
+        pipe_jobs_.clear();
+        warm_lookup_.clear();
+        warm_pipelines_.clear();
+        warm_programs_.clear();
+        warmup_canceled_ += warmup_queued_;
+        warmup_queued_ = 0;
+        ++warmup_failed_;
+        hw_log("vk: prewarm hydration aborted (%s); using live compilation", error.what());
+        return;
+    }
+    try {
+        std::lock_guard<std::mutex> l(pipe_m_);
+        if (!pipe_jobs_.empty()) start_pipeline_worker();
+        pipe_cv_.notify_one();
+    } catch (const std::exception& error) {
+        // emplace_back either constructed the sole worker or threw before it exists.
+        // No running thread is hidden by this optional startup fallback.
+        if (!pipe_workers_.empty()) throw;
+        pipe_jobs_.clear();
+        warm_lookup_.clear();
+        warm_pipelines_.clear();
+        warm_programs_.clear();
+        warmup_canceled_ += warmup_queued_;
+        warmup_queued_ = 0;
+        ++warmup_failed_;
+        hw_log("vk: prewarm worker unavailable (%s); using lazy live compilation", error.what());
+        return;
+    }
+    hw_log("vk: prewarm startup: load %llu ms, hydrate/queue %llu ms, %zu programs, %llu recipes queued, one worker",
+           (unsigned long long)load_ms, (unsigned long long)(GetTickCount64() - begin), warm_programs_.size(),
+           (unsigned long long)warmup_queued_);
+    log_warmup("startup_queued");
+}
+
+void VkRenderer::cancel_warm_program(WarmProgram* prog) {
+    prog->canceled = true;
+    for (auto& entry : warm_pipelines_) {
+        if (entry->program != prog || entry->state == WarmState::Adopted || entry->state == WarmState::Canceled) continue;
+        ++warmup_canceled_;
+        if (entry->state != WarmState::Building) {
+            if (entry->pipeline) vkDestroyPipeline(dev(), entry->pipeline, nullptr);
+            entry->pipeline = VK_NULL_HANDLE;
+            entry->state = WarmState::Canceled;
+        }
+        // An in-flight compile keeps immutable modules/layouts alive and discards its result.
+    }
+    pipe_jobs_.erase(std::remove_if(pipe_jobs_.begin(), pipe_jobs_.end(), [prog](const PipeJob& job) {
+        return job.warm && job.warm->program == prog;
+    }), pipe_jobs_.end());
+    pipe_done_cv_.notify_one();
+}
+
+void VkRenderer::prepare_program(GfxProgram* prog, u64 key) {
+    ensure_warmup_records();
+    auto record = std::make_shared<warmup::ProgramRecord>();
+    record->key = key;
+    for (u32 s = 0; s < 5; s++) {
+        if (!prog->stages[s]) continue;
+        const auto& source = prog->stages[s]->prog;
+        const auto& r = source.resources;
+        if (source.spirv.size() > warmup::kMaxSpirvWords || r.const_buffers.size() > warmup::kMaxResources ||
+            r.storage_buffers.size() > warmup::kMaxResources || r.texel_buffers.size() > warmup::kMaxResources ||
+            r.textures.size() > warmup::kMaxResources || r.images.size() > warmup::kMaxResources) {
+            hw_log("vk: prewarm program %016llx exceeds recipe limits; using live compilation", (unsigned long long)key);
+            return;
+        }
+        record->stages[s].present = true;
+        record->stages[s].program = source;
+    }
+    record->fingerprint = warmup::fingerprint(*record);
+    prog->recipe = record;
+    std::lock_guard<std::mutex> l(pipe_m_);
+    for (u32 i = 0; i < warmup_records_.programs.size(); i++) {
+        const auto& saved = warmup_records_.programs[i];
+        if (saved.key != key || invalid_warm_programs_.count(i)) continue;
+        const bool matches = saved.fingerprint == record->fingerprint && warmup::equal(saved, *record);
+        if (matches && prog->recipe_index == ~0u) prog->recipe_index = i;
+        else {
+            invalid_warm_programs_.insert(i);
+            warmup_dirty_ = true;
+            ++warmup_mismatched_;
+        }
+        for (auto& warm : warm_programs_) {
+            if (warm->record_index != i) continue;
+            if (matches) prog->matched_warm = warm.get();
+            else cancel_warm_program(warm.get());
+        }
+    }
+}
+
+void VkRenderer::record_pipeline(GfxProgram* prog, const PipelineKey& key) {
+    ++warmup_observed_;
+    if (!prog->recipe) return;
+    if (warmup_records_.pipelines.size() >= warmup::kMaxPipelines) return;
+    if (prog->recipe_index == ~0u) {
+        if (warmup_records_.programs.size() >= warmup::kMaxPrograms) return;
+        const size_t bytes = recipe_bytes(*prog->recipe);
+        if (bytes + sizeof(warmup::PipelineRecord) > warmup::kMaxFileBytes ||
+            warmup_storage_bytes_ > warmup::kMaxFileBytes - bytes - sizeof(warmup::PipelineRecord)) return;
+        prog->recipe_index = (u32)warmup_records_.programs.size();
+        warmup_records_.programs.push_back(*prog->recipe);
+        warmup_storage_bytes_ += bytes;
+    }
+    const u64 hash = hash_bytes(&key, sizeof(key));
+    auto [first, last] = recipe_lookup_.equal_range(hash);
+    for (; first != last; ++first) {
+        const auto& saved = warmup_records_.pipelines[first->second];
+        if (saved.program_index == prog->recipe_index && memcmp(&saved.key, &key, sizeof(key)) == 0) return;
+    }
+    if (warmup_storage_bytes_ > warmup::kMaxFileBytes - sizeof(warmup::PipelineRecord)) return;
+    warmup::PipelineRecord record;
+    record.key = key;
+    record.program_index = prog->recipe_index;
+    record.program_fingerprint = prog->recipe->fingerprint;
+    recipe_lookup_.emplace(hash, (u32)warmup_records_.pipelines.size());
+    warmup_records_.pipelines.push_back(record);
+    warmup_storage_bytes_ += sizeof(record);
+    ++warmup_recorded_;
+    warmup_dirty_ = true;
+}
+
+void VkRenderer::save_warmup_records() {
+    if (!warmup_dirty_) return;
+    // Preserve historical successes across early quits. Only a freshly translated
+    // mismatch invalidates a historical program group; unvisited battle recipes stay.
+    warmup::Cache snapshot;
+    std::vector<u32> remap(warmup_records_.programs.size(), ~0u);
+    for (u32 i = 0; i < warmup_records_.programs.size(); i++) {
+        if (invalid_warm_programs_.count(i)) continue;
+        remap[i] = (u32)snapshot.programs.size();
+        snapshot.programs.push_back(warmup_records_.programs[i]);
+    }
+    for (const auto& record : warmup_records_.pipelines) {
+        if (remap[record.program_index] == ~0u) continue;
+        snapshot.pipelines.push_back(record);
+        snapshot.pipelines.back().program_index = remap[record.program_index];
+    }
+    const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot);
+    if (status == warmup::Status::Ok) warmup_dirty_ = false;
+    hw_log("vk: prewarm save: %s, %zu recipes retained, %llu newly recorded this run",
+           warmup::name(status), snapshot.pipelines.size(), (unsigned long long)warmup_recorded_);
+}
+
+void VkRenderer::log_warmup(const char* phase) {
+    std::lock_guard<std::mutex> l(pipe_m_);
+    hw_log("vk: prewarm %s: loaded %llu queued %llu completed %llu succeeded %llu adopted %llu demand_hits %llu mismatched_programs %llu failed %llu canceled %llu new_records %llu observed_successes %llu warm_pending_max_ms %llu | present %llu draws %llu elapsed %llu ms",
+           phase, (unsigned long long)warmup_loaded_, (unsigned long long)warmup_queued_,
+           (unsigned long long)warmup_finished_, (unsigned long long)warmup_succeeded_, (unsigned long long)warmup_adopted_,
+           (unsigned long long)warmup_demand_hits_, (unsigned long long)warmup_mismatched_,
+           (unsigned long long)warmup_failed_, (unsigned long long)warmup_canceled_,
+           (unsigned long long)warmup_recorded_, (unsigned long long)warmup_observed_,
+           (unsigned long long)warmup_pending_max_ms_,
+           (unsigned long long)g_s.present_count, (unsigned long long)st_.draws,
+           (unsigned long long)(warmup_start_ms_ ? GetTickCount64() - warmup_start_ms_ : 0));
+}
+
 void VkRenderer::adopt_pipeline_results() {
-    for (auto& [jh, jp] : pipe_done_) {
+    for (auto& [jh, jp, prog, key] : pipe_done_) {
         pipe_pending_.erase(jh);
         if (!jp && pipe_retried_.insert(jh).second) continue;  // next draw retries synchronously once
         pipelines_[jh] = jp;
+        if (jp) record_pipeline(prog, key);
     }
     pipe_done_.clear();
 }
@@ -1454,7 +1822,48 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // which showed as a one-frame black box the first time an attack effect was used.
     // HWDER_ASYNC_RT_PIPELINES=1 restores async compiles for them (for comparison).
     static const bool async_rt = getenv("HWDER_ASYNC_RT_PIPELINES") != nullptr;
-    if (sync_pipes || st_.draws < 64 || pipe_retried_.count(h) || (draw_samples_rt_ && !async_rt)) {
+    const bool synchronous = sync_pipes || st_.draws < 64 || pipe_retried_.count(h) || (draw_samples_rt_ && !async_rt);
+    if (prog->matched_warm) {
+        std::unique_lock<std::mutex> l(pipe_m_);
+        auto [first, last] = warm_lookup_.equal_range(h);
+        for (; first != last; ++first) {
+            WarmPipeline* warm = first->second;
+            if (warm->program != prog->matched_warm || memcmp(&warm->key, &key, sizeof(key)) != 0 ||
+                warm->state == WarmState::Canceled || warm->state == WarmState::Adopted) continue;
+            if (!warm->demanded) {
+                warm->demanded = true;
+                warm->demanded_ms = GetTickCount64();
+                ++warmup_demand_hits_;
+            }
+            auto queued = std::find_if(pipe_jobs_.begin(), pipe_jobs_.end(),
+                                      [warm](const PipeJob& job) { return job.warm == warm; });
+            if (queued != pipe_jobs_.end() && queued != pipe_jobs_.begin()) {
+                std::rotate(pipe_jobs_.begin(), queued, std::next(queued));
+                pipe_cv_.notify_one();
+            }
+            if (synchronous) {
+                pipe_done_cv_.wait(l, [warm] {
+                    return warm->state != WarmState::Queued && warm->state != WarmState::Building;
+                });
+            }
+            if (warm->state == WarmState::Ready) {
+                VkPipeline pipe = warm->pipeline;
+                warm->pipeline = VK_NULL_HANDLE;  // transfer exactly once into live ownership
+                warm->state = WarmState::Adopted;
+                ++warmup_adopted_;
+                pipelines_[h] = pipe;
+                record_pipeline(prog, key);
+                return pipe;
+            }
+            if (warm->state == WarmState::Failed) {
+                warm->state = WarmState::Canceled;
+                pipe_retried_.insert(h);  // one synchronous retry, as for failed live async jobs
+                break;
+            }
+            if (warm->state == WarmState::Queued || warm->state == WarmState::Building) return VK_NULL_HANDLE;
+        }
+    }
+    if (synchronous || pipe_retried_.count(h)) {
         if (pipe_pending_.count(h)) {
             // A heavy frame may have queued this key before a light frame or RT-sampling
             // draw needs it synchronously. Reuse that job rather than create twice and
@@ -1471,7 +1880,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
             }
             pipe_done_cv_.wait(l, [this, h] {
                 return std::any_of(pipe_done_.begin(), pipe_done_.end(),
-                                   [h](const auto& done) { return done.first == h; });
+                                   [h](const auto& done) { return done.hash == h; });
             });
             adopt_pipeline_results();
             auto ready = pipelines_.find(h);
@@ -1480,15 +1889,16 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
         }
         VkPipeline pipe = create_pipeline(prog, key);
         pipelines_[h] = pipe;
+        if (pipe) record_pipeline(prog, key);
         return pipe;
     }
     if (pipe_pending_.insert(h).second) {
         std::lock_guard<std::mutex> l(pipe_m_);
-        pipe_jobs_.push_back({h, prog, key, GetTickCount64()});
-        if (pipe_workers_.empty()) {
-            for (int i = 0; i < 1; i++)
-                pipe_workers_.emplace_back([this] { pipeline_worker(); });
-        }
+        // Real draws take priority over speculative startup recipes.
+        auto speculative = std::find_if(pipe_jobs_.begin(), pipe_jobs_.end(),
+                                       [](const PipeJob& job) { return job.warm && !job.warm->demanded; });
+        pipe_jobs_.insert(speculative, {h, prog, key, GetTickCount64()});
+        start_pipeline_worker();
         pipe_cv_.notify_one();
     }
     return VK_NULL_HANDLE;
@@ -1503,6 +1913,10 @@ void VkRenderer::pipeline_worker() {
             pipe_cv_.wait(l, [this] { return !pipe_jobs_.empty(); });
             job = pipe_jobs_.front();
             pipe_jobs_.pop_front();
+            if (job.warm) {
+                if (job.warm->state == WarmState::Canceled) continue;
+                job.warm->state = WarmState::Building;
+            }
         }
         VkPipeline pipe = VK_NULL_HANDLE;
         try {
@@ -1513,6 +1927,24 @@ void VkRenderer::pipeline_worker() {
             hw_log("vk: pipeline worker exception");
         }
         std::lock_guard<std::mutex> l(pipe_m_);
+        if (job.warm) {
+            ++warmup_finished_;
+            const u64 now = GetTickCount64();
+            warmup_pending_max_ms_ = std::max(warmup_pending_max_ms_, now - job.enqueued_ms);
+            if (job.warm->demanded)
+                audit_pending_max_ms_ = std::max(audit_pending_max_ms_, now - job.warm->demanded_ms);
+            if (!pipe) ++warmup_failed_;
+            if (job.warm->program->canceled) {
+                if (pipe) vkDestroyPipeline(dev(), pipe, nullptr);
+                job.warm->state = WarmState::Canceled;
+            } else {
+                job.warm->pipeline = pipe;
+                job.warm->state = pipe ? WarmState::Ready : WarmState::Failed;
+                if (pipe) ++warmup_succeeded_;
+            }
+            pipe_done_cv_.notify_one();
+            continue;  // unverified warm results never enter the live completion/pending maps
+        }
         const u64 pending_ms = GetTickCount64() - job.enqueued_ms;
         audit_pending_max_ms_ = std::max(audit_pending_max_ms_, pending_ms);
         static bool first = true;
@@ -1521,7 +1953,7 @@ void VkRenderer::pipeline_worker() {
             hw_log("gfx-audit: first async completion: pipeline %016llx enqueue-to-finish %llu ms success %d",
                    (unsigned long long)job.hash, (unsigned long long)pending_ms, pipe != VK_NULL_HANDLE);
         }
-        pipe_done_.push_back({job.hash, pipe});
+        pipe_done_.push_back({job.hash, pipe, job.prog, job.key});
         pipe_done_cv_.notify_one();
     }
 }
@@ -1636,8 +2068,8 @@ VkPipeline VkRenderer::create_pipeline(GfxProgram* prog, const PipelineKey& key)
     SlowTimer timer("graphics pipeline creation", 30.0);
     VkResult r;
     {
-        // Host access to the VkPipelineCache must be externally synchronised: the worker threads and
-        // the synchronous path all create through pcache_ (two workers racing here crashed the driver).
+        // Driver workaround: serialize graphics creation (two workers racing here
+        // crashed a driver). The flags=0 cache itself is internally synchronized.
         static std::mutex create_m;
         std::lock_guard<std::mutex> l(create_m);
         r = vkCreateGraphicsPipelines(dev(), pcache_, 1, &ci, nullptr, &pipe);
@@ -2015,6 +2447,10 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     draws_++;
     st_.draws++;
     if (!p.count) return;
+    if (!warmup_first_draw_) {
+        warmup_first_draw_ = true;
+        log_warmup("before_first_live_draw");
+    }
     u64 prog_key = 0;
     g_prof_draws++;
     GfxProgram* prog;
@@ -3832,6 +4268,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         const u64 audit_now = GetTickCount64();
         if (audit_now - audit_report_ms_ >= 10000) {
             audit_report_ms_ = audit_now;
+            log_warmup("periodic");
             u64 pending_max;
             { std::lock_guard<std::mutex> l(pipe_m_); pending_max = audit_pending_max_ms_; }
             hw_log("gfx-audit: frame %llu cumulative: fence_timeouts %llu skipped_draws %llu pending_max_ms %llu cpu_image_writes %llu disabled_scaled_viewports %llu tex_dynamic_offsets %llu depth_bias_formats %zu",
@@ -3983,4 +4420,28 @@ void retire_resource(std::function<void()> fn) { retire(std::move(fn)); }
 
 namespace gpu {
 Renderer* create_renderer(MemoryManager* mm) { return new VkRenderer(mm); }
+
+void start_pipeline_prewarm() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!prewarm_enabled()) {
+            hw_log("vk: prewarm disabled; live recipe recording remains enabled");
+            return;
+        }
+        const u64 start = GetTickCount64();
+        warmup::Cache cache;
+        const auto status = warmup::load(kWarmupFile, warmup_compatibility(), cache);
+        const u64 loaded = GetTickCount64();
+        if (status != warmup::Status::Ok || cache.pipelines.empty()) {
+            hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy",
+                   warmup::name(status), cache.pipelines.size(), (unsigned long long)(loaded - start));
+            return;
+        }
+        // The optional artifact has been bounded, decoded and compatibility-checked
+        // before allocating the renderer's ring or submitting any dummy uploads.
+        auto* target = static_cast<VkRenderer*>(renderer());
+        hw_log("vk: prewarm early renderer allocation: %llu ms", (unsigned long long)(GetTickCount64() - loaded));
+        target->start_prewarm(std::move(cache), loaded - start);
+    });
+}
 }  // namespace gpu

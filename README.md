@@ -232,6 +232,15 @@ log file; `HWDER_MUTE=1` silences audio; `HWDER_RES_SCALE` overrides the resolut
 `HWDER_IPC_TRACE`, `HWDER_FS_TRACE` and the other `HWDER_*_TRACE` switches dump the respective
 subsystem's activity to the log.
 
+Successful graphics pipelines are recorded with their shader code and binding metadata in
+`pipeline_warmup.bin`. A compatible file prebuilds those recipes on the single pipeline
+worker before the startup screen and guest boot. Warmed results are reused only after
+fresh live translation exactly matches the saved shader and metadata. Absent or incompatible
+files leave startup lazy. `HWDER_PIPELINE_PREWARM=0` disables early prebuilding for comparison
+while continuing to record successful live pipelines. The file is disposable; delete it to
+start fresh. Logs report startup costs, completion before the first live draw, adoption,
+mismatches, failures and recording. Performance and visual acceptance require matched runs.
+
 Unattended test runs: `HWDER_AUTOPLAY=2` drives into a battle and keeps fighting (`HWDER_AUTOPLAY_SKIP=1`
 also skips story cutscenes and tutorial pop-ups and gets past the pre-battle menu - Battlefield Info: B,
 then Start Battle; `HWDER_AUTOPLAY_CAM=1` turns the camera; `HWDER_AUTOPLAY_IDLE=1` stands still in
