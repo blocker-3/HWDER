@@ -21,6 +21,7 @@
 
 #include "shader/shader.h"
 #include "gpu/gpu.h"
+#include "gpu/graphics_audit.h"
 #include "vk_common.h"
 #include "post_spv.h"
 
@@ -699,6 +700,11 @@ public:
         else
             invalidations_.emplace_back(addr, size);
     }
+    void audit_cpu_write(u64 addr, u64 size) override {
+        if (!addr || !size) return;
+        std::lock_guard<std::recursive_mutex> l(m_);
+        tc_.audit_cpu_write(addr, size);
+    }
     void flush_region(u64 addr, u64 size) override {
         if (!addr || !size) return;
         std::lock_guard<std::recursive_mutex> l(m_);
@@ -869,7 +875,12 @@ private:
         u64 hash;
         GfxProgram* prog;
         PipelineKey key;
+        u64 enqueued_ms;
     };
+    u64 audit_pending_max_ms_ = 0; // pipe_m_ protects worker writes and report reads
+    u64 audit_report_ms_ = 0;
+    std::unordered_map<u32, u64> audit_depth_bias_;
+    std::unordered_map<u64, u64> audit_skips_by_program_;
     std::mutex pipe_m_;
     std::condition_variable pipe_cv_;
     std::deque<PipeJob> pipe_jobs_;
@@ -1444,7 +1455,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     }
     if (pipe_pending_.insert(h).second) {
         std::lock_guard<std::mutex> l(pipe_m_);
-        pipe_jobs_.push_back({h, prog, key});
+        pipe_jobs_.push_back({h, prog, key, GetTickCount64()});
         if (pipe_workers_.empty()) {
             for (int i = 0; i < 1; i++)
                 pipe_workers_.emplace_back([this] { pipeline_worker(); });
@@ -1473,6 +1484,14 @@ void VkRenderer::pipeline_worker() {
             hw_log("vk: pipeline worker exception");
         }
         std::lock_guard<std::mutex> l(pipe_m_);
+        const u64 pending_ms = GetTickCount64() - job.enqueued_ms;
+        audit_pending_max_ms_ = std::max(audit_pending_max_ms_, pending_ms);
+        static bool first = true;
+        if (first) {
+            first = false;
+            hw_log("gfx-audit: first async completion: pipeline %016llx enqueue-to-finish %llu ms success %d",
+                   (unsigned long long)job.hash, (unsigned long long)pending_ms, pipe != VK_NULL_HANDLE);
+        }
         pipe_done_.push_back({job.hash, pipe});
     }
 }
@@ -2405,9 +2424,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         skipped_++;
         st_.skipped++;
         {   // diagnostics: which draws a pending pipeline hides, and whether they read render targets
-            static u32 logged = 0;
-            if (logged < 200) {
-                logged++;
+            ++audit_skips_by_program_[prog_key];
+            if (++audit::skipped_draws == 1) {
                 hw_log("vk: async pipeline: skipped draw (present %llu, prog %016llx, rt0 %llx %ux%u, samples rt %d)",
                        (unsigned long long)g_s.present_count, (unsigned long long)prog_key,
                        fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)draw_samples_rt_);
@@ -2584,6 +2602,11 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             far_z = vt[5] + vt[2];
         }
         if (!regs[0x64B]) near_z = 0, far_z = 1;
+        if (!regs[0x64B] && (fb.scale != 1.0f || fb.scale_y != 1.0f)) {
+            if (++audit::unscaled_viewports == 1)
+                hw_log("gfx-audit: first disabled viewport transform: present %llu physical %ux%u scale %.3fx%.3f",
+                       (unsigned long long)g_s.present_count, fb.width, fb.height, fb.scale, fb.scale_y);
+        }
         if (fb.scale != 1.0f || fb.scale_y != 1.0f) {
             x *= fb.scale;
             y *= fb.scale_y;
@@ -2628,6 +2651,12 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         memcpy(&units, &regs[DepthBias], 4);
         memcpy(&slope, &regs[SlopeScaleDepthBias], 4);
         memcpy(&clamp, &regs[0x61F], 4);
+        if (key.depth_bias) {
+            auto& count = audit_depth_bias_[(u32)fb.depth_format];
+            if (++count == 1)
+                hw_log("gfx-audit: first depth bias: format %u present %llu units %g slope %g clamp %g",
+                       (unsigned)fb.depth_format, (unsigned long long)g_s.present_count, units, slope, clamp);
+        }
         float db[3] = {units / 2.0f, std::isfinite(clamp) ? clamp : 0.0f, slope};
         if (memcmp(rs_.bias, db, sizeof(db)) != 0) {
             vkCmdSetDepthBias(cb, db[0], db[1], db[2]);
@@ -3768,6 +3797,21 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                    (unsigned long long)st_.dispatches, (unsigned long long)st_.blits, programs_.size(), pipelines_.size(),
                    shaders_.size(), tc_.n_uploads, (unsigned long long)(tc_.upload_bytes >> 10), tc_.n_downloads, tc_.n_creates);
             hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames", gpu::gpu_busy_ms_reset() / 120.0);
+        }
+        const u64 audit_now = GetTickCount64();
+        if (audit_now - audit_report_ms_ >= 10000) {
+            audit_report_ms_ = audit_now;
+            u64 pending_max;
+            { std::lock_guard<std::mutex> l(pipe_m_); pending_max = audit_pending_max_ms_; }
+            hw_log("gfx-audit: frame %llu cumulative: fence_timeouts %llu skipped_draws %llu pending_max_ms %llu cpu_image_writes %llu disabled_scaled_viewports %llu tex_dynamic_offsets %llu depth_bias_formats %zu",
+                   (unsigned long long)g_s.present_count, (unsigned long long)audit::fence_timeouts.load(std::memory_order_relaxed),
+                   (unsigned long long)audit::skipped_draws, (unsigned long long)pending_max,
+                   (unsigned long long)audit::cpu_image_writes, (unsigned long long)audit::unscaled_viewports,
+                   (unsigned long long)audit::tex_dynamic_offsets, audit_depth_bias_.size());
+            for (const auto& [format, count] : audit_depth_bias_)
+                hw_log("gfx-audit: depth bias format %u cumulative draws %llu", format, (unsigned long long)count);
+            for (const auto& [program, count] : audit_skips_by_program_)
+                hw_log("gfx-audit: program %016llx cumulative skipped draws %llu", (unsigned long long)program, (unsigned long long)count);
         }
         if (dump_time_ >= 0 && GetTickCount64() - g_start_ms >= (u64)(dump_time_ * 1000.0)) {
             dump_time_ = -1;

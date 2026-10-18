@@ -64,6 +64,8 @@ public:
 
     // Memory coherency: guest CPU / DMA wrote this range, drop or re-upload cached host copies.
     virtual void invalidate_region(u64 cpu_addr, u64 size) = 0;
+    // Read-only audit of a linear I2M/DMA destination; does not flush or invalidate.
+    virtual void audit_cpu_write(u64 cpu_addr, u64 size) = 0;
     // Guest CPU / DMA is about to read this range: write back host-rendered data.
     virtual void flush_region(u64 cpu_addr, u64 size) = 0;
     // Whether the renderer holds GPU-modified data for this range (lets DMA copy GPU-side).

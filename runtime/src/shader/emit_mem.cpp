@@ -1,5 +1,6 @@
 // Memory, attribute, texture and warp instructions.
 #include "shader/translator.h"
+#include "gpu/graphics_audit.h"
 
 namespace shader {
 
@@ -365,6 +366,10 @@ void Translator::emit_tex(Inst in, Op op) {
         default: break;
         }
         if (aoffi) {
+            // R255 is a literal zero; every other R() emits a non-constant OpLoad.
+            // Count translated TEX instructions, not runtime samples or draws.
+            if (m < 255 && ++gpu::audit::tex_dynamic_offsets == 1)
+                log_once("TEX AOFFI non-constant offset register R" + std::to_string(m));
             Id v = R(m++);
             auto sx = [&](u32 off) { return b.bitcast(t_s32, bfe(v, u(off), u(4), true)); };
             if (ty_bits <= 1) a.offset = sx(0);

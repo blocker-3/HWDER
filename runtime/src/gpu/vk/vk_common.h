@@ -260,6 +260,7 @@ public:
     void invalidate(u64 addr, u64 size);
     void flush(u64 addr, u64 size);
     bool is_gpu_modified(u64 addr, u64 size);
+    void audit_cpu_write(u64 addr, u64 size);
     void next_epoch() { epoch_++; }
     u32 n_uploads = 0, n_downloads = 0, n_creates = 0;  // per-frame statistics (reset by the renderer)
     u64 generation = 0;  // bumped whenever an image is created or destroyed (framebuffer cache validity)
