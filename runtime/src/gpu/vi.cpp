@@ -9,6 +9,8 @@
 #include "nvdrv_device.h"
 #include "service/common.h"
 
+extern "C" void hw_frame_probe_mark(const char* what);  // interp/frame_probe.cpp
+
 namespace ipc {
 namespace {
 
@@ -187,6 +189,7 @@ public:
             break;
         }
         case 3: {  // DequeueBuffer(async, w, h, format, usage)
+            hw_frame_probe_mark("dequeue");
             in.read<u32>();
             u32 w = in.read<u32>(), h = in.read<u32>();
             (void)w, (void)h;
@@ -204,6 +207,7 @@ public:
             break;
         }
         case 7: {  // QueueBuffer(slot, QueueBufferInput)
+            hw_frame_probe_mark("queue");
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
             {

@@ -9,6 +9,8 @@
 #include "nvdrv_device.h"
 #include "service/common.h"
 
+extern "C" void hw_frame_probe_mark(const char* what);  // interp/frame_probe.cpp
+
 extern "C" u64 hw_cntvct();
 
 namespace nv {
@@ -696,6 +698,7 @@ public:
             return Success;
         }
         case 0x08: case 0x1B: {  // SubmitGPFIFO {u64 address, u32 num_entries, u32 flags, fence}
+            hw_frame_probe_mark("gpfifo");
             u32 n = *(u32*)(p + 8), flags = *(u32*)(p + 12);
             const u64* entries;
             if (nr == 0x08) entries = (const u64*)(b.in + 0x18);         // inline after the header
