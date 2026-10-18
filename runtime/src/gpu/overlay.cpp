@@ -1,6 +1,7 @@
 #include "gpu/overlay.h"
 #include "gpu/overlay_ui.h"
 
+#include "fs/save_dir.h"
 #include "gpu/settings.h"
 #include "hid/host_input.h"
 #include "hwder/runtime.h"
@@ -334,7 +335,7 @@ static void post_window_change() {
 static std::string save_path() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    for (auto& t : fs::directory_iterator("save", ec))
+    for (auto& t : fs::directory_iterator(fs::path(hwfs::active_save_root()), ec))
         for (auto& u : fs::directory_iterator(t.path(), ec)) {
             fs::path p = u.path() / "zmha.bin";
             if (fs::exists(p, ec)) return p.string();
@@ -731,11 +732,14 @@ static void tab_input(bool& changed) {
                         hid::host_button_name(hid::kHostLeftShoulder, type), hid::host_button_name(hid::kHostRightShoulder, type));
 }
 
-static void tab_gameplay() {
+static void tab_gameplay(bool& changed) {
+    section("Save folder");
+    opt_save_folder(true, changed);
+
     section("Cheats (save file)");
     static std::string status;
     std::string sp = save_path();
-    ImGui::TextDisabled("%s", sp.empty() ? "no save found under ./save" : sp.c_str());
+    ImGui::TextDisabled("%s", sp.empty() ? "no save found in the save folder" : sp.c_str());
     if (ImGui::Button("Import unlocks from reference")) {
         // Reference = a 100% save at save_reference/zmha.bin. Every byte that is 0 here and 1 there
         // is set (unlock/clear flags); counters and other values are left alone. The game reads its
@@ -902,7 +906,7 @@ static void build_ui(VkExtent2D extent) {
             case kGraphics: tab_graphics(changed); break;
             case kAudio: tab_audio(changed); break;
             case kInput: tab_input(changed); break;
-            case kGameplay: tab_gameplay(); break;
+            case kGameplay: tab_gameplay(changed); break;
             case kTools: tab_tools(changed); break;
             }
             ImGui::PopItemWidth();

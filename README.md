@@ -31,7 +31,9 @@ keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, 
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 
 Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
-`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete).
+`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). The save folder can be
+moved on the startup screen or in the menu's Gameplay tab; your saves are copied there only if you say so, and
+nothing in the old folder is moved or deleted.
 
 ## Reporting a bug
 
@@ -148,7 +150,8 @@ ExeFS partition and the RomFS section (IVFC level 5) through on-demand AES-CTR d
 Windows CNG. The SDK's own RomFS driver then parses that image through the `IStorage`
 interface, as it would on the console. An extracted `exefs/` + `romfs/` pair works too: `romfs.cpp`
 synthesises a RomFS image (header, hash tables, directory and file tables) over the host files
-so the same driver path is used. Save data maps to `save\<title>\<save id>\` on the host.
+so the same driver path is used. Save data maps to `save\<title>\<save id>\` on the host
+(or the save folder picked in the settings, `fs/save_dir.cpp`).
 
 **Audio.** `audio/audio.cpp` implements the `audren` renderer: it parses the per-frame update
 (voices, mixes, splitters, effects, sinks, wave buffers), decodes PCM16 and ADPCM voices with

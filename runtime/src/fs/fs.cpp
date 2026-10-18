@@ -1,6 +1,7 @@
 // fsp-srv: the filesystem service (SDK 3.5.1 command set).
 //  - RomFS: OpenDataStorageByCurrentProcess serves a virtual RomFS image (romfs.cpp).
-//  - Save data: host directories <exe dir>\save\<title id>\<user id | device | ...>\ (hostfs.cpp).
+//  - Save data: host directories <save folder>\<title id>\<user id | device | ...>\ (hostfs.cpp). The save folder is
+//    <exe dir>\save unless one was picked in the settings (save_dir.cpp).
 //  - SD card: <exe dir>\sdmc\.
 #include <windows.h>
 
@@ -8,6 +9,7 @@
 #include <set>
 
 #include "fs_internal.h"
+#include "fs/save_dir.h"
 
 namespace hwfs {
 
@@ -76,7 +78,7 @@ static_assert(sizeof(SaveDataAttribute) == 0x40);
 std::wstring save_dir(const SaveDataAttribute& a) {
     char buf[96];
     if (a.type == kSaveSystem) {
-        snprintf(buf, sizeof(buf), "\\save\\system\\%016llX", (unsigned long long)a.system_save_data_id);
+        snprintf(buf, sizeof(buf), "\\system\\%016llX", (unsigned long long)a.system_save_data_id);
     } else {
         u64 tid = a.program_id ? a.program_id : kern::g_process.title_id;
         char who[40];
@@ -92,14 +94,14 @@ std::wstring save_dir(const SaveDataAttribute& a) {
         case kSaveCache: snprintf(who, sizeof(who), "cache_%u", a.index); break;
         default: snprintf(who, sizeof(who), "device"); break;
         }
-        snprintf(buf, sizeof(buf), "\\save\\%016llX\\%s", (unsigned long long)tid, who);
+        snprintf(buf, sizeof(buf), "\\%016llX\\%s", (unsigned long long)tid, who);
     }
-    return exe_dir() + utf8_to_wide(buf);
+    return active_save_root() + utf8_to_wide(buf);
 }
 
 ServicePtr open_save(const SaveDataAttribute& a, bool read_only, const char* how) {
     std::wstring dir = save_dir(a);
-    std::string label = wide_to_utf8(dir.substr(exe_dir().size() + 1));
+    std::string label = "save" + wide_to_utf8(dir.substr(active_save_root().size()));
     hw_log("fs: %s type %u title %016llx user %016llx%016llx -> %s", how, a.type, (unsigned long long)a.program_id,
            (unsigned long long)a.user_id[1], (unsigned long long)a.user_id[0], label.c_str());
     // Save data always "exists": the directory is created on first open.

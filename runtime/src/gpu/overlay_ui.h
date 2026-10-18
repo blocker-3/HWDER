@@ -21,5 +21,7 @@ void opt_borderless(bool& changed);
 void opt_window_size(VkExtent2D extent, bool& changed);
 void opt_internal_res(bool& changed);
 void opt_volume(bool& changed);
+// Save folder (save_folder_ui.cpp). `in_game`: the game has started, so a new folder applies on restart.
+void opt_save_folder(bool in_game, bool& changed);
 
 }  // namespace overlay
