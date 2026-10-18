@@ -591,6 +591,9 @@ struct Framebuffer {
     }
 };
 
+// Draws in the last presented frame (read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
+extern "C" std::atomic<u32> hw_last_frame_draws{0};
+
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
 static const u64 g_start_ms = GetTickCount64();
 
@@ -3332,7 +3335,24 @@ static void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const cha
 // HWDER_FILMSTRIP=<dir>: a 96x54 thumbnail of every presented frame (f_<present>.raw RGBA8 + index.txt),
 // read back two presents later so it never stalls. For frame-by-frame inspection of transitions/cadence.
 static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
-    constexpr u32 SW = 96, SH = 54;
+    // HWDER_FILMSTRIP_W=<width> (default 96): thumbnail width, 16:9.
+    static const u32 SW = getenv("HWDER_FILMSTRIP_W") ? std::max(16, atoi(getenv("HWDER_FILMSTRIP_W"))) : 96, SH = SW * 9 / 16;
+    // HWDER_FILMSTRIP_BATTLE=<s>: start that long after the first battle-sized frame (> 450 draws);
+    // HWDER_FILMSTRIP_AFTER=<s>: or at that time since boot; HWDER_FILMSTRIP_FOR=<s>: stop after that long.
+    {
+        static const char* battle = getenv("HWDER_FILMSTRIP_BATTLE");
+        static const double dur = getenv("HWDER_FILMSTRIP_FOR") ? atof(getenv("HWDER_FILMSTRIP_FOR")) : 1e9;
+        static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
+        static double start = -1;
+        double now = (GetTickCount64() - g_start_ms) / 1000.0;
+        if (battle && start < 0) {
+            if (hw_last_frame_draws.load() <= 450) return;
+            start = now + atof(battle);
+            hw_log("filmstrip: battle frame seen, capturing from t=%.1f for %.1f s", start, dur);
+        }
+        if (start < 0) start = std::max(now, after);
+        if (now < start || now > start + dur) return;
+    }
     static VkImage simg = VK_NULL_HANDLE;
     static VkDeviceMemory smem = VK_NULL_HANDLE;
     static Buffer bufs[3];
@@ -3406,7 +3426,8 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     presents[sl] = cap_seq;
     pending[sl] = true;
     if (index) {
-        fprintf(index, "%llu %.3f\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0);
+        fprintf(index, "%llu %.3f real present=%llu\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0,
+                (unsigned long long)g_s.present_count);
         fflush(index);
     }
     cap_seq++;
@@ -3537,6 +3558,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         pres_fmt_ = img->info.fmt.vk;
         g_rec.flush();
         g_s.present_count++;
+        {
+            static u64 draws_at_last = 0;
+            hw_last_frame_draws = (u32)(draws_ - draws_at_last);
+            draws_at_last = draws_;
+        }
         {   // F1 menu changed the internal resolution: apply between frames
             static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
             if (!env_scale) {

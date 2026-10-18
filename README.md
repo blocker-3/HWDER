@@ -229,6 +229,12 @@ log file; `HWDER_MUTE=1` silences audio; `HWDER_RES_SCALE` overrides the resolut
 `HWDER_IPC_TRACE`, `HWDER_FS_TRACE` and the other `HWDER_*_TRACE` switches dump the respective
 subsystem's activity to the log.
 
+Unattended test runs: `HWDER_AUTOPLAY=2` drives into a battle and keeps fighting (`HWDER_AUTOPLAY_SKIP=1`
+also skips story cutscenes and tutorial pop-ups and gets past the pre-battle menu - Battlefield Info: B,
+then Start Battle; `HWDER_AUTOPLAY_CAM=1` turns the camera; `HWDER_AUTOPLAY_IDLE=1` stands still in
+battle). `HWDER_FILMSTRIP=<dir>` saves every presented frame (`HWDER_FILMSTRIP_W=<width>`; window:
+`HWDER_FILMSTRIP_BATTLE=<s after the battle starts>` or `_AFTER=<s>`, and `_FOR=<s>`).
+
 ## Status
 
 Boots, menus, movies, Adventure/Legend mode battles, saves and audio work; gameplay runs at the
