@@ -20,6 +20,11 @@ struct Video {
     int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)
     int menu_scale = 100;       // in-game menu text size, percent
+    int contrast = 100;         // picture contrast in the game's final tonemap pass, percent (100 = unchanged)
+    int bloom = 100;            // bloom strength, percent of the game's own (0 = off)
+    int fov = 100;              // field of view, percent of the game's visible extent (runtime/src/game/widescreen.cpp)
+    bool fxaa = false;          // FXAA on the 3D picture before the HUD
+    int sharpen = 0;            // contrast-adaptive sharpening of the 3D picture, percent (0 = off)
 };
 
 struct Audio {

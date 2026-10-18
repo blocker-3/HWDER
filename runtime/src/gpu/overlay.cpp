@@ -545,6 +545,29 @@ static void tab_graphics(bool& changed) {
         }
     }
 
+    section("Picture");
+    if (ImGui::SliderInt("Contrast", &v.contrast, 50, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast of the 3D picture around mid-grey, applied in the game's own tonemap pass, so the HUD and\n"
+         "menus keep their colours. 100% = the game's look. Applies immediately.");
+    if (ImGui::SliderInt("Bloom", &v.bloom, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Strength of the glow around bright areas, relative to the game's own (0% = off, 100% = unchanged).\n"
+         "Applies immediately.");
+    if (v.contrast != 100 || v.bloom != 100) {
+        if (ImGui::Button("Reset picture")) {
+            v.contrast = v.bloom = 100;
+            changed = true;
+        }
+    }
+    if (ImGui::SliderInt("Field of view", &v.fov, 70, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("How much of the scene the camera shows, relative to the game's own (100% = unchanged). Higher\n"
+         "shows more around your warrior. Applies immediately.");
+    if (ImGui::Checkbox("Anti-aliasing (FXAA)", &v.fxaa)) changed = true;
+    help("Smooths jagged edges on the 3D picture (the game has no anti-aliasing of its own). The HUD is not\n"
+         "affected. Small GPU cost.");
+    if (ImGui::SliderInt("Sharpening", &v.sharpen, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast-adaptive sharpening of the 3D picture (0% = off). Counters the game's soft look,\n"
+         "and the softening from FXAA. The HUD is not affected.");
+
     section("Shaders");
     settings::Debug& d = settings::debug();
     if (ImGui::Checkbox("Compile shaders in the background", &d.async_shaders)) changed = true;
