@@ -558,6 +558,15 @@ static void tab_graphics(bool& changed) {
             changed = true;
         }
     }
+    if (ImGui::SliderInt("Field of view", &v.fov, 70, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("How much of the scene the camera shows, relative to the game's own (100% = unchanged). Higher\n"
+         "shows more around your warrior. Applies immediately.");
+    if (ImGui::Checkbox("Anti-aliasing (FXAA)", &v.fxaa)) changed = true;
+    help("Smooths jagged edges on the 3D picture (the game has no anti-aliasing of its own). The HUD is not\n"
+         "affected. Small GPU cost.");
+    if (ImGui::SliderInt("Sharpening", &v.sharpen, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast-adaptive sharpening of the 3D picture (0% = off). Counters the game's soft look,\n"
+         "and the softening from FXAA. The HUD is not affected.");
 
     section("Shaders");
     settings::Debug& d = settings::debug();

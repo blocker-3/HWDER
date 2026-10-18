@@ -22,6 +22,7 @@
 #include "shader/shader.h"
 #include "gpu/gpu.h"
 #include "vk_common.h"
+#include "post_spv.h"
 
 namespace gpu {
 namespace vk {
@@ -980,6 +981,19 @@ private:
     Image* dummy3d_ = nullptr;
     Image* dummy1d_ = nullptr;
     VkSampler dummy_sampler_ = VK_NULL_HANDLE;
+    // FXAA / sharpening on the tonemapped picture (post.comp), run right after the final tonemap pass.
+    void post_picture(Image* img);
+    struct {
+        VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+        VkPipelineLayout pl = VK_NULL_HANDLE;
+        VkPipeline pipe = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkImage copy = VK_NULL_HANDLE;  // R8G8B8A8 copy of the picture, sampled by the pass
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        VkImageView copy_view = VK_NULL_HANDLE;
+        u32 w = 0, h = 0;
+        bool failed = false;
+    } post_;
     Framebuffer cur_fb_;
     u64 draws_ = 0, skipped_ = 0;
     struct Stats {
@@ -2726,6 +2740,144 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         d.match_key = hash_bytes(kw, sizeof(kw), 0x1e1e);
     }
     for (auto& f : post) f();
+    if ((settings::video().fxaa || settings::video().sharpen > 0) && prog->stages[4] && fb.color[0])
+        for (const PictureShader& ps : kPictureShaders)
+            if (prog->stages[4]->key == ps.key) post_picture(fb.color[0]);
+}
+
+void VkRenderer::post_picture(Image* img) {
+    if (post_.failed) return;
+    VkFormat f = img->info.fmt.vk;
+    if (f != VK_FORMAT_R8G8B8A8_UNORM && f != VK_FORMAT_R8G8B8A8_SRGB && f != VK_FORMAT_B8G8R8A8_UNORM &&
+        f != VK_FORMAT_B8G8R8A8_SRGB && f != VK_FORMAT_A8B8G8R8_UNORM_PACK32 && f != VK_FORMAT_A8B8G8R8_SRGB_PACK32) {
+        VK_LOG_ONCE("vk: picture post-process: unsupported target format");
+        return;
+    }
+    if (!post_.pipe) {
+        VkDescriptorSetLayoutBinding b[2] = {};
+        b[0].binding = 0;
+        b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[0].descriptorCount = 1;
+        b[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        b[1].binding = 1;
+        b[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        b[1].descriptorCount = 1;
+        b[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        dci.bindingCount = 2;
+        dci.pBindings = b;
+        VK_CHECK(vkCreateDescriptorSetLayout(dev(), &dci, nullptr, &post_.dsl));
+        VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &post_.dsl;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &pcr;
+        VK_CHECK(vkCreatePipelineLayout(dev(), &pli, nullptr, &post_.pl));
+        VkShaderModuleCreateInfo mci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mci.codeSize = sizeof(kPostSpv);
+        mci.pCode = kPostSpv;
+        VkShaderModule mod;
+        VK_CHECK(vkCreateShaderModule(dev(), &mci, nullptr, &mod));
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = mod;
+        ci.stage.pName = "main";
+        ci.layout = post_.pl;
+        VkResult r = vkCreateComputePipelines(dev(), pcache_, 1, &ci, nullptr, &post_.pipe);
+        vkDestroyShaderModule(dev(), mod, nullptr);
+        if (r != VK_SUCCESS) {
+            hw_log("vk: picture post-process pipeline creation failed (%d)", (int)r);
+            post_.failed = true;
+            return;
+        }
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        VK_CHECK(vkCreateSampler(dev(), &sci, nullptr, &post_.sampler));
+        hw_log("vk: picture post-process (FXAA / sharpening) ready");
+    }
+    u32 w = img->phys_w(), h = img->phys_h();
+    if (post_.w != w || post_.h != h) {  // (re)create the copy at the picture's physical size
+        if (post_.copy) {
+            VkImage im = post_.copy;
+            VkDeviceMemory m = post_.mem;
+            VkImageView v = post_.copy_view;
+            retire_resource([im, m, v] {
+                vkDestroyImageView(dev(), v, nullptr);
+                vkDestroyImage(dev(), im, nullptr);
+                vkFreeMemory(dev(), m, nullptr);
+            });
+        }
+        VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ci.imageType = VK_IMAGE_TYPE_2D;
+        ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ci.extent = {w, h, 1};
+        ci.mipLevels = ci.arrayLayers = 1;
+        ci.samples = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        VK_CHECK(vkCreateImage(dev(), &ci, nullptr, &post_.copy));
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(dev(), post_.copy, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(vkAllocateMemory(dev(), &ai, nullptr, &post_.mem));
+        VK_CHECK(vkBindImageMemory(dev(), post_.copy, post_.mem, 0));
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = post_.copy;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VK_CHECK(vkCreateImageView(dev(), &vci, nullptr, &post_.copy_view));
+        VkImageMemoryBarrier ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.image = post_.copy;
+        ib.subresourceRange = vci.subresourceRange;
+        ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &ib);
+        post_.w = w;
+        post_.h = h;
+    }
+    // The picture's bytes into the copy (same texel size, so a raw copy; R/B order stays consistent because
+    // the pass also writes through an R8G8B8A8 view of the picture).
+    g_rec.barrier();
+    VkCommandBuffer cb = g_rec.cmd();
+    VkImageCopy c{};
+    c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.extent = {w, h, 1};
+    vkCmdCopyImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, post_.copy, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    g_rec.barrier();
+    VkDescriptorSet set = alloc_set(post_.dsl);
+    VkDescriptorImageInfo ii[2] = {{post_.sampler, post_.copy_view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {VK_NULL_HANDLE, tc_.view(img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1),
+                                    VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    for (u32 i = 0; i < 2; i++) {
+        wr[i].dstSet = set;
+        wr[i].dstBinding = i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
+    cb = g_rec.cmd();
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pl, 0, 1, &set, 0, nullptr);
+    float pc[4] = {1.0f / w, 1.0f / h, settings::video().fxaa ? 1.0f : 0.0f, settings::video().sharpen / 100.0f};
+    vkCmdPushConstants(cb, post_.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
+    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    g_rec.barrier();
+    rs_.pc_layout = VK_NULL_HANDLE;  // the game's next draw pushes its constants again
+    tc_.mark_modified(img);
 }
 
 void VkRenderer::do_clear(const u32* regs, u32 v) {

@@ -56,5 +56,17 @@ extern "C" void f_100057cee0(Ctx* c) {
             }
         }
     }
+    // Field of view (Graphics > Picture): widen the perspective for this build only. The camera keeps the
+    // game's own fov, so its camera logic never sees (or compounds) the change; the projection, and with it
+    // the game's culling, does. k scales tan(fov / 2), i.e. the visible extent at a given distance.
+    float k = settings::video().fov / 100.0f;
+    float fov = 0.0f;
+    if (!(flags & 1) && k != 1.0f) {
+        memcpy(&fov, cam + 0x148, 4);
+        float wide = 2.0f * std::atan(std::tan(fov * 0.5f) * k);
+        if (wide > 0.0f && wide < 3.0f) memcpy(cam + 0x148, &wide, 4);
+        else fov = 0.0f;
+    }
     f_100057cee0_orig(c);
+    if (fov != 0.0f) memcpy(cam + 0x148, &fov, 4);
 }
