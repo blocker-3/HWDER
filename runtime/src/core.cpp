@@ -21,6 +21,7 @@
 #include "service/ipc.h"
 #include "gpu/display.h"
 #include "gpu/prelaunch.h"
+#include "gpu/renderer.h"
 #include "gpu/settings.h"
 #include "fs/nsp.h"
 #include "fs/save_dir.h"
@@ -619,6 +620,7 @@ int main(int argc, char** argv) {
     kern::mem::init();
     build_dispatch();
     display::init();
+    gpu::start_pipeline_prewarm();
     if (prelaunch) {
         if (!prelaunch::run(dir)) {
             hw_log("boot: quit from the startup screen");

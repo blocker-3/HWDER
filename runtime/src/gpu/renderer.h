@@ -83,4 +83,8 @@ public:
 // Set up by the renderer (gpu/vk); the core uses it. The core passes its MemoryManager.
 Renderer* create_renderer(MemoryManager* mm);
 
+// Start compatible cached pipeline builds after display initialization, before guest startup.
+// The implementation leaves renderer creation lazy when prewarming is disabled or unavailable.
+void start_pipeline_prewarm();
+
 }  // namespace gpu
