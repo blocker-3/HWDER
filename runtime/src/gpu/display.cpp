@@ -10,9 +10,14 @@
 #include <cstdlib>
 #include <cmath>
 #include <thread>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
+
 namespace display {
+void validation_report();  // HWDER_VALIDATION message counts (below)
 
 static Device g_dev;
 Device& device() { return g_dev; }
@@ -111,7 +116,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (overlay::wndproc(h, msg, wp, lp)) return 0;
     switch (msg) {
     case WM_SIZE: g_resize = true; return 0;
-    case WM_CLOSE: hw_log("window closed - exiting"); restore_display_60hz(); ExitProcess(0);
+    case WM_CLOSE: validation_report(); hw_log("window closed - exiting"); restore_display_60hz(); ExitProcess(0);
     case overlay::kMsgBorderless: set_borderless(h, lp != 0); return 0;
     case overlay::kMsgClientSize: set_client_size(h, (int)(lp >> 16), (int)(lp & 0xFFFF)); return 0;
     case overlay::kMsgDisplay60: set_display_60hz(h, lp != 0); return 0;
@@ -205,16 +210,53 @@ static void create_swapchain() {
     overlay::on_swapchain(g_images, sci.imageFormat);
 }
 
+// HWDER_VALIDATION: validation layer messages go to hwder.log (without a messenger the layer prints
+// to the console only). Each message ID is logged in full the first 5 times, then counted; the counts
+// are summarised every 10 s and at exit.
+static std::mutex g_val_m;
+static std::unordered_map<std::string, u64> g_val_counts;
+static u64 g_val_last_summary = 0;
+static void validation_summary(bool force) {
+    std::lock_guard<std::mutex> l(g_val_m);
+    u64 now = GetTickCount64();
+    if (!force && now - g_val_last_summary < 10000) return;
+    g_val_last_summary = now;
+    if (g_val_counts.empty()) return;
+    std::vector<std::pair<u64, std::string>> v;
+    for (auto& [k, c] : g_val_counts) v.push_back({c, k});
+    std::sort(v.rbegin(), v.rend());
+    std::string line;
+    for (size_t i = 0; i < v.size() && i < 25; i++) line += " " + v[i].second + " x" + std::to_string(v[i].first) + ";";
+    hw_log("vk validation: %zu message IDs so far:%s", v.size(), line.c_str());
+}
+static VKAPI_ATTR VkBool32 VKAPI_CALL validation_callback(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT,
+                                                          const VkDebugUtilsMessengerCallbackDataEXT* d, void*) {
+    if (sev < VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) return VK_FALSE;
+    std::string id = d->pMessageIdName ? d->pMessageIdName : "?";
+    u64 c;
+    {
+        std::lock_guard<std::mutex> l(g_val_m);
+        c = ++g_val_counts[id];
+    }
+    if (c <= 5)
+        hw_log("vk validation %s: [%s] %s", sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT ? "ERROR" : "warning", id.c_str(),
+               d->pMessage ? d->pMessage : "");
+    validation_summary(false);
+    return VK_FALSE;
+}
+void validation_report() { validation_summary(true); }
+
 static void init_vulkan() {
     if (!hw_vk_load_global()) hw_fatal("vulkan-1.dll not found - a Vulkan capable GPU driver is required");
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "HWDER";
     app.apiVersion = VK_API_VERSION_1_3;
-    const char* inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    const char* inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = 2;
     ici.ppEnabledExtensionNames = inst_ext;
+    bool messenger = false;
     const char* layer = "VK_LAYER_KHRONOS_validation";
     if (getenv("HWDER_VALIDATION")) {
         // The layer ships with the Vulkan SDK, not the GPU driver. Requesting a missing layer fails
@@ -228,7 +270,9 @@ static void init_vulkan() {
         if (have) {
             ici.enabledLayerCount = 1;
             ici.ppEnabledLayerNames = &layer;
-            hw_log("display: HWDER_VALIDATION: %s enabled", layer);
+            ici.enabledExtensionCount = 3;  // VK_EXT_debug_utils (provided by the layer): messages into hwder.log
+            messenger = true;
+            hw_log("display: HWDER_VALIDATION: %s enabled, messages go to hwder.log", layer);
         } else {
             hw_log("display: HWDER_VALIDATION is set but %s is not installed (it comes with the Vulkan SDK) - "
                    "starting without validation", layer);
@@ -236,6 +280,16 @@ static void init_vulkan() {
     }
     VKCHECK(vkCreateInstance(&ici, nullptr, &g_dev.instance));
     hw_vk_load_instance(g_dev.instance);
+    if (messenger && vkCreateDebugUtilsMessengerEXT) {
+        VkDebugUtilsMessengerCreateInfoEXT mci{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+        mci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        mci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                          VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        mci.pfnUserCallback = validation_callback;
+        VkDebugUtilsMessengerEXT m = VK_NULL_HANDLE;
+        if (vkCreateDebugUtilsMessengerEXT(g_dev.instance, &mci, nullptr, &m) != VK_SUCCESS)
+            hw_log("display: HWDER_VALIDATION: could not create the debug messenger; messages go to the console only");
+    }
     u32 n = 0;
     vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);
     std::vector<VkPhysicalDevice> pds(n);
@@ -335,6 +389,7 @@ struct FrameSync {
 };
 static FrameSync g_frames[3];
 static u32 g_frame_idx;
+static std::vector<VkSemaphore> g_rendered;  // per swapchain image: signalled by the blit submit, waited on by its present
 static u64 g_present_seq = 0;                       // under g_present_lock
 static std::atomic<u64> g_last_image_ticket{0};     // last present_image's blit (0: nothing submitted)
 static std::mutex g_present_lock;
@@ -498,6 +553,13 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     VkImageSubresourceRange rr{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdClearColorImage(fs.cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &bg, 1, &rr);
     if (src) {
+        // the blit overwrites part of the cleared image: order the two transfer writes
+        VkImageMemoryBarrier cb2 = b;
+        cb2.oldLayout = cb2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        cb2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        cb2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(fs.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &cb2);
         float s = std::min((float)g_extent.width / w, (float)g_extent.height / h);
         s32 dw = (s32)(w * s), dh = (s32)(h * s);
         s32 x0 = ((s32)g_extent.width - dw) / 2, y0 = ((s32)g_extent.height - dh) / 2;
@@ -541,7 +603,14 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     si.commandBufferCount = 1;
     si.pCommandBuffers = &fs.cb;
     u64 ticket = ++g_present_seq;
-    VkSemaphore signals[2] = {fs.rendered, g_present_timeline};
+    if (g_rendered.size() < g_images.size()) {
+        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        size_t old = g_rendered.size();
+        g_rendered.resize(g_images.size());
+        for (size_t i = old; i < g_rendered.size(); i++) vkCreateSemaphore(g_dev.dev, &sci, nullptr, &g_rendered[i]);
+    }
+    VkSemaphore rendered = g_rendered[idx];
+    VkSemaphore signals[2] = {rendered, g_present_timeline};
     u64 signal_values[2] = {0, ticket};
     tsi.signalSemaphoreValueCount = 2;
     tsi.pSignalSemaphoreValues = signal_values;
@@ -549,7 +618,7 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     si.pSignalSemaphores = signals;
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &fs.rendered;
+    pi.pWaitSemaphores = &rendered;
     pi.swapchainCount = 1;
     pi.pSwapchains = &g_swapchain;
     pi.pImageIndices = &idx;
