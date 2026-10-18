@@ -25,8 +25,6 @@ struct Video {
     int fov = 100;              // field of view, percent of the game's visible extent (runtime/src/game/widescreen.cpp)
     bool fxaa = false;          // FXAA on the 3D picture before the HUD
     int sharpen = 0;            // contrast-adaptive sharpening of the 3D picture, percent (0 = off)
-    bool dof = true;            // the game's depth of field blur
-    bool radial_blur = true;    // the game's radial (zoom) blur during special attacks
 };
 
 struct Audio {
