@@ -303,7 +303,15 @@ void update_thread() {
             // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of
             // + (skip prompt), Left (Yes), A, then A twice for the menus (the default entries lead into Legend Mode).
             static const bool skip = getenv("HWDER_AUTOPLAY_SKIP") != nullptr;
-            if (skip && t > 8000 && !in_battle) {
+            // The pre-battle menu (Battlefield Info, Select Warrior: 90+ draws) needs the original sequence:
+            // B leaves a sub-screen, Up x3 reaches Start Battle at the top, A starts.
+            const bool prebattle = skip && hw_last_frame_draws.load() >= 90;
+            if (prebattle && !in_battle) {
+                if (c < 100) in.pad.buttons |= hid::kBtnB;
+                if ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)) in.pad.buttons |= hid::kBtnUp;
+                if (c >= 1500 && c < 1620) in.pad.buttons |= hid::kBtnA;
+            }
+            if (skip && !prebattle && t > 8000 && !in_battle) {
                 u64 s6 = t % 6000;
                 // + only on movie/dialogue frames (few draws): on Select Mode it opens the Manual applet,
                 // which hangs.
