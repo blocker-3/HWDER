@@ -3261,7 +3261,10 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             pc.viewport_scale[0] = 1.0f;
             if (draw_samples_rt_)  // full-screen passes keep the whole width: the side bands get drawn
                 for (u32 i = 0; i < fb.num_colors; i++)
-                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count;
+                    if (fb.color[i]) {
+                        fb.color[i]->full_width_frame = g_s.present_count;
+                        fb.color[i]->full_width_since_present = true;
+                    }
         }
     }
     pc.base_vertex = p.base_vertex;
@@ -3521,8 +3524,10 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         r.rect = {{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}};
     }
     if (!r.rect.extent.width || !r.rect.extent.height) return;
-    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width)
+    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width) {
         fb.color[rt]->full_width_frame = g_s.present_count;
+        fb.color[rt]->full_width_since_present = true;
+    }
     if (recording_) {
         rec_cur_.emplace_back();
         OpRec& o = rec_cur_.back();
@@ -4280,8 +4285,13 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         // Fill ultrawide: the orthographic HUD (and movies, which the game draws as a 2D quad) stays in
         // the centred 16:9; when nothing full-width (a 3D frame's post passes, a full clear) wrote this
         // frame, the side bands hold stale memory. Clear them to black before presenting.
+        // Track writes per image: a queued frame may be drawn before an earlier
+        // image's present advances the global counter. A counter comparison can
+        // otherwise black out valid side bands. Ported from interp-120 ea74f9a.
+        const bool full_width = img->full_width_since_present;
+        img->full_width_since_present = false;
         if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y &&
-            img->full_width_frame != g_s.present_count && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+            !full_width && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
             u32 iw = img->level_width(0), ih = img->level_height(0);
             u32 center = std::min(iw, (u32)(iw * (img->scale_y / img->scale) + 0.5f));
             u32 band = (iw - center) / 2;
