@@ -1,0 +1,6 @@
+# Exact CPython 3.11 Windows x64 wheels for the optional first-run suite.
+# No dependency is needed for the compiled synthetic recompiler model itself.
+cffi==2.0.0 --hash=sha256:66f011380d0e49ed280c789fbd08ff0d40968ee7b665575489afa95c98196ab5
+cryptography==47.0.0 --hash=sha256:f5c3296dab66202f1b18a91fa266be93d6aa0c2806ea3d67762c69f60adc71aa
+lz4==4.4.5 --hash=sha256:8a842ead8ca7c0ee2f396ca5d878c4c40439a527ebad2b996b0444f0074ed004
+pycparser==3.0 --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992

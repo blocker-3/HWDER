@@ -1,166 +1,124 @@
 #!/usr/bin/env python3
-"""Package a distributable HWDER build.
+"""Package a source/setup kit. Game-linked exe/PDB/generated C are PRIVATE outputs.
 
-    python tools/make_dist.py [--build build/release] [--out dist] [--name HWDER-<date>]
+    python tools/make_dist.py [--out dist] [--name HWDER-setup-<date>]
 
-The zip holds only our own work: hwder.exe (+ pdb unless --no-pdb), a README and a default
-hwder_settings.ini. No game data and no keys are included: at first launch the exe reads the
-user's own .nsp dump and prod.keys placed next to it and decrypts them in-process.
+No compilers, Python wheels, game content, keys or private caches are bundled.
 """
 import argparse
 import datetime
-import os
-import shutil
-import struct
+import hashlib
+import json
+from pathlib import Path, PurePosixPath
+import subprocess
 import sys
+import uuid
 import zipfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-README = """HWDER - Hyrule Warriors: Definitive Edition, native Windows build
-=================================================================
-
-This is a static recompilation of the Switch game: the game's own code was translated to
-native x86-64 and linked with our runtime (HOS services, Maxwell -> Vulkan renderer, audio,
-video). It is not an emulator and ships with no game data.
-
-Setup
------
-1. Put these two files from your own console next to hwder.exe:
-     <anything>.nsp     your dump of Hyrule Warriors: Definitive Edition (0100AE00096EA000, base game)
-     prod.keys          your console's keys (also found in %USERPROFILE%\\.switch, or yuzu/Ryujinx key folders)
-2. Run hwder.exe. Code and assets are read straight out of the NSP while you play; nothing
-   is extracted to disk.
-
-   Alternatively an already extracted dump works too: exefs\\ and romfs\\ folders next to the
-   exe, or HWDER_EXEFS / HWDER_ROMFS environment variables pointing at them.
-
-Requirements
-------------
-- Windows 10/11 x64, a Vulkan 1.2 GPU driver (NVIDIA / AMD / Intel), AVX2 CPU.
-- Media Foundation (part of Windows; on "N" editions install the Media Feature Pack) for FMVs.
-
-Controls
---------
-- Any XInput controller (Xbox pads, or others through Steam Input / DS4Windows).
-- Keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y,
-  Q/E = L/R, U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
-- F1   video options (resolution scale, unlocked/ultrawide resolution, vsync, borderless,
-       anisotropic filtering, FPS counter) and the save-file cheats tab.
-- F11  toggle borderless fullscreen.
-
-Files created next to the exe
------------------------------
-  hwder_settings.ini     options (edit with F1 or by hand)
-  hwder.log              last run's log - attach it to bug reports
-  save\\                  save data (same layout as the console's)
-  cache\\, pipeline_cache.bin   shader/texture caches; safe to delete
-
-Troubleshooting
----------------
-- "No game data found": the .nsp or prod.keys is not next to hwder.exe.
-- "not an NCA3 (wrong header_key?)": prod.keys is incomplete or from another console firmware;
-  re-dump with Lockpick_RCM.
-- "no title key for rights id": the NSP uses ticket crypto and its .tik is missing; add a
-  title.keys file (rightsid = key) next to prod.keys.
-"""
-
-DEFAULT_SETTINGS = """version=2
-vsync=1
-aniso=16
-window_w=0
-window_h=0
-borderless=1
-res_scale=1.000
-unlocked_res=0
-show_fps=0
-interp_hz=0
-"""
+ROOT = Path(__file__).resolve().parent.parent
+TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat", "third_party/README.md",
+             "third_party/renderdoc/renderdoc_app.h"}
+SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
+SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
+THIRD_PARTY_SOURCE_SUFFIXES = SOURCE_SUFFIXES | {".in", ".def", ".rc", ".s", ".asm", ".m", ".mm",
+                                              ".metal", ".glsl", ".vert", ".frag", ".xml", ".natvis",
+                                              ".ac", ".am", ".sh", ".bat", ".ps1", ".cmakein", ".yml"}
+PRIVATE_PARTS = {".git", "generated", "data", "build", "dist", "cache", "runs", "save", "exefs", "romfs",
+                 "__pycache__", "legacy", "shots"}
+PRIVATE_SUFFIXES = {".exe", ".dll", ".pdb", ".obj", ".lib", ".a", ".bin", ".nsp", ".xci", ".nca",
+                    ".nso", ".keys", ".tik", ".pyc", ".log", ".png", ".gif", ".jpg", ".zip"}
 
 
-def pe_imports(path):
-    """DLLs named in the import table (to catch anything that is not a Windows system DLL)."""
-    with open(path, "rb") as f:
-        data = f.read()
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    nsec = struct.unpack_from("<H", data, pe + 6)[0]
-    opt = pe + 24
-    magic = struct.unpack_from("<H", data, opt)[0]
-    dd = opt + (0x70 if magic == 0x20B else 0x60)
-    imp_rva, imp_size = struct.unpack_from("<II", data, dd + 8)
-    secs = []
-    sh = opt + struct.unpack_from("<H", data, pe + 20)[0]
-    for i in range(nsec):
-        vsz, va, rsz, rp = struct.unpack_from("<IIII", data, sh + 40 * i + 8)
-        secs.append((va, vsz, rp))
-
-    def rva2off(r):
-        for va, vsz, rp in secs:
-            if va <= r < va + max(vsz, 1):
-                return rp + (r - va)
-        return None
-
-    names = []
-    off = rva2off(imp_rva)
-    while off is not None:
-        name_rva = struct.unpack_from("<I", data, off + 12)[0]
-        if not name_rva:
-            break
-        no = rva2off(name_rva)
-        names.append(data[no:data.index(b"\0", no)].decode())
-        off += 20
-    return names
+def tracked(root):
+    r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True)
+    return [n.decode("utf-8") for n in r.stdout.split(b"\0") if n]
 
 
-SYSTEM_DLLS = {"kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "oleaut32.dll",
-               "dbghelp.dll", "winmm.dll", "psapi.dll", "bcrypt.dll", "ws2_32.dll", "shlwapi.dll", "mf.dll", "mfplat.dll",
-               "mfreadwrite.dll", "mfuuid.dll", "imm32.dll", "dwmapi.dll", "synchronization.dll", "ntdll.dll", "xinput1_4.dll",
-               "xinput9_1_0.dll", "mmdevapi.dll", "avrt.dll", "ksuser.dll", "d3d11.dll", "dxgi.dll", "setupapi.dll", "hid.dll",
-               "api-ms-win-core-synch-l1-2-0.dll"}
+def safe_member(name):
+    path = PurePosixPath(name)
+    return (bool(path.parts) and not path.is_absolute() and ".." not in path.parts
+            and not any(":" in p or "\\" in p for p in path.parts)
+            and not any(p.lower() in PRIVATE_PARTS for p in path.parts)
+            and path.suffix.lower() not in PRIVATE_SUFFIXES)
+
+
+def release_files(root, list_tracked=tracked):
+    """Explicit project roots; third-party tracked source only, with their license files."""
+    root = Path(root)
+    files = {}
+    for name in list_tracked(root):
+        p = PurePosixPath(name)
+        allowed = name in TOP_FILES or (p.parts[0] in ("runtime", "tools", "docs")
+                                       and p.suffix.lower() in SOURCE_SUFFIXES)
+        if not allowed:
+            continue
+        if not safe_member(name):
+            raise ValueError(f"Private/disallowed file in project release input: {name}")
+        files[name] = root / name
+    for name in TOP_FILES:
+        if name not in files:
+            raise ValueError(f"Required tracked setup file missing: {name}; commit the coherent source before packaging")
+    for sub in SUBMODULES:
+        directory = root / "third_party" / sub
+        if not (directory / ".git").exists():
+            raise ValueError(f"Initialize pinned submodule first: {directory}")
+        for name in list_tracked(directory):
+            relative = f"third_party/{sub}/{name}"
+            # Upstream examples can contain prebuilt libraries/assets; never copy these.
+            leaf = PurePosixPath(name)
+            is_source = (leaf.suffix.lower() in THIRD_PARTY_SOURCE_SUFFIXES
+                         or leaf.name.lower().startswith(("license", "copying", "notice"))
+                         or leaf.name in ("configure", "Makefile"))
+            if not is_source or not safe_member(relative):
+                continue
+            files[relative] = directory / name
+        if not any(PurePosixPath(n).name.lower().startswith(("license", "copying"))
+                   for n in files if n.startswith(f"third_party/{sub}/")):
+            raise ValueError(f"Missing third-party license notice: {sub}")
+    for name, path in files.items():
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Non-regular release input: {name}")
+    return files
+
+
+def package(root, out, name, list_tracked=tracked):
+    if not name or name in (".", "..") or not all(c.isalnum() or c in "-_." for c in name):
+        raise ValueError("--name must be a simple directory name")
+    files = release_files(root, list_tracked)
+    manifest = {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in sorted(files.items())}
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / (name + ".zip")
+    tmp = target.with_suffix(".zip.partial-" + uuid.uuid4().hex[:8])
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for relative, source in sorted(files.items()):
+                z.write(source, f"{name}/{relative}")
+            z.writestr(f"{name}/source-manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        with zipfile.ZipFile(tmp) as z:
+            expected = {f"{name}/{p}" for p in files} | {f"{name}/source-manifest.json"}
+            if set(z.namelist()) != expected or any(not safe_member(n) for n in z.namelist()) or z.testzip():
+                raise ValueError("Release archive verification failed")
+            for relative, sha in manifest.items():
+                if hashlib.sha256(z.read(f"{name}/{relative}")).hexdigest() != sha:
+                    raise ValueError("Source changed while packaging; retry")
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--build", default=os.path.join(ROOT, "build", "release"))
-    ap.add_argument("--out", default=os.path.join(ROOT, "dist"))
-    ap.add_argument("--name", default="HWDER-" + datetime.date.today().isoformat())
-    ap.add_argument("--no-pdb", action="store_true")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--out", default=ROOT / "dist", type=Path)
+    ap.add_argument("--name", default="HWDER-setup-" + datetime.date.today().isoformat())
     a = ap.parse_args()
-
-    exe = os.path.join(a.build, "hwder.exe")
-    if not os.path.exists(exe):
-        sys.exit("missing " + exe)
-    imports = pe_imports(exe)
-    extra = [d for d in imports if d.lower() not in SYSTEM_DLLS and not d.lower().startswith("api-ms-win")]
-    print("imports:", ", ".join(imports))
-    if extra:
-        print("WARNING: non-system DLLs imported, they must ship in the zip:", extra)
-
-    stage = os.path.join(a.out, a.name)
-    if os.path.exists(stage):
-        shutil.rmtree(stage)
-    os.makedirs(stage)
-    shutil.copy2(exe, stage)
-    pdb = os.path.join(a.build, "hwder.pdb")
-    if not a.no_pdb and os.path.exists(pdb):
-        shutil.copy2(pdb, stage)
-    for d in extra:
-        src = os.path.join(a.build, d)
-        if os.path.exists(src):
-            shutil.copy2(src, stage)
-        else:
-            print("WARNING: cannot find", d, "next to the exe")
-    with open(os.path.join(stage, "README.txt"), "w", encoding="utf-8") as f:
-        f.write(README)
-    with open(os.path.join(stage, "hwder_settings.ini"), "w", encoding="utf-8") as f:
-        f.write(DEFAULT_SETTINGS)
-    open(os.path.join(stage, "PUT_YOUR_NSP_AND_prod.keys_HERE"), "w").close()
-
-    zpath = os.path.join(a.out, a.name + ".zip")
-    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for fn in sorted(os.listdir(stage)):
-            z.write(os.path.join(stage, fn), os.path.join(a.name, fn))
-    print("dist:", zpath, f"({os.path.getsize(zpath) / 1e6:.1f} MB)")
+    try:
+        target = package(ROOT, a.out, a.name)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        sys.exit(str(e))
+    print(f"Source/setup kit verified: {target} ({target.stat().st_size / 1e6:.1f} MB)")
+    print("No linked game executable, generated C, keys, game data, private shader cache or toolchain bundled.")
 
 
 if __name__ == "__main__":

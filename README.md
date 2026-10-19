@@ -8,18 +8,35 @@ purpose. There is no CPU emulation, no JIT and no emulator core. The result is o
 that reads code and assets straight out of the player's own game dump at startup.
 
 **This repository contains no game code and no game assets.** The recompiled C in `generated/`
-is produced on your machine from your own dump, and the runtime decrypts the ExeFS and RomFS out
-of your own `.nsp` with your own `prod.keys` at run time. Nothing is extracted to disk.
+is produced on your machine from your own dump. First-run setup extracts the five supported
+ExeFS modules into your private local cache, generates C and builds the complete native program.
+The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys` while you play.
 
 ---
 
-## Playing (release build)
+## Playing (source/setup kit)
 
-1. Download the latest zip from Releases and unpack it anywhere.
-2. Put your own dump of the game (`*.nsp`, title `0100AE00096EA000`, base game) and your
-   console's `prod.keys` next to `hwder.exe`. Keys are also picked up from
-   `%USERPROFILE%\.switch\prod.keys` and the yuzu / Ryujinx key folders.
-3. Run `hwder.exe`.
+1. Unpack the source/setup kit into a short, writable folder, or clone this repository with
+   `git clone --recursive`. Install the prerequisites below; the kit includes pinned third-party
+   sources and license notices, but no compiler, Windows SDK, Python installation or wheels.
+2. Install **Visual Studio 2022 / Build Tools**, the **Desktop development with C++** workload,
+   **C++ Clang tools for Windows (clang-cl)**, **C++ CMake tools for Windows** (CMake 3.24+ and
+   Ninja), and a **Windows 10/11 SDK** with x64 libraries. Install **Python 3.10+ x64**, then run
+   `python -m pip install -r tools/requirements-setup.txt` (`cryptography` and `lz4`).
+3. Run `python tools/first_run.py --check` to check installed prerequisites.
+4. Run `play-local.bat --nsp "C:\path\your-game.nsp" --keys "C:\path\your-prod.keys"`.
+   Alternatively set `HWDER_NSP` and `HWDER_KEYS` and double-click `play-local.bat`.
+
+The first run validates the base-game title and the exact tested five-module SHA-256 profile,
+extracts ExeFS, runs the ARM64-to-C generator, builds the **complete** local executable and launches
+it. Later runs verify the cached output and reuse it. Setup takes several minutes and substantial
+disk space; compiler work is capped at eight jobs by default (`--jobs N` changes this). Updates,
+bundles and other code versions are rejected before generation. The profile identifies code
+checksums rather than guessing a marketing version. See [local-build.md](docs/local-build.md).
+
+**The game-linked `hwder.exe`, PDB and generated C are private game-derived outputs. They are
+excluded from release packaging.** `tools/make_dist.py` creates a source/setup kit, with no game
+dump, keys, generated program, saves or private shader cache.
 
 Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AVX2 CPU, and
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
@@ -30,7 +47,8 @@ a save-file cheats tab; frame interpolation is experimental and disabled). **F11
 keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, Q/E = L/R,
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 
-Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
+The automated workflow keeps its playable result in
+`%LOCALAPPDATA%\hwder\local-build-v1\play\hwder.exe`. Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
 `save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). The save folder can be
 moved on the startup screen or in the menu's Gameplay tab; your saves are copied there only if you say so, and
 nothing in the old folder is moved or deleted.
@@ -48,8 +66,14 @@ bottom of the F1 menu and on the first line of the log. Never attach game files 
 
 ## Building from source
 
-Toolchain: Visual Studio 2022 with the **LLVM (clang-cl)** component, CMake and Ninja (both ship
-with VS), Python 3.10+ with `cryptography` (only for the extraction helper).
+The automated workflow above is also the recommended source build. To prepare without launching:
+
+```
+python tools/first_run.py --nsp "<game>.nsp" --keys "<prod.keys>"
+```
+
+The manual developer flow remains available. Toolchain prerequisites are the same as above,
+including both Python dependencies (`cryptography` for extraction; `lz4` for NSO loading).
 
 ```
 git clone --recursive https://github.com/sonsegajp/HWDER
@@ -65,12 +89,12 @@ cd tools && python -m recomp.gen_main && cd ..
 # 3. build (clang-cl + Ninja inside the VS developer environment)
 python tools/build.py
 
-# 4. run: drop your .nsp + prod.keys next to build/release/hwder.exe, or point at a dump
-set HWDER_EXEFS=data\exefs
-set HWDER_ROMFS=data\romfs
+# 4. run using your own NSP and keys (never copy keys into a release)
+set HWDER_NSP=<game>.nsp
+set HWDER_KEYS=<prod.keys>
 build\release\hwder.exe
 
-# package: dist/HWDER-<date>.zip (exe, pdb, README, default settings)
+# package: source/setup kit only; no linked exe/PDB/generated C
 python tools/make_dist.py
 ```
 
@@ -246,6 +270,14 @@ also skips story cutscenes and tutorial pop-ups and gets past the pre-battle men
 then Start Battle; `HWDER_AUTOPLAY_CAM=1` turns the camera; `HWDER_AUTOPLAY_IDLE=1` stands still in
 battle). `HWDER_FILMSTRIP=<dir>` saves every presented frame (`HWDER_FILMSTRIP_W=<width>`; window:
 `HWDER_FILMSTRIP_BATTLE=<s after the battle starts>` or `_AFTER=<s>`, and `_FOR=<s>`).
+
+## Public synthetic tests
+
+`python tools/tests/run_synthetic.py --jobs 2` runs the cache/catalog codecs and
+compiled A64 arithmetic regressions without a game dump, generated game code,
+keys, saves, Vulkan device or private cache. See [test setup and coverage](docs/synthetic-tests.md).
+Source-package exclusion tests run automatically when the separate first-run
+candidate is integrated; their current absence is reported explicitly.
 
 ## Status
 
