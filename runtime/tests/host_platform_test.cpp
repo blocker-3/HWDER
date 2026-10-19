@@ -1,5 +1,6 @@
 // Public contract tests; no generated sources, game, Vulkan, SDL, keys or saves.
 #include "host/platform.h"
+#include "host/timing.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,12 @@ void callback(void* opaque) {
 }
 }
 int main() {
+    host::Counter frequency, before, after;
+    host::counter_frequency(&frequency); host::counter(&before);
+    check(frequency.QuadPart > 0, "positive monotonic frequency");
+    host::sleep_counter_ticks(frequency.QuadPart / 1000, frequency.QuadPart);
+    host::counter(&after);
+    check(after.QuadPart > before.QuadPart, "counter advances across sleep");
     void* event = host::event_create();
     check(event != nullptr, "event creation");
     check(!host::event_wait(event, 0), "unsignaled event timeout");

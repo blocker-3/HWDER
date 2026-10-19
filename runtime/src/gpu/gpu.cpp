@@ -2,7 +2,7 @@
 #include "gpu.h"
 #include "gpu/diag.h"
 
-#include <windows.h>
+#include "host/timing.h"
 
 #include <condition_variable>
 #include <deque>
@@ -38,12 +38,12 @@ struct OpTimer {
     const char* what;
     double limit;
     u64 extra;
-    LARGE_INTEGER a;
-    OpTimer(const char* w, u64 x = 0, double l = 30.0) : what(w), limit(l), extra(x) { QueryPerformanceCounter(&a); }
+    host::Counter a;
+    OpTimer(const char* w, u64 x = 0, double l = 30.0) : what(w), limit(l), extra(x) { host::counter(&a); }
     ~OpTimer() {
-        LARGE_INTEGER b, f;
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
+        host::Counter b, f;
+        host::counter(&b);
+        host::counter_frequency(&f);
         double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
         if (ms > limit) hw_log("gpu: slow: %s (%llu) took %.0f ms", what, (unsigned long long)extra, ms);
     }
@@ -755,7 +755,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                 renderer()->on_gpu_idle([ch, a, payload, short_form] { write_report(ch, a, payload, short_form); });
             } else if (op == 1 || op == 4 || op == 8) {  // acquire (equal / >= / and)
                 renderer()->flush_commands();
-                u64 t0 = GetTickCount64();
+                u64 t0 = host::ticks_ms();
                 bool logged = false;
                 for (int spin = 0;; spin++) {
                     u32 v = 0;
@@ -764,7 +764,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                         (op == 8 && (v & ch->sem_payload)))
                         break;
                     if (spin > 1000) std::this_thread::yield();
-                    if (!logged && GetTickCount64() - t0 > 100) {
+                    if (!logged && host::ticks_ms() - t0 > 100) {
                         logged = true;
                         hw_log("gpu[sp%u]: semaphore acquire op %u at %llx waiting >100 ms (value %u, want %u)", ch->syncpt, op,
                                (unsigned long long)a, v, ch->sem_payload);
@@ -876,11 +876,11 @@ double gpu_busy_ms_reset() {
 }
 static void execute_inner(Channel* ch, Submission& s);
 static void execute(Channel* ch, Submission& s) {
-    LARGE_INTEGER f, a, b;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&a);
+    host::Counter f, a, b;
+    host::counter_frequency(&f);
+    host::counter(&a);
     execute_inner(ch, s);
-    QueryPerformanceCounter(&b);
+    host::counter(&b);
     double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
     g_busy_ms += ms;
     if (ms > 100.0)
@@ -928,7 +928,7 @@ static void execute_inner(Channel* ch, Submission& s) {
 }
 
 static void gpu_thread() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER GPU");
+    host::name_thread(L"HWDER GPU");
     for (;;) {
         std::pair<Channel*, Submission> item;
         {

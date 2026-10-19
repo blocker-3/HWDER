@@ -1,8 +1,10 @@
 #include "host/platform.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <new>
 #ifdef _WIN32
 #include <windows.h>
@@ -51,6 +53,7 @@ void* thread_create(ThreadEntry entry, void* argument, std::size_t stack_size) {
 bool thread_start(void* thread) { return ResumeThread(thread) != static_cast<DWORD>(-1); }
 void thread_join_release(void* thread) { WaitForSingleObject(thread, INFINITE); CloseHandle(thread); }
 [[noreturn]] void thread_exit() { ExitThread(0); }
+[[noreturn]] void process_exit(int code) { ExitProcess(static_cast<UINT>(code)); }
 std::uint32_t thread_id() { return GetCurrentThreadId(); }
 void thread_yield() { SwitchToThread(); }
 #else
@@ -63,13 +66,22 @@ struct Event {
 struct Thread {
     pthread_t native{};
     Event start;
+    Event complete;
     ThreadEntry entry;
     void* argument;
 };
+void signal_complete(void* opaque) {
+    event_signal(&static_cast<Thread*>(opaque)->complete);
+}
 void* thread_entry(void* opaque) {
-    auto* thread = static_cast<Thread*>(opaque);
+    auto thread = *static_cast<std::shared_ptr<Thread>*>(opaque);
+    delete static_cast<std::shared_ptr<Thread>*>(opaque);
+    // pthread_exit also executes this handler. Detached native stacks are reclaimed
+    // at exit; the public handle remains waitable through its separate completion event.
+    pthread_cleanup_push(signal_complete, thread.get());
     event_wait(&thread->start);
     thread->entry(thread->argument);
+    pthread_cleanup_pop(1);
     return nullptr;
 }
 }
@@ -90,30 +102,35 @@ bool event_wait(void* opaque, std::int64_t timeout_ns) {
     return true;
 }
 void* thread_create(ThreadEntry entry, void* argument, std::size_t stack_size) {
-    auto* thread = new (std::nothrow) Thread{};
-    if (!thread) return nullptr;
+    auto thread = std::make_shared<Thread>();
     thread->entry = entry;
     thread->argument = argument;
+    auto* handle = new (std::nothrow) std::shared_ptr<Thread>(thread);
+    auto* worker = new (std::nothrow) std::shared_ptr<Thread>(thread);
+    if (!handle || !worker) { delete handle; delete worker; return nullptr; }
     pthread_attr_t attr;
     int error = pthread_attr_init(&attr);
-    if (error) { delete thread; errno = error; return nullptr; }
-    if (stack_size) error = pthread_attr_setstacksize(&attr, stack_size);
-    if (!error) error = pthread_create(&thread->native, &attr, thread_entry, thread);
+    if (error) { delete handle; delete worker; errno = error; return nullptr; }
+    error = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (!error && stack_size) error = pthread_attr_setstacksize(&attr, stack_size);
+    if (!error) error = pthread_create(&thread->native, &attr, thread_entry, worker);
     pthread_attr_destroy(&attr);
-    if (error) { delete thread; errno = error; return nullptr; }
-    return thread;
+    if (error) { delete handle; delete worker; errno = error; return nullptr; }
+    return handle;
 }
 bool thread_start(void* opaque) {
     if (!opaque) return false;
-    event_signal(&static_cast<Thread*>(opaque)->start);
+    event_signal(&(*static_cast<std::shared_ptr<Thread>*>(opaque))->start);
     return true;
 }
 void thread_join_release(void* opaque) {
-    auto* thread = static_cast<Thread*>(opaque);
-    pthread_join(thread->native, nullptr);
-    delete thread;
+    auto* handle = static_cast<std::shared_ptr<Thread>*>(opaque);
+    event_wait(&(*handle)->complete);
+    // The worker retains its own shared state until after signal_complete returns.
+    delete handle;
 }
 [[noreturn]] void thread_exit() { pthread_exit(nullptr); }
+[[noreturn]] void process_exit(int code) { std::_Exit(code); }
 std::uint32_t thread_id() { return static_cast<std::uint32_t>(syscall(SYS_gettid)); }
 void thread_yield() { sched_yield(); }
 #endif

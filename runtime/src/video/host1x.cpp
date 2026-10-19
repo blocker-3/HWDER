@@ -1,7 +1,7 @@
 // host1x command stream parser. Opcodes: switchbrew "Host1x" / Tegra X1 TRM.
 #include "host1x.h"
 
-#include <windows.h>
+#include "host/timing.h"
 
 #include <algorithm>
 #include <bit>
@@ -33,11 +33,11 @@ void write(u32 engine_class, ChannelState* st, u32 method, u32 arg) {
     };
     static Timing t_nvdec, t_vic;
     auto timed = [&](Timing& t, const char* name, auto&& fn) {
-        LARGE_INTEGER f, a, b;
-        QueryPerformanceFrequency(&f);
-        QueryPerformanceCounter(&a);
+        host::Counter f, a, b;
+        host::counter_frequency(&f);
+        host::counter(&a);
         fn();
-        QueryPerformanceCounter(&b);
+        host::counter(&b);
         double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
         t.sum += ms;
         t.worst = std::max(t.worst, ms);

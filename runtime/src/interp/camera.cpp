@@ -9,7 +9,7 @@
 // Each tick's screen-0 camera goes into a small ring that the object blending reads (interp_draw.cpp, vk_renderer.cpp).
 #include "interp/camera.h"
 
-#include <windows.h>
+#include "host/timing.h"
 
 #include <cstring>
 #include <mutex>
@@ -30,9 +30,9 @@ CamSnap g_ring[kRing];
 u64 g_count;  // snapshots written (ring index = count % kRing)
 
 double now_ms() {
-    static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
+    static host::Counter freq = [] { host::Counter f; host::counter_frequency(&f); return f; }();
+    host::Counter t;
+    host::counter(&t);
     return 1000.0 * (double)t.QuadPart / (double)freq.QuadPart;
 }
 

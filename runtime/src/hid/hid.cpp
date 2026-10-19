@@ -1,6 +1,6 @@
 // hid services: IHidServer / IAppletResource with the HID shared memory (0x40000) kept up to date by a
 // host thread. Layout: switchbrew "HID_Shared_Memory".
-#include <windows.h>
+#include "host/timing.h"
 #include <timeapi.h>
 
 #include <algorithm>
@@ -290,12 +290,12 @@ void update_thread() {
     static const bool battle = autoplay && atoi(debug::str(debug::Autoplay)) == 2;
     // HWDER_AUTOPLAY_PLUS=1: + five times a second for the first 30 s (+ on the title screen opens the manual).
     static const bool plus_spam = debug::flag(debug::AutoplayPlus);
-    const u64 t0 = GetTickCount64();
+    const u64 t0 = host::ticks_ms();
     for (;;) {
         hid::poll_host_input(in);
         if (plus_spam && GetTickCount64() - t0 < 30000 && (GetTickCount64() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
         if (battle) {
-            u64 t = GetTickCount64() - t0;
+            u64 t = host::ticks_ms() - t0;
             // Every 3 s: B (leaves a sub-screen such as Battlefield Info; nothing on the pre-battle menu),
             // Up x3 (the menu's top entry is Start Battle), A (also: continue text, attack in battle).
             u64 c = t % 3000;
@@ -369,7 +369,7 @@ void update_thread() {
                 if (cam) in.pads[0].rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
             }
         } else if (autoplay) {
-            u64 t = GetTickCount64() - t0;
+            u64 t = host::ticks_ms() - t0;
             u64 c = t % 4000;
             // Generic advance: A every 1.5 s. Skip cutscenes: + opens "Skip cutscene?", Left selects Yes, A confirms.
             if (t > 5000 && (t % 1500) < 120) in.pads[0].buttons |= hid::kBtnA;
@@ -391,7 +391,7 @@ void update_thread() {
             }
         }
         update_once(in);
-        Sleep(4);
+        host::sleep_ms(4);
     }
 }
 

@@ -1,3 +1,4 @@
+#include "host/timing.h"
 // vi: display service. IHOSBinderDriver speaks android's IGraphicBufferProducer protocol over
 // parcels; queued buffers are composited (presented) by our compositor thread at the swap interval.
 #include <condition_variable>
@@ -234,10 +235,10 @@ public:
             cv_.notify_all();
             QueueBufferOutput qbo{width_, height_, 0, (u32)pending()};
             if (pace_trace()) {
-                static LARGE_INTEGER freq, prev;
-                if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-                LARGE_INTEGER now;
-                QueryPerformanceCounter(&now);
+                static host::Counter freq, prev;
+                if (!freq.QuadPart) host::counter_frequency(&freq);
+                host::Counter now;
+                host::counter(&now);
                 hw_log("pace: queue slot %d dt %.2f produce %.2f iv %u fence %u:%u (value %u) pending %u", slot,
                        prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / freq.QuadPart : 0.0,
                        (now.QuadPart - last_dequeue_.QuadPart) * 1000.0 / freq.QuadPart, qbi.swap_interval,
@@ -319,8 +320,8 @@ private:
     }
 
     int dequeue() {
-        LARGE_INTEGER t0;
-        QueryPerformanceCounter(&t0);
+        host::Counter t0;
+        host::counter(&t0);
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             // Oldest-presented free slot first (round robin keeps triple buffering in order).
@@ -333,9 +334,9 @@ private:
                 slots_[best].state = SlotState::Dequeued;
                 if (!any_free_locked()) buffer_event->clear();
                 if (pace_trace()) {
-                    LARGE_INTEGER freq, t1;
-                    QueryPerformanceFrequency(&freq);
-                    QueryPerformanceCounter(&t1);
+                    host::Counter freq, t1;
+                    host::counter_frequency(&freq);
+                    host::counter(&t1);
                     last_dequeue_ = t1;
                     hw_log("pace: dequeue slot %d waited %.2f", best, (t1.QuadPart - t0.QuadPart) * 1000.0 / freq.QuadPart);
                 }
@@ -355,7 +356,7 @@ private:
     }
 
     void compositor() {
-        SetThreadDescription(GetCurrentThread(), L"HWDER compositor");
+        host::name_thread(L"HWDER compositor");
         int presented = -1;
         u64 frame = 0;
         for (;;) {
@@ -470,7 +471,7 @@ private:
     std::deque<Queued> queue_;
     std::thread thread_;
     u32 width_ = 1280, height_ = 720;
-    LARGE_INTEGER last_dequeue_{};  // HWDER_PACE_TRACE
+    host::Counter last_dequeue_{};  // HWDER_PACE_TRACE
 };
 
 BufferQueue& layer_queue() {
@@ -484,23 +485,21 @@ std::shared_ptr<ReadableEvent> vsync_event() {
         auto e = make_event();
         hw_log("vi: vsync event requested by the game");
         std::thread([e] {
-            SetThreadDescription(GetCurrentThread(), L"HWDER vsync");
+            host::name_thread(L"HWDER vsync");
             // The game's frame clock: its ticks must not be delayed by busy worker threads.
+#ifdef _WIN32
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-            HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-            LARGE_INTEGER freq, next, now;
-            QueryPerformanceFrequency(&freq);
-            QueryPerformanceCounter(&next);
+#endif
+            host::Counter freq, next, now;
+            host::counter_frequency(&freq);
+            host::counter(&next);
             const s64 period = freq.QuadPart / 60;
             for (;;) {
                 next.QuadPart += period;
-                QueryPerformanceCounter(&now);
+                host::counter(&now);
                 s64 wait = next.QuadPart - now.QuadPart;
                 if (wait > 0) {
-                    LARGE_INTEGER due;
-                    due.QuadPart = -(wait * 10000000 / freq.QuadPart);
-                    SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0);
-                    WaitForSingleObject(timer, INFINITE);
+                    host::sleep_counter_ticks(wait, freq.QuadPart);
                 } else if (wait < -period * 4) {
                     next = now;
                 }

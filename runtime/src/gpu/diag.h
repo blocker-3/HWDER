@@ -5,10 +5,8 @@
 #pragma once
 #include <cstdint>
 #include <atomic>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 #include "hwder/runtime.h"
+#include "host/timing.h"
 
 // Cumulative diagnostics for graphics-audit-plan step 1. Renderer mutex protects counters, except the fence counter (GPU thread).
 namespace gpu::audit {
@@ -19,7 +17,6 @@ inline uint64_t unscaled_viewports = 0;
 inline uint64_t tex_dynamic_offsets = 0; // translated instructions, not draws
 }
 
-#ifdef _WIN32
 namespace gpu::diag {
 
 // Draw-path profile (GPU thread): accumulated ms per phase since the last flush; logged when large.
@@ -42,24 +39,24 @@ extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets, g_prof_vtx_bytes, 
 bool prof_enabled();
 inline double prof_tick_ms() {
     static const double ms = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
+        host::Counter f;
+        host::counter_frequency(&f);
         return 1000.0 / f.QuadPart;
     }();
     return ms;
 }
 struct ProfScope {
     ProfPhase ph;
-    LARGE_INTEGER a;
+    host::Counter a;
     explicit ProfScope(ProfPhase p) : ph(p) {
         static const bool on = prof_enabled();
         a.QuadPart = 0;
-        if (on) QueryPerformanceCounter(&a);
+        if (on) host::counter(&a);
     }
     ~ProfScope() {
         if (!a.QuadPart) return;
-        LARGE_INTEGER b;
-        QueryPerformanceCounter(&b);
+        host::Counter b;
+        host::counter(&b);
         g_prof[ph] += (b.QuadPart - a.QuadPart) * prof_tick_ms();
     }
 };
@@ -72,16 +69,15 @@ void prof_window_log(unsigned frames, double busy_ms);
 struct SlowTimer {
     const char* what;
     double limit_ms;
-    LARGE_INTEGER a;
-    SlowTimer(const char* w, double limit) : what(w), limit_ms(limit) { QueryPerformanceCounter(&a); }
+    host::Counter a;
+    SlowTimer(const char* w, double limit) : what(w), limit_ms(limit) { host::counter(&a); }
     ~SlowTimer() {
-        LARGE_INTEGER b, f;
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
+        host::Counter b, f;
+        host::counter(&b);
+        host::counter_frequency(&f);
         double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
         if (ms > limit_ms) hw_log("vk: slow: %s took %.0f ms", what, ms);
     }
 };
 
 }  // namespace gpu::diag
-#endif

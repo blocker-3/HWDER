@@ -27,6 +27,8 @@ void* thread_create(ThreadEntry entry, void* argument, std::size_t stack_size);
 bool thread_start(void* thread);
 void thread_join_release(void* thread);
 [[noreturn]] void thread_exit();
+// Runtime workers live until process termination; do not run global destructors concurrently.
+[[noreturn]] void process_exit(int code);
 std::uint32_t thread_id();
 void thread_yield();
 std::uint64_t monotonic_ns();

@@ -17,7 +17,7 @@
 //
 // Settings > Display enables it; HWDER_GAME_INTERP=0/1 overrides that request for tests.
 // HWDER_GI_LOG=1 logs a summary every 5 s.
-#include <windows.h>
+#include "host/timing.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -101,7 +101,7 @@ void report_ipc();
 void report() {
     static const bool on = debug::flag(debug::GiLog);
     static u64 last = 0;
-    u64 t = GetTickCount64();
+    u64 t = host::ticks_ms();
     static const u64 every = debug::value(debug::GiLogMs, (u64)5000, 10);
     if (t - last < every) return;
     last = t;
@@ -121,9 +121,9 @@ void report() {
 }
 
 double now_ms() {
-    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
+    static host::Counter f = [] { host::Counter x; host::counter_frequency(&x); return x; }();
+    host::Counter t;
+    host::counter(&t);
     return t.QuadPart * 1000.0 / f.QuadPart;
 }
 void add(double& sum, double& mx, double v) {
@@ -163,9 +163,9 @@ void extra_frame(const Ctx* c) {
         g_st.mismatch++;
         return;
     }
-    LARGE_INTEGER f, t0, t1;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&t0);
+    host::Counter f, t0, t1;
+    host::counter_frequency(&f);
+    host::counter(&t0);
 
     // Screen 0's render camera halfway between the ticks, rebuilt by the game's own Camera_Update.
     alignas(16) u8 saved[sizeof(game::Camera)];
@@ -235,7 +235,7 @@ void extra_frame(const Ctx* c) {
     g_xpresent = now_ms();
 
     memcpy(cam, saved, sizeof saved);
-    QueryPerformanceCounter(&t1);
+    host::counter(&t1);
     g_st.extra++;
     g_st.ms += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
 }
@@ -291,11 +291,11 @@ HW_HOOK(GfxDevice_BeginFrame) {
         // Game speed first: the game is frame-locked, so when ticks fall behind 60 per second the extra
         // frames are what slow it down. Track how far behind the 16.67 ms grid the ticks are (with triple
         // buffering single ticks jitter without the game being late) and skip an extra frame while behind.
-        static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-        static LARGE_INTEGER prev;
+        static host::Counter f = [] { host::Counter x; host::counter_frequency(&x); return x; }();
+        static host::Counter prev;
         static double debt = 0;
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
+        host::Counter now;
+        host::counter(&now);
         double dt = prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0.0;
         prev = now;
         static bool skipped_last = false;

@@ -41,7 +41,12 @@ def toolchain(managed=None, temporary=None):
     if os.name == "nt":
         import msvc
         env = msvc.vs_env()
-        return env, vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env), vs_tool("Ninja", "ninja.exe", env), "clang-cl", "clang-cl"
+        install = msvc.vs_install()
+        compiler = Path(install) / "VC/Tools/Llvm/x64/bin/clang-cl.exe" if install else None
+        compiler = str(compiler) if compiler and compiler.is_file() else shutil.which("clang-cl.exe", path=env["PATH"])
+        if not compiler:
+            raise RuntimeError("clang-cl.exe not found: install the VS C++ Clang tools component")
+        return env, vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env), vs_tool("Ninja", "ninja.exe", env), compiler, compiler
     if not sys.platform.startswith("linux"):
         raise RuntimeError("Only Windows x64 and experimental Linux x86-64 are supported")
     env = dict(os.environ)
@@ -95,8 +100,13 @@ def build(a):
     os.makedirs(bdir, exist_ok=True)
     env, cmake, ninja, cc, cxx = toolchain(managed, getattr(a, "managed_temp_dir", None))
     if a.only_file:
+        version_dir = os.path.join(bdir, "version")
+        result = subprocess.run([cmake, f"-DSRC={ROOT}", f"-DOUT={version_dir}/hwder_version.h",
+                                 "-P", os.path.join(ROOT, "tools", "version.cmake")], env=env)
+        if result.returncode:
+            return result.returncode
         cpp = a.only_file.endswith((".cpp", ".cc", ".cxx"))
-        includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src")]
+        includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src"), version_dir]
         includes += [os.path.join(ROOT, "third_party", name, "include") for name in ("vulkan-headers", "spirv-headers")]
         if os.name == "nt" and not managed:
             args = [cc, "/nologo", "/c", "/O2", "/arch:AVX2", "-mfma", "-Wno-everything", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN"]

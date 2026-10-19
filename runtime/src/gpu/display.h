@@ -28,7 +28,11 @@ void init();
 void start();
 // One frame of just the overlay (the prelaunch screen) on a dark backdrop. Not paced: the caller sleeps.
 void present_overlay_frame();
+#ifdef _WIN32
 HWND window();
+#else
+SDL_Window* window();
+#endif
 
 // Present a guest frame (an image in GENERAL layout). Paced to the guest swap interval.
 // wait_sem/wait_value: timeline semaphore the presentation blit waits on (the renderer's last submit).

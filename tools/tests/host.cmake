@@ -1,12 +1,14 @@
 enable_testing()
 find_package(Threads REQUIRED)
-set(HOST_SERVICES runtime/src/host/platform.cpp runtime/src/host/thread.cpp)
+set(HOST_SERVICES runtime/src/host/platform.cpp runtime/src/host/thread.cpp runtime/src/host/timing.cpp)
 add_executable(host_platform_test runtime/tests/host_platform_test.cpp ${HOST_SERVICES})
 add_executable(host_kernel_test runtime/tests/host_kernel_test.cpp ${HOST_SERVICES}
     runtime/src/kernel/kernel.cpp runtime/src/kernel/memory.cpp runtime/src/threads.cpp)
+add_library(host_interp_compile OBJECT runtime/src/interp/camera.cpp runtime/src/interp/frame_probe.cpp
+    runtime/src/interp/interp_draw.cpp runtime/src/service/ipc.cpp runtime/src/video/host1x.cpp)
 # Compile the SVC integration as well; its IPC/core symbols are supplied by the game runtime.
 add_library(host_svc_compile OBJECT runtime/src/kernel/svc.cpp)
-foreach(target host_platform_test host_kernel_test host_svc_compile)
+foreach(target host_platform_test host_kernel_test host_svc_compile host_interp_compile)
     target_include_directories(${target} PRIVATE runtime/src runtime/include)
     target_link_libraries(${target} PRIVATE Threads::Threads)
     if(MSVC)
@@ -23,4 +25,4 @@ endif()
 add_test(NAME host_platform COMMAND host_platform_test)
 add_test(NAME host_kernel COMMAND host_kernel_test)
 set_tests_properties(host_platform host_kernel PROPERTIES TIMEOUT 30)
-add_custom_target(host_tests DEPENDS host_platform_test host_kernel_test host_svc_compile)
+add_custom_target(host_tests DEPENDS host_platform_test host_kernel_test host_svc_compile host_interp_compile)

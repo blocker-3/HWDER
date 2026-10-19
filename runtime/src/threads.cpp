@@ -11,6 +11,7 @@ static thread_local Ctx* t_ctx;
 Ctx* hw_ctx_new(u64 stack_top) {
     Ctx* c = (Ctx*)host::aligned_allocate(sizeof(Ctx), 64);
     if (!c) hw_fatal("CPU context allocation");
+    if (!c) hw_fatal("CPU context allocation failed");
     memset(c, 0, sizeof(Ctx));
     c->sp = stack_top & ~15ull;
     c->excl_addr = ~0ull;

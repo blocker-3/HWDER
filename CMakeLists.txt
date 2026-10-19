@@ -132,6 +132,7 @@ add_subdirectory(${TP}/SDL ${CMAKE_BINARY_DIR}/SDL EXCLUDE_FROM_ALL)
 set(RUNTIME_SOURCES
     runtime/src/host/platform.cpp
     runtime/src/host/thread.cpp
+    runtime/src/host/timing.cpp
     runtime/src/core.cpp
     runtime/src/debug_flags.cpp
     runtime/src/threads.cpp

@@ -1,3 +1,4 @@
+#include "host/timing.h"
 // Texture cache: guest surfaces (block-linear / pitch) <-> VkImages keyed by guest address.
 #include "gpu/settings.h"
 #include <algorithm>
@@ -461,7 +462,14 @@ void TextureCache::validate(Image* img) {
 
 int TextureCache::written_since_check(Image* img) { return written_since(img->addr, img->readable, img->watch_epoch); }
 
+// -1 means "unknown, hash it": Linux has no GetWriteWatch, so it always takes the hash fallback.
 int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
+#ifndef _WIN32
+    (void)addr;
+    (void)size;
+    (void)watch_epoch;
+    return -1;
+#else
     u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
     // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
@@ -501,6 +509,7 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;
     return 0;
+#endif
 }
 
 void TextureCache::alloc_image(Image* img) {
@@ -822,16 +831,16 @@ void TextureCache::upload(Image* img) {
 void TextureCache::download(Image* img) {
     n_downloads++;
     const ImageInfo& info = img->info;
-    LARGE_INTEGER dl_t0, dl_t1, dl_t2, dl_f;
-    QueryPerformanceFrequency(&dl_f);
-    QueryPerformanceCounter(&dl_t0);
+    host::Counter dl_t0, dl_t1, dl_t2, dl_f;
+    host::counter_frequency(&dl_f);
+    host::counter(&dl_t0);
     dl_t1 = dl_t2 = dl_t0;
     struct Report {
         Image* img;
-        LARGE_INTEGER *t0, *t1, *t2, *f;
+        host::Counter *t0, *t1, *t2, *f;
         ~Report() {
-            LARGE_INTEGER t3;
-            QueryPerformanceCounter(&t3);
+            host::Counter t3;
+            host::counter(&t3);
             double total = (t3.QuadPart - t0->QuadPart) * 1000.0 / f->QuadPart;
             if (total > 30.0)
                 hw_log("vk: slow: texture download took %.0f ms (record %.0f, gpu wait %.0f, copy-back %.0f) %ux%u fmt %u %s at %llx",
@@ -875,9 +884,9 @@ void TextureCache::download(Image* img) {
     vkCmdCopyImageToBuffer(rec().cmd(), src_image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, (u32)regions.size(),
                            regions.data());
     rec().barrier();
-    QueryPerformanceCounter(&dl_t1);
+    host::counter(&dl_t1);
     rec().wait_idle();
-    QueryPerformanceCounter(&dl_t2);
+    host::counter(&dl_t2);
     if (scratch.image) free_scratch(scratch);
     VkMappedMemoryRange mr{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     mr.memory = rb.mem;

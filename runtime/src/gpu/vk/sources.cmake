@@ -37,8 +37,14 @@ add_executable(pipeline_warmup_cache_test EXCLUDE_FROM_ALL
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp
 )
 target_include_directories(pipeline_warmup_cache_test PRIVATE runtime/src runtime/include)
-target_compile_definitions(pipeline_warmup_cache_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(pipeline_warmup_cache_test PRIVATE ${HW_CODEC_TEST_FLAGS})
+if(WIN32)
+    target_compile_definitions(pipeline_warmup_cache_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+else()
+    find_package(Threads REQUIRED)
+    find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
+    target_link_libraries(pipeline_warmup_cache_test PRIVATE Threads::Threads)
+endif()
 
 set(CATALOG_TRANSLATOR_SOURCES
     runtime/src/shader/decode.cpp runtime/src/shader/fallback.cpp
