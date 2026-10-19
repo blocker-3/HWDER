@@ -79,7 +79,9 @@ bool GameSources::index() {
         for(const auto& file:files_) {
             std::vector<u8> bytes;if(!resource(file,bytes))continue;
             size_t found=0;
-            for(size_t off=0;off+0x90<=bytes.size();off+=4) {
+            // G2S entries can start at any byte offset, including within the
+            // game's .gz-named archives. No word alignment is guaranteed.
+            for(size_t off=0;off+0x90<=bytes.size();++off) {
                 if(word(bytes,off)!=0x12345678)continue;
                 const u32 stage=(word(bytes,off+0x30)>>10)&15;u32 length=0;Digest hash{};
                 if(!source_identity(bytes.data()+off+0x30,bytes.size()-off-0x30,stage,length,hash))continue;

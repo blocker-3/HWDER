@@ -106,11 +106,12 @@ int main() {
     // Extracted-resource adapter uses the same raw NVN locator path as the NSP.
     test_root=directory.string();auto resource=directory/"data/stage/common/StageShader.bin.gz";
     std::filesystem::create_directories(resource.parent_path());
-    std::vector<u8> container(0x30);u32 nvn=0x12345678;std::memcpy(container.data(),&nvn,4);
+    // Deliberately byte-unaligned NVN header/SPH, as in the actual G2S archives.
+    std::vector<u8> container(0x31);u32 nvn=0x12345678;std::memcpy(container.data()+1,&nvn,4);
     container.insert(container.end(),good.begin(),good.end());
     FILE* f=_wfopen(resource.c_str(),L"wb");CHECK(f!=nullptr);CHECK(fwrite(container.data(),1,container.size(),f)==container.size());fclose(f);
     catalog::GameSources sources;CHECK(sources.index());CHECK(sources.count()==1);CHECK(sources.verify());
-    catalog::Locator locator;CHECK(sources.locate(good.data(),good.size(),1,locator));CHECK(locator.offset==0x30);
+    catalog::Locator locator;CHECK(sources.locate(good.data(),good.size(),1,locator));CHECK(locator.offset==0x31);
     std::vector<u8> reread;CHECK(sources.read(locator,reread));CHECK(reread==good);
     auto escape=locator;escape.resource="../outside";CHECK(!sources.read(escape,reread));
     auto oversized=locator;oversized.offset=~0ull;CHECK(!sources.read(oversized,reread));
