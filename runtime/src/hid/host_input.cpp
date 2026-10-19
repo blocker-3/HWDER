@@ -36,6 +36,8 @@ std::atomic<bool> g_blocked{false};
 std::atomic<bool> g_menu_request{false};
 bool g_wait_release = false;
 
+std::mutex g_poll_m;
+std::atomic<bool> g_guest_polling{false};
 std::mutex g_raw_m;
 RawPad g_raw;  // the HID thread writes it each poll, the overlay reads it
 
@@ -591,7 +593,7 @@ int keyboard_slot(const RawPad raws[kPlayerSlots]) {
     return -1;
 }
 
-void poll_host_input(HostInput& out) {
+static void poll_host_input_locked(HostInput& out) {
     out = {};
     const settings::Input& cfg = settings::input();
 
@@ -697,6 +699,24 @@ void poll_host_input(HostInput& out) {
         else g_wait_release = false;
     }
 }
+
+void poll_host_input(HostInput& out) {
+    std::lock_guard lock(g_poll_m);
+    poll_host_input_locked(out);
+}
+#ifndef _WIN32
+void start_guest_polling() {
+    std::lock_guard lock(g_poll_m);
+    g_guest_polling = true;
+}
+void poll_prelaunch_input() {
+    std::lock_guard lock(g_poll_m);
+    if (!g_guest_polling) {
+        HostInput ignored;
+        poll_host_input_locked(ignored);
+    }
+}
+#endif
 
 RawPad raw_pad() {
     std::lock_guard<std::mutex> l(g_raw_m);

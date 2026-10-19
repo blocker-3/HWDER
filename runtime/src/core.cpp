@@ -232,6 +232,11 @@ extern "C" void hw_sleep_ns(s64 ns) {
     }
 }
 
+extern "C" void hw_exit_process(int code) {
+    if (code == 0) display::restore_desktop_mode();
+    host::process_exit(code);
+}
+
 // ------------------------------------------------------------------ logging / crashes
 static FILE* g_log;
 static std::mutex g_log_lock;
@@ -789,7 +794,7 @@ static int runtime_main(int argc, char** argv) {
     if (prelaunch) {
         if (!prelaunch::run(dir)) {
             hw_log("boot: quit from the startup screen");
-            host::process_exit(0);
+            hw_exit_process(0);
         }
         hw_log("boot: game data from %s", hwfs::nsp::path().c_str());
     }
@@ -816,7 +821,7 @@ static int runtime_main(int argc, char** argv) {
     host::thread_join_release(t->host_handle);
     t->host_handle = nullptr;
     hw_log("main thread exited");
-    host::process_exit(0);
+    hw_exit_process(0);
 }
 
 int main(int argc, char** argv) {

@@ -79,6 +79,91 @@ class Fixture(unittest.TestCase):
         return setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
                              self.run_stage, lambda nsp, keys: self.modules)
 
+    def linux_stage(self, args, cwd):
+        self.run_stage(args, cwd)
+        if "-m" not in args:
+            out = Path(args[args.index("--build-dir") + 1])
+            windows = out / "hwder.exe"
+            if windows.exists():
+                windows.unlink()
+            header = bytearray(64)
+            header[:7] = b"\x7fELF\x02\x01\x01"
+            struct.pack_into("<HHI", header, 16, 3, 62, 1)
+            if self.failure == "wrong-linux-arch":
+                struct.pack_into("<H", header, 18, 183)  # AArch64 is not the Ally target.
+            (out / "hwder").write_bytes(header + b"synthetic ELF; never executed")
+            (out / "hwder").chmod(0o755)
+
+    def linux_prepare(self):
+        self.toolchain["target_platform"] = "linux-x86_64"
+        with setup.setup_lock(self.cache):
+            return setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                                 self.linux_stage, lambda nsp, keys: self.modules)
+
+    def test_linux_artifact_verified_cache_and_mode(self):
+        executable = self.linux_prepare()
+        self.assertEqual(executable.name, "hwder")
+        self.assertFalse((executable.parent / "hwder.exe").exists())
+        self.assertEqual(self.linux_prepare(), executable)
+        self.assertEqual(self.calls, ["generate", "build"])
+        setup.verify_executable(executable, self.toolchain)
+        if os.name != "nt":
+            self.assertTrue(executable.stat().st_mode & 0o100)
+            self.assertEqual(self.cache.stat().st_mode & 0o077, 0)
+
+    def test_linux_wrong_architecture_retains_last_success_and_saves(self):
+        executable = self.linux_prepare()
+        original = executable.read_bytes()
+        save = executable.parent / "save" / "player.bin"
+        save.parent.mkdir(); save.write_bytes(b"precious save")
+        pointer = (self.cache / "last-success.json").read_bytes()
+        (self.root / "runtime/source.cpp").write_text("new source")
+        self.failure = "wrong-linux-arch"
+        with self.assertRaisesRegex(ValueError, "Linux x86-64 executable"):
+            self.linux_prepare()
+        self.assertEqual(executable.read_bytes(), original)
+        self.assertEqual(save.read_bytes(), b"precious save")
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
+
+    def test_linux_failed_pointer_after_copy_backup_restores_executable(self):
+        executable = self.linux_prepare()
+        original = executable.read_bytes()
+        pointer = (self.cache / "last-success.json").read_bytes()
+        (self.root / "runtime/source.cpp").write_text("updated runtime")
+        write_marker = setup.atomic_json
+        def fail_pointer(path, value):
+            if Path(path).name == "last-success.json":
+                raise OSError("synthetic pointer failure")
+            return write_marker(path, value)
+        with patch.object(setup.os, "link", side_effect=OSError("no hardlinks")), \
+             patch.object(setup, "atomic_json", side_effect=fail_pointer):
+            with self.assertRaisesRegex(OSError, "synthetic pointer failure"):
+                self.linux_prepare()
+        self.assertEqual(executable.read_bytes(), original)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
+        if os.name != "nt":
+            self.assertTrue(executable.stat().st_mode & 0o100)
+        self.assertFalse(list(executable.parent.glob("*.tmp")))
+
+    def test_linux_rejects_mz_and_wrong_elf_classes(self):
+        self.toolchain["target_platform"] = "linux-x86_64"
+        path = Path(self.temp.name) / "artifact"
+        for content in (b"MZwrong host", b"\x7fELF", b"\x7fELF\x01\x01\x01" + bytes(57)):
+            path.write_bytes(content); path.chmod(0o755)
+            self.assertFalse(setup.executable_valid(path, self.toolchain))
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable mode contract")
+    def test_linux_repairs_cached_and_published_execute_modes(self):
+        executable = self.linux_prepare()
+        cached = next((self.cache / "builds").glob("*/hwder"))
+        cached.chmod(0o644)
+        self.linux_prepare()
+        self.assertEqual(self.calls, ["generate", "build", "build"])
+        executable.chmod(0o644)
+        self.linux_prepare()
+        self.assertTrue(executable.stat().st_mode & 0o100)
+        self.assertEqual(self.calls, ["generate", "build", "build"])
+
     def test_fresh_then_verified_cache_and_no_keys_copied(self):
         exe = self.prepare()
         self.assertEqual(self.calls, ["generate", "build"])

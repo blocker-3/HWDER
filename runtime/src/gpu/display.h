@@ -29,6 +29,7 @@ Device& device();
 void init();
 void apply_window_settings();
 void apply_refresh_rate();
+void restore_desktop_mode();
 void open_path(const std::string& path);
 #ifndef _WIN32
 void validation_report();

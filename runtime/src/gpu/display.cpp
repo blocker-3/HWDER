@@ -247,6 +247,19 @@ void apply_refresh_rate() {
     on_main_thread([] { set_display_60hz(g_hwnd, settings::video().display_60hz); });
 #endif
 }
+void restore_desktop_mode() {
+#ifdef _WIN32
+    restore_display_60hz();
+#else
+    on_main_thread([] {
+        if (!g_hwnd) return;
+        // Restore exclusive X11 display modes before _Exit bypasses SDL teardown.
+        SDL_SetWindowFullscreenMode(g_hwnd, nullptr);
+        SDL_SetWindowFullscreen(g_hwnd, false);
+        SDL_SyncWindow(g_hwnd);
+    });
+#endif
+}
 void open_path(const std::string& path) {
 #ifdef _WIN32
     auto native = std::filesystem::u8path(path).wstring();

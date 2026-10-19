@@ -148,7 +148,7 @@ void svc_dispatch(Ctx* c, u32 imm) {
         return;
     case 0x07:  // ExitProcess
         hw_log("guest called svcExitProcess");
-        host::process_exit(0);
+        hw_exit_process(0);
     case 0x08: {  // CreateThread(entry, arg, stack_top, priority, core) -> handle
         s32 core = (s32)c->x[5];
         if (core == -2) core = g_process.main_thread_core;

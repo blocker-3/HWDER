@@ -36,7 +36,7 @@ int run_main(int argc, char** argv, int (*runtime)(int, char**)) {
     });
     auto event = [](const SDL_Event& event) {
         if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-            validation_report(); hw_log("window closed - exiting"); host::process_exit(0);
+            validation_report(); hw_log("window closed - exiting"); hw_exit_process(0);
         }
         if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)
             hid::host_keyboard_event(static_cast<int>(event.key.scancode), event.type == SDL_EVENT_KEY_DOWN);
@@ -54,6 +54,7 @@ int run_main(int argc, char** argv, int (*runtime)(int, char**)) {
         SDL_Event current;
         if (SDL_WaitEventTimeout(&current, 8)) event(current);
         while (SDL_PollEvent(&current)) event(current);
+        if (window()) hid::poll_prelaunch_input();
     }
     worker.join();
     // Runtime workers may remain after a startup failure. End the process before

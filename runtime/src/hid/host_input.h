@@ -87,6 +87,8 @@ void poll_host_input(HostInput& out);
 // SDL's main event thread publishes keyboard and hotplug state to the HID thread.
 void host_keyboard_event(int scancode, bool down);
 void host_keyboard_clear();
+void poll_prelaunch_input();
+void start_guest_polling();
 void host_gamepad_event(u32 type, u32 id);
 #endif
 

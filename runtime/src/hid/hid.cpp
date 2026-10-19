@@ -283,6 +283,9 @@ void update_once(const hid::HostInput& in) {
 }
 
 void update_thread() {
+#ifndef _WIN32
+    hid::start_guest_polling();
+#endif
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif

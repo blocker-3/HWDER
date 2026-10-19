@@ -14,6 +14,9 @@ The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys`
 
 ---
 
+Native Linux x86-64 is an experimental port for Bazzite/ROG Ally on the `linux-native` branch; it is not part of a
+release. See [the Linux build and validation instructions](docs/linux-native.md).
+
 ## Playing
 
 You do not need to clone this repository or install any developer tools. Windows 10/11 x64 only.

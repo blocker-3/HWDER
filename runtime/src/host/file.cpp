@@ -14,7 +14,13 @@
 
 namespace host {
 #ifdef _WIN32
-namespace { HANDLE native(FileHandle file) { return reinterpret_cast<HANDLE>(file); } }
+namespace {
+HANDLE native(FileHandle file) { return reinterpret_cast<HANDLE>(file); }
+bool valid_offset(std::uint64_t offset) {
+    if (offset <= std::uint64_t(std::numeric_limits<std::int64_t>::max())) return true;
+    SetLastError(ERROR_ARITHMETIC_OVERFLOW); return false;
+}
+}
 FileHandle file_open(const std::filesystem::path& path, unsigned mode) {
     DWORD access = (mode & file_read ? GENERIC_READ : 0) | (mode & file_write ? GENERIC_WRITE : 0);
     auto preferred = path;preferred.make_preferred();
@@ -24,6 +30,7 @@ FileHandle file_open(const std::filesystem::path& path, unsigned mode) {
 }
 void file_close(FileHandle file) { if (file != invalid_file) CloseHandle(native(file)); }
 std::int64_t file_read_at(FileHandle file, void* bytes, std::size_t size, std::uint64_t offset) {
+    if (!valid_offset(offset)) return -1;
     OVERLAPPED operation{};operation.Offset = DWORD(offset);operation.OffsetHigh = DWORD(offset >> 32);
     DWORD count = 0;
     if (!ReadFile(native(file), bytes, DWORD(std::min<std::size_t>(size, 0x40000000)), &count, &operation))
@@ -31,6 +38,7 @@ std::int64_t file_read_at(FileHandle file, void* bytes, std::size_t size, std::u
     return count;
 }
 std::int64_t file_write_at(FileHandle file, const void* bytes, std::size_t size, std::uint64_t offset) {
+    if (!valid_offset(offset)) return -1;
     OVERLAPPED operation{};operation.Offset = DWORD(offset);operation.OffsetHigh = DWORD(offset >> 32);
     DWORD count = 0;
     if (!WriteFile(native(file), bytes, DWORD(std::min<std::size_t>(size, 0x40000000)), &count, &operation)) return -1;

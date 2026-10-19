@@ -1138,7 +1138,7 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
 #endif
     if (!g_inited) return;
     std::lock_guard<std::recursive_mutex> l(g_m);
-    if (hid::take_menu_request()) set_visible(!g_visible);
+    if (hid::take_menu_request() && !g_screen) set_visible(!g_visible);
     host::Counter t, f;
     host::counter(&t);
     host::counter_frequency(&f);

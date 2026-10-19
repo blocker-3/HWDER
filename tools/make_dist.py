@@ -16,7 +16,7 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "third_party/README.md"}
+TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.sh", "third_party/README.md"}
 SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
 SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
 PUBLIC_SCRIPTS = {"tools/setup_ui/install_private_python.ps1"}

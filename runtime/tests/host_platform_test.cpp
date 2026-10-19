@@ -52,12 +52,16 @@ int main() {
     constexpr std::size_t page = 4096, size = 65536;
     auto* memory = static_cast<unsigned char*>(host::memory_reserve(nullptr, size, true));
     check(memory != nullptr, "reserve inaccessible guest range");
+    check(host::memory_readable(memory, size) == 0, "reserved memory is unreadable");
     check(host::memory_commit(memory, page * 2), "commit subset");
+    check(host::memory_readable(memory, size) == page * 2, "readable extent stops at uncommitted boundary");
     for (std::size_t i = 0; i < page * 2; ++i) check(memory[i] == 0, "initial zero memory");
     std::memset(memory, 0x5a, page * 2);
     check(host::memory_reserve(memory, size) == nullptr, "collision rejects replacement");
     check(memory[0] == 0x5a && memory[page] == 0x5a, "collision preserves existing bytes");
     check(host::memory_decommit(memory, page), "decommit subset");
+    check(host::memory_readable(memory, page) == 0, "discarded page is unreadable");
+    check(host::memory_readable(memory + page, page) == page, "neighbor remains readable");
     check(host::memory_commit(memory, page), "recommit subset");
     for (std::size_t i = 0; i < page; ++i) check(memory[i] == 0, "recommit zeroes discarded guest data");
     check(memory[page] == 0x5a, "neighbor survives decommit");
