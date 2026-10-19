@@ -10,6 +10,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <signal.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 extern "C" void hw_log(const char*,...) {}
@@ -24,6 +26,31 @@ bool romfs_read(uint64_t,uint8_t*,uint64_t){return false;}
 using namespace gpu;
 static unsigned checks=0;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}}while(0)
+#ifndef _WIN32
+class ScopedWriteLimit {
+    struct rlimit previous_limit{};
+    struct sigaction previous_action{};
+    bool limited=false, ignored=false;
+public:
+    bool enable() {
+        if(getrlimit(RLIMIT_FSIZE,&previous_limit))return false;
+        struct sigaction action{};action.sa_handler=SIG_IGN;sigemptyset(&action.sa_mask);
+        if(sigaction(SIGXFSZ,&action,&previous_action))return false;
+        ignored=true;
+        auto limit=previous_limit;limit.rlim_cur=1;
+        if(setrlimit(RLIMIT_FSIZE,&limit))return false;
+        limited=true;return true;
+    }
+    bool restore() {
+        if(limited) {if(setrlimit(RLIMIT_FSIZE,&previous_limit))return false;limited=false;}
+        if(ignored) {if(sigaction(SIGXFSZ,&previous_action,nullptr))return false;ignored=false;}
+        return true;
+    }
+    ~ScopedWriteLimit() {
+        if(!restore()){std::fputs("FAIL: restore file-size limit/signal action\n",stderr);std::abort();}
+    }
+};
+#endif
 // Entirely synthetic minimal graphics programs, generated in memory. No game fixture.
 static std::vector<u8> source(u32 stage) {
     std::vector<u8> b(0x60);u32 header=(stage<<10)|(3<<5)|(stage==5?2:1);
@@ -130,9 +157,16 @@ int main() {
     std::vector<u8> old_bytes(bytes.size());CHECK(fread(old_bytes.data(),1,old_bytes.size(),old)==old_bytes.size());fclose(old);
     CHECK(old_bytes==bytes);CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok && round.scope==replacement.scope);
     CHECK(catalog::save(path.c_str(),cat)==catalog::Status::Ok);
-    const auto blocked=directory/"blocked";CHECK(std::filesystem::create_directory(blocked));
-    CHECK(catalog::save(blocked.string().c_str(),replacement)==catalog::Status::IoError);
-    CHECK(std::filesystem::remove(blocked));
+    {
+        // A partial sibling-temp write must preserve this catalog's old bytes.
+        ScopedWriteLimit write_limit;CHECK(write_limit.enable());
+        const auto failed=catalog::save(path.c_str(),replacement);
+        CHECK(write_limit.restore());CHECK(failed==catalog::Status::IoError);
+    }
+    FILE* retained=fopen(path.c_str(),"rb");CHECK(retained!=nullptr);
+    std::vector<u8> retained_bytes(bytes.size());
+    const bool retained_ok=fread(retained_bytes.data(),1,retained_bytes.size(),retained)==retained_bytes.size() && fgetc(retained)==EOF;
+    fclose(retained);CHECK(retained_ok && retained_bytes==bytes);
     CHECK(std::distance(std::filesystem::directory_iterator(directory),std::filesystem::directory_iterator{})==1);
 #endif
     CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok && round.scope==cat.scope);

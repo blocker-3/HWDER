@@ -7,10 +7,13 @@
 #include <fstream>
 #include <iterator>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -21,8 +24,35 @@ constexpr u64 kTag = 0x1111222233334444ull;
 unsigned checks = 0;
 void check(bool good, const char* what) {
     ++checks;
-    if (!good) { std::fprintf(stderr,"FAIL: %s\n",what); std::exit(1); }
+    if (!good) throw std::runtime_error(what);
 }
+#ifndef _WIN32
+// Process-wide state: declare before SaveTask so its worker is joined first
+// during unwinding. Only the soft limit changes; the original action is retained.
+class ScopedWriteLimit {
+    struct rlimit previous_limit{};
+    struct sigaction previous_action{};
+    bool limited=false, ignored=false;
+public:
+    bool enable() {
+        if(getrlimit(RLIMIT_FSIZE,&previous_limit))return false;
+        struct sigaction action{};action.sa_handler=SIG_IGN;sigemptyset(&action.sa_mask);
+        if(sigaction(SIGXFSZ,&action,&previous_action))return false;
+        ignored=true;
+        auto limit=previous_limit;limit.rlim_cur=1;
+        if(setrlimit(RLIMIT_FSIZE,&limit))return false;
+        limited=true;return true;
+    }
+    bool restore() {
+        if(limited) {if(setrlimit(RLIMIT_FSIZE,&previous_limit))return false;limited=false;}
+        if(ignored) {if(sigaction(SIGXFSZ,&previous_action,nullptr))return false;ignored=false;}
+        return true;
+    }
+    ~ScopedWriteLimit() {
+        if(!restore()){std::fputs("FAIL: restore file-size limit/signal action\n",stderr);std::abort();}
+    }
+};
+#endif
 std::vector<u8> read(const std::string& path) {
     std::ifstream f(path,std::ios::binary);
     return {std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>()};
@@ -104,7 +134,7 @@ SaveResult finish(SaveTask& task) {
 }
 }  // namespace
 
-int main() {
+int run_tests() {
 #ifdef _WIN32
     const auto pid=GetCurrentProcessId();
 #else
@@ -128,6 +158,9 @@ int main() {
     check(save(second.c_str(),kTag,loaded)==Status::Ok && read(path)==read(second),"deterministic canonical encoding");
     auto good=read(path);
     {
+#ifndef _WIN32
+        ScopedWriteLimit write_limit;
+#endif
         SaveTask task;
         Cache snapshot=original;
         check(task.start(second,kTag,std::move(snapshot),true),"background snapshot starts");
@@ -144,12 +177,16 @@ int main() {
         check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
         CloseHandle(locked);
 #else
-        const auto blocked=dir/"blocked";
-        check(std::filesystem::create_directory(blocked),"create deterministic replacement failure");
+        // One byte reaches the sibling temporary file, then write fails with
+        // EFBIG. Exercise the same existing destination as the successful save.
+        check(write_limit.enable(),"limit background temporary-file writes");
         Cache empty;
-        check(task.start(blocked.string(),kTag,std::move(empty)),"background replacement starts");
-        check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
-        check(std::filesystem::remove(blocked),"remove replacement failure fixture");
+        check(task.start(second,kTag,std::move(empty)),"background replacement starts");
+        const auto failed=finish(task);
+        check(write_limit.restore(),"restore background write limit and signal action");
+        check(failed.status==Status::IoError && read(second)==good,"partial background write retains destination history");
+        check(std::distance(std::filesystem::directory_iterator(dir),std::filesystem::directory_iterator{})==2,
+              "failed background write leaves no temporary artifact");
 #endif
         snapshot=original;
         check(task.start(second,kTag,std::move(snapshot)),"failed background save can be retried");
@@ -327,12 +364,22 @@ int main() {
 #else
     struct stat permissions{};
     check(stat(path.c_str(),&permissions)==0 && (permissions.st_mode&0777)==0600,"new private cache has owner-only permissions");
-    const auto blocked=dir/"blocked";
-    check(std::filesystem::create_directory(blocked),"create deterministic replacement failure");
-    check(save(blocked.string().c_str(),kTag,minimal)==Status::IoError,"atomic replacement failure reported");
-    check(std::filesystem::remove(blocked),"remove replacement failure fixture");
+    {
+        ScopedWriteLimit write_limit;
+        check(write_limit.enable(),"limit synchronous temporary-file writes");
+        const auto failed=save(path.c_str(),kTag,minimal);
+        check(write_limit.restore(),"restore synchronous write limit and signal action");
+        check(failed==Status::IoError,"partial temporary write failure reported");
+    }
 #endif
     check(read(path)==good,"failed atomic replacement retains previous bytes");
+#ifndef _WIN32
+    const auto blocked=dir/"blocked";
+    check(std::filesystem::create_directory(blocked),"create rename failure fixture");
+    check(save(blocked.string().c_str(),kTag,minimal)==Status::IoError && std::filesystem::is_directory(blocked),
+          "rename failure leaves directory destination intact");
+    check(std::filesystem::remove(blocked),"remove rename failure fixture");
+#endif
     size_t files=0; for(const auto& ignored:std::filesystem::directory_iterator(dir)) ++files;
     check(files==3,"failed save leaves no temporary artifact");
     check(save(path.c_str(),kTag,minimal)==Status::Ok,"atomic replacement succeeds after releasing old file");
@@ -349,4 +396,10 @@ int main() {
     Cache empty; check(save(second.c_str(),kTag,empty)==Status::Ok && load(second.c_str(),kTag,replaced)==Status::Ok && replaced.programs.empty(),"empty cache roundtrips");
     std::filesystem::remove(path); std::filesystem::remove(raw); std::filesystem::remove(second); std::filesystem::remove(dir);
     std::printf("pipeline_warmup_cache_test: %u checks passed\n",checks);
+    return 0;
+}
+
+int main() {
+    try {return run_tests();}
+    catch(const std::exception& error) {std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}
 }
