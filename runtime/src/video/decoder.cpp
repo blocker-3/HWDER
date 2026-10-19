@@ -492,10 +492,18 @@ public:
         if (!codec) { hw_log("nvdec: FFmpeg native H.264 decoder unavailable");return; }
         context_ = avcodec_alloc_context3(codec);
         frame_ = av_frame_alloc();
+        picture_ = av_frame_alloc();
         packet_ = av_packet_alloc();
-        if (!context_ || !frame_ || !packet_) { release();hw_log("nvdec: FFmpeg allocation failed");return; }
-        // Frame threading adds latency to the guest's immediate-picture path.
+        if (!context_ || !frame_ || !picture_ || !packet_) { release();hw_log("nvdec: FFmpeg allocation failed");return; }
+        // The guest needs each completed picture in decode order, including B
+        // pictures whose POC precedes a forward reference already submitted to
+        // VIC. FFmpeg's presentation-order output can suppress those pictures
+        // under our no-reordering SPS. Retain the native decoder's allocated
+        // picture buffers and copy them only after synchronous decoding finishes.
         context_->thread_count = 1;
+        context_->thread_type = 0;
+        context_->opaque = this;
+        context_->get_buffer2 = acquire_picture;
         context_->max_pixels = 8192ll * 8192;
         const int status = avcodec_open2(context_, codec, nullptr);
         if (status < 0) { warn("open", status);release();return; }
@@ -508,10 +516,12 @@ public:
     void restart() {
         if (context_) avcodec_flush_buffers(context_);
         if (frame_) av_frame_unref(frame_);
+        if (picture_) av_frame_unref(picture_);
         if (packet_) av_packet_unref(packet_);
     }
     void decode(const std::vector<u8>& au, u32 tag) {
         if (!context_ || au.empty() || au.size() > INT_MAX) return;
+        av_frame_unref(picture_);
         av_packet_unref(packet_);
         // av_new_packet adds AV_INPUT_BUFFER_PADDING_SIZE zero bytes, required
         // by optimized bitstream readers even when the final NAL ends at size.
@@ -524,16 +534,32 @@ public:
         packet_->dts = AV_NOPTS_VALUE;
         int status = avcodec_send_packet(context_, packet_);
         if (status == AVERROR(EAGAIN)) {
-            drain();
+            if (!drain()) { av_packet_unref(packet_);av_frame_unref(picture_);return; }
             status = avcodec_send_packet(context_, packet_);
         }
         av_packet_unref(packet_);
-        if (status < 0) { warn("send", status);return; }
-        drain();
+        if (status < 0) { warn("send", status);av_frame_unref(picture_);return; }
+        if (!drain()) { av_frame_unref(picture_);return; }
+        // send/receive may decode internally; with all codec threading disabled,
+        // every write to the retained picture has finished before drain returns.
+        // A missing picture is an error, never permission to reuse an old tag.
+        if (picture_->data[0] && picture_->pts == int64_t(tag)) deliver(picture_);
+        else warn("decoded picture unavailable", AVERROR_INVALIDDATA);
+        av_frame_unref(picture_);
     }
 private:
+    static int acquire_picture(AVCodecContext* context, AVFrame* frame, int flags) {
+        const int status = avcodec_default_get_buffer2(context, frame, flags);
+        if (status < 0) return status;
+        auto* self = static_cast<AvDecoder*>(context->opaque);
+        // H.264 may allocate missing-reference placeholders first. The actual
+        // picture is allocated last; keep only its own reference-counted planes.
+        av_frame_unref(self->picture_);
+        return av_frame_ref(self->picture_, frame);
+    }
     void release() {
         av_packet_free(&packet_);
+        av_frame_free(&picture_);
         av_frame_free(&frame_);
         avcodec_free_context(&context_);
     }
@@ -543,16 +569,17 @@ private:
         av_strerror(status, error, sizeof(error));
         hw_log("nvdec: FFmpeg %s failed: %s", operation, error);
     }
-    void drain() {
+    bool drain() {
         for (;;) {
             const int status = avcodec_receive_frame(context_, frame_);
-            if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) return;
-            if (status < 0) { warn("receive", status);return; }
-            deliver();
+            if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) return true;
+            if (status < 0) { warn("receive", status);return false; }
+            // Consume the presentation queue so the codec accepts the next AU;
+            // guest delivery uses the completed picture retained by get_buffer2.
             av_frame_unref(frame_);
         }
     }
-    void deliver() {
+    void deliver(const AVFrame* frame_) {
         const int width = frame_->width, height = frame_->height;
         const bool nv12 = frame_->format == AV_PIX_FMT_NV12;
         const bool planar = frame_->format == AV_PIX_FMT_YUV420P;
@@ -589,6 +616,7 @@ private:
     }
     AVCodecContext* context_ = nullptr;
     AVFrame* frame_ = nullptr;
+    AVFrame* picture_ = nullptr;
     AVPacket* packet_ = nullptr;
     unsigned warnings_ = 0;
 };
