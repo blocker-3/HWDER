@@ -249,19 +249,26 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         # Ninja can consider a newer damaged/stale executable up to date. Force its relink
         # whenever the output lacks a valid completion certificate; preserve partial objects.
         exe.unlink(missing_ok=True)
-        run([sys.executable, root / "tools" / "build.py", "--jobs", str(jobs),
-             "--build-dir", bdir, "--generated-dir", generated], root)
+        try:
+            run([sys.executable, root / "tools" / "build.py", "--jobs", str(jobs),
+                 "--build-dir", bdir, "--generated-dir", generated], root)
+        finally:
+            # A failed/interrupted compiler can still leave objects that consumed
+            # changed input. Check every exit before allowing any partial reuse.
+            try:
+                stable = tree_hashes(generated) == generated_files and tree_hashes(exefs) == exefs_files
+            except (OSError, ValueError):
+                stable = False
+            if not stable and bdir.exists():
+                bdir.rename(bdir.with_name(bdir.name + ".invalid-" + uuid.uuid4().hex[:8]))
+        if not stable:
+            raise ValueError("Cached build inputs changed during compilation; rerun")
         if not exe.is_file():
             raise ValueError("Build succeeded without a Windows executable")
         with exe.open("rb") as f:
             magic = f.read(2)
         if magic != b"MZ":
             raise ValueError("Build succeeded without a Windows executable")
-        if tree_hashes(generated) != generated_files or tree_hashes(exefs) != exefs_files:
-            # Objects may have consumed the changed bytes. Keep them for inspection, but
-            # never reuse those objects after restoring the verified generated sources.
-            bdir.rename(bdir.with_name(bdir.name + ".invalid-" + uuid.uuid4().hex[:8]))
-            raise ValueError("Cached build inputs changed during compilation; rerun")
         if source_fingerprints(root) != (generation_inputs, build_inputs):
             raise ValueError("Build inputs changed during setup; rerun to build the new source version")
         if before != (nsp.stat().st_size, nsp.stat().st_mtime_ns):

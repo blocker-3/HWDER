@@ -262,6 +262,52 @@ class Fixture(unittest.TestCase):
         self.prepare()
         self.assertEqual(self.calls, ["generate", "build", "build"])
 
+    def check_failed_consumer_quarantine(self, failure):
+        exe = self.prepare()
+        previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
+        (self.root / "runtime/source.cpp").write_text("updated runtime")
+        runner = self.run_stage
+        attempted = []
+        def mutate(args, cwd):
+            runner(args, cwd)
+            if "--build-dir" in args:
+                bdir = Path(args[args.index("--build-dir") + 1])
+                attempted.append(bdir)
+                generated = Path(args[args.index("--generated-dir") + 1])
+                if failure == "missing-input":
+                    (generated / "rc_main_000.c").unlink()
+                else:
+                    (generated / "rc_main_000.c").write_text("changed during compiler work")
+                if failure == "interrupt":
+                    raise KeyboardInterrupt()
+                if failure == "no-executable":
+                    (bdir / "hwder.exe").unlink()
+                else:
+                    raise subprocess.CalledProcessError(8, ["synthetic failed compiler"])
+        with self.assertRaises((subprocess.CalledProcessError, KeyboardInterrupt, ValueError)):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          mutate, lambda n, k: self.modules)
+        self.assertFalse(attempted[0].exists(), "all suspect native objects must leave the reusable build path")
+        invalid = list((self.cache / "builds").glob("*.invalid-*"))
+        self.assertEqual(len(invalid), 1)
+        self.assertTrue((invalid[0] / "partial.obj").exists())
+        self.assertEqual(exe.read_bytes(), previous)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
+        self.prepare()
+        self.assertEqual(self.calls, ["generate", "build", "build", "generate", "build"])
+
+    def test_changed_cached_input_with_failed_compile_quarantines_objects(self):
+        self.check_failed_consumer_quarantine("failed")
+
+    def test_changed_cached_input_with_interrupted_compile_quarantines_objects(self):
+        self.check_failed_consumer_quarantine("interrupt")
+
+    def test_changed_cached_input_without_executable_quarantines_objects(self):
+        self.check_failed_consumer_quarantine("no-executable")
+
+    def test_deleted_cached_input_with_failed_compile_quarantines_objects(self):
+        self.check_failed_consumer_quarantine("missing-input")
+
     def test_publish_failure_preserves_last_success(self):
         exe = self.prepare()
         previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()

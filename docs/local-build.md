@@ -69,7 +69,8 @@ coordinators sharing one cache and release automatically when a process dies.
   executables are removed to force Ninja to relink, while partial compiler objects remain reusable.
 - Changes to source or cached build inputs during setup cause a failure instead of publishing a
   mixed version. If cached inputs change during compilation, that build directory is retained
-  with an `.invalid-*` suffix so suspect compiler objects cannot be reused on retry.
+  with an `.invalid-*` suffix so suspect compiler objects cannot be reused on retry,
+  including when compilation fails, is interrupted or produces no executable.
 
 After success, setup atomically replaces `play/hwder.exe`; that stable folder retains settings,
 saves, logs, private texture/shader/pipeline caches and any configured custom save path across
