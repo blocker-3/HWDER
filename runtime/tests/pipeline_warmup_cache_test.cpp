@@ -6,7 +6,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <chrono>
+#include <thread>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using namespace gpu::warmup;
 namespace {
@@ -88,20 +95,28 @@ void unchanged_on_failure(const std::string& path, u64 tag, Status expected) {
 }
 SaveResult finish(SaveTask& task) {
     SaveResult result;
-    const u64 deadline=GetTickCount64()+10000;
-    while (!task.poll(result)) { if (GetTickCount64()>=deadline) check(false,"background save timeout"); Sleep(1); }
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while (!task.poll(result)) {
+        if (std::chrono::steady_clock::now()>=deadline) check(false,"background save timeout");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     return result;
 }
 }  // namespace
 
 int main() {
-    auto dir=std::filesystem::temp_directory_path()/("hwder-warmup-test-"+std::to_string(GetCurrentProcessId()));
+#ifdef _WIN32
+    const auto pid=GetCurrentProcessId();
+#else
+    const auto pid=getpid();
+#endif
+    auto dir=std::filesystem::temp_directory_path()/("hwder-warmup-test-"+std::to_string(pid));
     check(std::filesystem::create_directory(dir),"create private test directory");
     std::string path=(dir/"cache.bin").string(), raw=(dir/"raw.bin").string(), second=(dir/"second.bin").string();
     Cache original=fixture(), loaded;
     check(load(path.c_str(),kTag,loaded)==Status::NotFound,"missing cache");
     auto saved=save(path.c_str(),kTag,original);
-    if(saved!=Status::Ok) std::fprintf(stderr,"nontrivial save status: %s (Win32 %lu)\n",name(saved),GetLastError());
+    if(saved!=Status::Ok) std::fprintf(stderr,"nontrivial save status: %s\n",name(saved));
     check(saved==Status::Ok,"nontrivial save");
     check(load(path.c_str(),kTag,loaded)==Status::Ok,"nontrivial load");
     check(loaded.programs.size()==1 && loaded.pipelines.size()==2,"record counts and shared program reference");
@@ -121,12 +136,21 @@ int main() {
         auto result=finish(task);
         check(result.status==Status::Ok && result.recipes==original.pipelines.size() && !task.pending(),"background completion reports retained recipes");
         check(read(second)==good,"background persistence has identical encoding");
+#ifdef _WIN32
         HANDLE locked=CreateFileA(second.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         check(locked!=INVALID_HANDLE_VALUE,"lock background output against replacement");
         Cache empty;
         check(task.start(second,kTag,std::move(empty)),"background replacement starts");
         check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
         CloseHandle(locked);
+#else
+        const auto blocked=dir/"blocked";
+        check(std::filesystem::create_directory(blocked),"create deterministic replacement failure");
+        Cache empty;
+        check(task.start(blocked.string(),kTag,std::move(empty)),"background replacement starts");
+        check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
+        check(std::filesystem::remove(blocked),"remove replacement failure fixture");
+#endif
         snapshot=original;
         check(task.start(second,kTag,std::move(snapshot)),"failed background save can be retried");
         check(finish(task).status==Status::Ok && read(second)==good,"background retry preserves complete snapshot");
@@ -295,15 +319,33 @@ int main() {
         std::ofstream sparse(raw,std::ios::binary|std::ios::trunc); sparse.seekp(kMaxFileBytes); sparse.put(0);
     }
     unchanged_on_failure(raw,kTag,Status::Invalid);
+#ifdef _WIN32
     HANDLE locked=CreateFileA(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
     check(locked!=INVALID_HANDLE_VALUE,"lock old cache against replacement");
     check(save(path.c_str(),kTag,minimal)==Status::IoError,"atomic replacement failure reported");
     CloseHandle(locked);
+#else
+    struct stat permissions{};
+    check(stat(path.c_str(),&permissions)==0 && (permissions.st_mode&0777)==0600,"new private cache has owner-only permissions");
+    const auto blocked=dir/"blocked";
+    check(std::filesystem::create_directory(blocked),"create deterministic replacement failure");
+    check(save(blocked.string().c_str(),kTag,minimal)==Status::IoError,"atomic replacement failure reported");
+    check(std::filesystem::remove(blocked),"remove replacement failure fixture");
+#endif
     check(read(path)==good,"failed atomic replacement retains previous bytes");
     size_t files=0; for(const auto& ignored:std::filesystem::directory_iterator(dir)) ++files;
     check(files==3,"failed save leaves no temporary artifact");
     check(save(path.c_str(),kTag,minimal)==Status::Ok,"atomic replacement succeeds after releasing old file");
     Cache replaced; check(load(path.c_str(),kTag,replaced)==Status::Ok && replaced.pipelines.empty(),"replacement contains new cache");
+#ifndef _WIN32
+    std::ifstream old(path,std::ios::binary);
+    check(bool(old),"open old inode before replacement");
+    const auto previous=read(path);
+    check(save(path.c_str(),kTag,original)==Status::Ok,"POSIX replaces cache with active reader");
+    const std::vector<u8> previous_reader{std::istreambuf_iterator<char>(old),std::istreambuf_iterator<char>()};
+    check(previous_reader==previous && read(path)==good,"reader retains old inode while new readers observe complete replacement");
+    old.close();
+#endif
     Cache empty; check(save(second.c_str(),kTag,empty)==Status::Ok && load(second.c_str(),kTag,replaced)==Status::Ok && replaced.programs.empty(),"empty cache roundtrips");
     std::filesystem::remove(path); std::filesystem::remove(raw); std::filesystem::remove(second); std::filesystem::remove(dir);
     std::printf("pipeline_warmup_cache_test: %u checks passed\n",checks);

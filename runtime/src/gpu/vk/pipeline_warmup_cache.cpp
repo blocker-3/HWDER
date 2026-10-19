@@ -10,7 +10,12 @@
 #include <memory>
 #include <tuple>
 #include <unordered_map>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace gpu::warmup {
 namespace {
@@ -238,6 +243,7 @@ bool same_texture(const shader::TextureUse& a, const shader::TextureUse& b) {
 
 Status write_atomic(const char* path, const std::vector<u8>& bytes) {
     static std::atomic<u64> serial{0};
+#ifdef _WIN32
     std::string temporary = std::string(path) + ".tmp." + std::to_string(GetCurrentProcessId()) + "." + std::to_string(++serial);
     HANDLE file = CreateFileA(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return Status::IoError;
@@ -248,6 +254,35 @@ Status write_atomic(const char* path, const std::vector<u8>& bytes) {
     if (ok) ok = MoveFileExA(temporary.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
     if (!ok) DeleteFileA(temporary.c_str());
     return ok ? Status::Ok : Status::IoError;
+#else
+    const std::string destination(path);
+    const auto slash = destination.find_last_of('/');
+    const std::string parent = slash == std::string::npos ? "." : slash == 0 ? "/" : destination.substr(0, slash);
+    const std::string temporary = destination + ".tmp." + std::to_string(getpid()) + "." + std::to_string(++serial);
+    const int directory = open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return Status::IoError;
+    const int file = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (file < 0) { close(directory); return Status::IoError; }
+    bool ok = true;
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto written = write(file, bytes.data() + offset, bytes.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) { ok = false; break; }
+        offset += size_t(written);
+    }
+    auto sync = [](int fd) { int result; do { result = fsync(fd); } while (result < 0 && errno == EINTR); return result == 0; };
+    if (ok) ok = sync(file);
+    // A failed close must not be retried: Linux already released the descriptor.
+    if (close(file)) ok = false;
+    if (ok) ok = rename(temporary.c_str(), path) == 0;
+    if (!ok) unlink(temporary.c_str());
+    // Persist the directory entry as well as the file content. A sync failure
+    // here reports an uncertain durable write; the rename has already occurred.
+    if (ok) ok = sync(directory);
+    if (close(directory)) ok = false;
+    return ok ? Status::Ok : Status::IoError;
+#endif
 }
 }  // namespace
 
@@ -418,7 +453,12 @@ Status load(const char* path, u64 compatibility_tag, Cache& out) {
     if (!path || !*path) return Status::IoError;
     try {
         FILE* opened = nullptr;
+#ifdef _WIN32
         errno_t error = fopen_s(&opened,path,"rb");
+#else
+        opened = fopen(path,"rb");
+        const int error = errno;
+#endif
         std::unique_ptr<FILE,decltype(&fclose)> f(opened,fclose);
         if (!f) return error == ENOENT ? Status::NotFound : Status::IoError;
         if (fseek(f.get(),0,SEEK_END)) return Status::IoError;

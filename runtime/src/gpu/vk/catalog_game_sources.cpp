@@ -30,6 +30,21 @@ bool host_path(const std::string& root,const std::string& name,std::filesystem::
     auto rel=resolved.lexically_relative(base);if(rel.empty() || *rel.begin()=="..")return false;
     out=resolved;return true;
 }
+FILE* open_resource(const std::filesystem::path& path) {
+#ifdef _WIN32
+    return _wfopen(path.c_str(),L"rb");
+#else
+    return fopen(path.c_str(),"rb");
+#endif
+}
+bool seek_resource(FILE* file,u64 offset) {
+#ifdef _WIN32
+    return _fseeki64(file,offset,SEEK_SET)==0;
+#else
+    // Selected resources are bounded to 64 MiB, including on 32-bit hosts.
+    return offset<=64*1024*1024 && fseeko(file,static_cast<off_t>(offset),SEEK_SET)==0;
+#endif
+}
 } // namespace
 bool GameSources::resource(const Resource& file,std::vector<u8>& out) const {
     if(file.size>64*1024*1024)return false;
@@ -37,7 +52,7 @@ bool GameSources::resource(const Resource& file,std::vector<u8>& out) const {
     if(nsp_) {if(!hwfs::nsp::active() || !hwfs::nsp::romfs_read(file.offset,bytes.data(),file.size))return false;}
     else {
         std::filesystem::path path;if(!host_path(root_,file.name,path))return false;
-        FILE* f=_wfopen(path.c_str(),L"rb");if(!f)return false;
+        FILE* f=open_resource(path);if(!f)return false;
         bool ok=fread(bytes.data(),1,bytes.size(),f)==bytes.size() && fgetc(f)==EOF;fclose(f);if(!ok)return false;
     }
     out=std::move(bytes);return true;
@@ -108,8 +123,8 @@ bool GameSources::read(const Locator& locator,std::vector<u8>& out)const {
         if(nsp_) {if(!hwfs::nsp::romfs_read(file.offset+locator.offset,bytes.data(),bytes.size()))return false;}
         else {
             std::filesystem::path path;if(!host_path(root_,file.name,path))return false;
-            FILE* f=_wfopen(path.c_str(),L"rb");if(!f)return false;
-            bool ok=!_fseeki64(f,locator.offset,SEEK_SET) && fread(bytes.data(),1,bytes.size(),f)==bytes.size();fclose(f);if(!ok)return false;
+            FILE* f=open_resource(path);if(!f)return false;
+            bool ok=seek_resource(f,locator.offset) && fread(bytes.data(),1,bytes.size(),f)==bytes.size();fclose(f);if(!ok)return false;
         }
         out=std::move(bytes);return true;
     }

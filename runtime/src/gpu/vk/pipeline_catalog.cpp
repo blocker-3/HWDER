@@ -4,8 +4,14 @@
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
+#include <cerrno>
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+// OpenSSL 3.x is provided by the Linux host (Apache-2.0); no sources are vendored.
+#include <openssl/evp.h>
+#endif
 
 namespace gpu::catalog {
 namespace {
@@ -97,11 +103,18 @@ public:
 Digest digest(const void* bytes,size_t size) {
     Digest result{};
     if(size>0xffffffffull)throw std::runtime_error("SHA256 length");
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE alg=nullptr;
     if(BCryptOpenAlgorithmProvider(&alg,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)throw std::runtime_error("SHA256 provider");
     auto status=BCryptHash(alg,nullptr,0,(PUCHAR)bytes,ULONG(size),result.data(),ULONG(result.size()));
     BCryptCloseAlgorithmProvider(alg,0);
-    if(status<0)throw std::runtime_error("SHA256");return result;
+    if(status<0)throw std::runtime_error("SHA256");
+#else
+    unsigned int length=0;
+    if(EVP_Digest(bytes,size,result.data(),&length,EVP_sha256(),nullptr)!=1 || length!=result.size())
+        throw std::runtime_error("SHA256");
+#endif
+    return result;
 }
 bool safe_resource(const std::string& p) {
     if(p.empty() || p.size()>256 || p.front()=='/' || p.back()=='/')return false;
@@ -146,7 +159,14 @@ Status decode(const std::vector<u8>& bytes,u64 build,u32 version,Catalog& out) {
     }catch(const std::exception&){return Status::Invalid;}
 }
 Status load(const char* path,u64 build,u32 version,Catalog& out) {
-    FILE* f=nullptr;auto error=fopen_s(&f,path,"rb");if(!f)return error==ENOENT?Status::NotFound:Status::IoError;
+    if(!path || !*path)return Status::IoError;
+    FILE* f=nullptr;
+#ifdef _WIN32
+    auto error=fopen_s(&f,path,"rb");
+#else
+    f=fopen(path,"rb");const int error=errno;
+#endif
+    if(!f)return error==ENOENT?Status::NotFound:Status::IoError;
     std::unique_ptr<FILE,decltype(&fclose)> owned(f,fclose);
     if(fseek(f,0,SEEK_END))return Status::IoError;long n=ftell(f);
     if(n<0 || size_t(n)>kMaxBytes)return Status::Invalid;
