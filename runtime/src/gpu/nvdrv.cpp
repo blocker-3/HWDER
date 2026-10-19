@@ -8,6 +8,8 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
+#include "host/platform.h"
+#include "host/timing.h"
 
 #include "interp/interp.h"
 #include "debug_flags.h"
@@ -513,7 +515,7 @@ public:
                 if (ev.threshold && !reached(syncpoint_read(ev.syncpt), ev.threshold))
                     hw_log("nvhost-ctrl: wait for syncpt %u >= %u abandoned (value %u, max %u, host thread %lu)", ev.syncpt,
                            ev.threshold, syncpoint_read(ev.syncpt), g_sp.max[ev.syncpt % kMaxSyncpoints].load(),
-                           GetCurrentThreadId());
+                           static_cast<unsigned long>(host::thread_id()));
                 ev.threshold = 0;
                 ev.generation++;
                 if (ev.event) ev.event->clear();
@@ -858,11 +860,11 @@ private:
         b.in2_size = in2.size;
         b.out2 = out2.size ? out2_buf.data() : nullptr;
         b.out2_size = out2.size;
-        LARGE_INTEGER io0, io1, iof;
-        QueryPerformanceCounter(&io0);
+        host::Counter io0, io1, iof;
+        host::counter(&io0);
         NvResult r = dev->ioctl(fd, cmd, b);
-        QueryPerformanceCounter(&io1);
-        QueryPerformanceFrequency(&iof);
+        host::counter(&io1);
+        host::counter_frequency(&iof);
         if ((io1.QuadPart - io0.QuadPart) * 1000.0 / iof.QuadPart > 10.0)
             hw_log("nvdrv: slow: fd %u ioctl 0x%08x took %.0f ms", fd, cmd, (io1.QuadPart - io0.QuadPart) * 1000.0 / iof.QuadPart);
         if (out.addr && (cmd >> 31 & 1)) memcpy((void*)out.addr, work.data(), out.size);
