@@ -293,11 +293,17 @@ void update_thread() {
             u64 c = t % 3000;
             // A 3D battle frame has hundreds of draws; once one is up, only fight (menu presses would
             // open the pause menu's sub-screens).
-            static u64 battle_since = 0;
+            static u64 battle_since = 0, low_since = 0;
             if (hw_last_frame_draws.load() > 450) {
                 if (!battle_since) battle_since = t;
+                low_since = 0;
             } else if (hw_last_frame_draws.load() < 150) {
-                battle_since = 0;
+                // Out of battle only after a full second of small frames: a single light frame (a hitch, a
+                // transition) must not send menu presses into the battle, which opens the pause menu.
+                if (!low_since) low_since = t;
+                if (t - low_since > 1000) battle_since = 0;
+            } else {
+                low_since = 0;
             }
             const bool in_battle = battle_since && t - battle_since > 2000;
             // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of
@@ -341,6 +347,14 @@ void update_thread() {
                 if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
                 in.pad.ly = 20000;
                 in.pad.lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
+                // HWDER_AUTOPLAY_CIRCLE=1: run in a slow circle (one turn every 8 s) so Link crosses the map
+                // and the view covers every direction instead of pushing against a wall.
+                static const bool circle = getenv("HWDER_AUTOPLAY_CIRCLE") != nullptr;
+                if (circle) {
+                    double a = (t % 8000) / 8000.0 * 6.283185307;
+                    in.pad.lx = (s32)(24000 * std::cos(a));
+                    in.pad.ly = (s32)(24000 * std::sin(a));
+                }
                 // HWDER_AUTOPLAY_CAM=1: also turn the camera with the right stick (2 s right, 2 s left,
                 // 2 s still), for camera interpolation tests.
                 static const bool cam = getenv("HWDER_AUTOPLAY_CAM") != nullptr;

@@ -8,6 +8,9 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
+extern "C" bool hw_game_interp_on();  // interp/interp_draw.cpp
+
+extern "C" void hw_frame_probe_mark(const char* what);  // interp/frame_probe.cpp
 
 namespace ipc {
 namespace {
@@ -187,6 +190,7 @@ public:
             break;
         }
         case 3: {  // DequeueBuffer(async, w, h, format, usage)
+            hw_frame_probe_mark("dequeue");
             in.read<u32>();
             u32 w = in.read<u32>(), h = in.read<u32>();
             (void)w, (void)h;
@@ -204,6 +208,7 @@ public:
             break;
         }
         case 7: {  // QueueBuffer(slot, QueueBufferInput)
+            hw_frame_probe_mark("queue");
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
             {
@@ -380,6 +385,25 @@ private:
             fb.swap_interval = q.in.swap_interval ? q.in.swap_interval : 1;
             if (fb.address) gpu::renderer()->present(fb);
             u64 ticket = fb.address ? display::last_present_ticket() : 0;
+            // Stage b (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
+            // instead of when the next frame arrives. The game can then queue two frames ahead (triple
+            // buffering), which absorbs a slow game tick at 120 Hz; the release grid still paces it.
+            if (hw_game_interp_on() && ticket) {
+                if (!display::wait_present_done(ticket, 1000000000ull))
+                    hw_log("vi: screen blit of slot %d not finished after 1 s - releasing it anyway", q.slot);
+                {
+                    std::lock_guard<std::mutex> l(m_);
+                    if (presented >= 0 && presented != q.slot && slots_[presented].state == SlotState::Acquired)
+                        slots_[presented].state = SlotState::Free;
+                    slots_[q.slot].present_ticket = ticket;
+                    slots_[q.slot].frame = ++frame;
+                    slots_[q.slot].state = SlotState::Free;
+                    presented = -1;
+                }
+                cv_.notify_all();
+                buffer_event->signal();
+                continue;
+            }
             // The previous buffer goes back to the guest below. Its screen blit runs on the present queue, which
             // nothing orders against the renderer's later writes, so wait until it has read the buffer: otherwise
             // the guest can draw a later frame into it before it reaches the screen.

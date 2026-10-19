@@ -9,9 +9,13 @@
 //  * uniform, vertex and index data are copied per draw into a host-visible ring (snapshot semantics
 //    match the GPU's: constant buffer updates between draws are honored).
 #include "gpu/settings.h"
+#include "interp/camera.h"
+#include "../../../third_party/renderdoc/renderdoc_app.h"
 #include <unordered_set>
 #include <deque>
 #include <windows.h>
+
+#include <array>
 
 #include <algorithm>
 #include <atomic>
@@ -624,6 +628,20 @@ struct Framebuffer {
 // Draws in the last presented frame (read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
 extern "C" std::atomic<u32> hw_last_frame_draws{0};
 
+// HWDER_DRAWLOG=1 (with HWDER_FILMSTRIP): one line per draw into <filmstrip dir>/drawlog.txt while the
+// filmstrip capture window is open, keyed by present number, to find the draw behind a bad frame.
+static bool g_drawlog_window = false;
+static FILE* g_drawlog = nullptr;
+static bool drawlog_active() {
+    static const bool on = getenv("HWDER_DRAWLOG") && getenv("HWDER_FILMSTRIP");
+    if (!on || !g_drawlog_window) return false;
+    if (!g_drawlog) {
+        std::string path = std::string(getenv("HWDER_FILMSTRIP")) + "/drawlog.txt";
+        g_drawlog = fopen(path.c_str(), "w");
+    }
+    return g_drawlog != nullptr;
+}
+
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
 static const char* kWarmupFile = "pipeline_warmup.bin";
 static bool prewarm_enabled() {
@@ -794,9 +812,14 @@ private:
         VkDescriptorType type;
         u32 binding, count, first;  // index into buffers/images/texels of the StageRec
     };
+    struct CamHit {  // a run of the frame's camera matrix in a constant buffer (camera mode)
+        u32 word;        // float index into CbufRec::data
+        u8 mat, layout;  // kCamView/kCamViewProj/kCamInv, kCamLayouts index
+    };
     struct CbufRec {
         u32 buffer_index;      // StageRec::buffers entry to repoint
         std::vector<u8> data;  // staged bytes (what the shader saw)
+        std::vector<CamHit> cam_hits;
     };
     struct TexelRec {
         u32 index;  // StageRec::texels entry to replace
@@ -873,6 +896,48 @@ private:
     u32 saved_w_ = 0, saved_h_ = 0;
     VkFormat saved_fmt_ = VK_FORMAT_UNDEFINED, pres_fmt_ = VK_FORMAT_UNDEFINED;
     void replay_frame(float t);
+    // ---- camera mode (HWDER_INTERP_MODE=camera): replays substitute only the camera's view and
+    // viewProj, found in the frame's constant buffers by exact match against the tick snapshots.
+    static constexpr int kCamView = 0, kCamViewProj = 1, kCamInv = 2, kCamMats = 3, kCamLayouts = 4;
+    struct CamFrame {
+        bool matched = false, have_prev = false;
+        interp::CamSnap cur, prev;  // the frame's tick and the tick before it
+    };
+    CamFrame cam_frame_;
+    bool cam_replay_ = false;          // replay_draw substitutes cam_words_ at the CamHits
+    int cur_stage_ = 0;                // stage being bound (cbuf dump)
+    // ---- stage c (HWDER_GAME_INTERP): the game draws an in-between frame per tick (interp_draw.cpp)
+    // with a blended camera; here every draw's vertex-stage transforms (c3: world matrix, bone palette)
+    // are blended halfway between the previous real frame's copy of the same draw and this one.
+    struct ObjEntry {
+        u32 off, size;  // in the frame's arena
+        float pos[3];   // first world translation
+        bool has_pos;
+    };
+    struct ObjFrame {
+        u64 tag = 0;  // (tick << 1) | extra
+        std::vector<u8> arena;                                    // reused: no allocation per draw
+        std::unordered_map<u64, std::vector<ObjEntry>> idx;       // draw key -> occurrences (vectors kept, cleared)
+        void reset() {
+            arena.clear();  // capacity kept
+            idx.clear();    // keys come and go (addresses are part of them): never let the map grow
+        }
+    };
+    ObjFrame obj_cur_, obj_prev_;
+    std::unordered_map<u64, std::vector<bool>> obj_used_;  // in-between frame: previous blocks already paired
+    std::unordered_map<u64, u32> obj_occ_;                  // in-between frame: blocks of each key so far
+    u64 obj_tag_ = 0;
+    struct ObjStats { u64 draws = 0, matched = 0, blended = 0, mats = 0, jumps = 0, ticks = 0; double ms = 0; } obj_st_;
+    void obj_frame_begin(u64 tag);
+    void obj_transforms(u32 index, u8* data, u64 bytes);
+    bool obj_candidate(u32 index, u64 bytes) const {
+        return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && interp::game_interp() && gpu::exec_gi_tag();
+    }
+    u64 cur_draw_key_ = 0;             // program + vertex/index addresses + counts of the draw being bound
+    u32 dump_draw_ = 0;                // draws so far in the dumped frame
+    u32 cam_words_[kCamMats][kCamLayouts][16];
+    void cam_identify();
+    bool cam_prepare(float alpha);
     void replay_draw(const DrawRec& d, const DrawRec* prev, float t);
     void replay_clear(const ClearRec& c);
     bool ensure_saved_image(u32 w, u32 h, VkFormat fmt);
@@ -952,6 +1017,7 @@ private:
     u64 warmup_pending_max_ms_ = 0;
     size_t warmup_storage_bytes_ = 0;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
+    void cbuf_dump(u32 index, u64 va, const u8* data, u64 bytes);
     bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
                         const std::function<u32(u32, u32)>& cbuf, const std::function<bool(u32, u64&, u32&)>& cb_range,
                         const u32* tic_pool_regs, bool linked_tsc, std::vector<std::function<void()>>& post, StageRec* rec_out = nullptr);
@@ -1105,6 +1171,7 @@ private:
     u64 dump_count_ = getenv("HWDER_VK_FRAME_DUMP_COUNT") ? std::max(1ull, strtoull(getenv("HWDER_VK_FRAME_DUMP_COUNT"), nullptr, 0)) : 1;
     bool dumping() const { return g_s.present_count + 1 >= dump_frame_ && g_s.present_count + 1 < dump_frame_ + dump_count_; }
     std::string dump_tex_;  // texture sources of the current draw (filled by bind_resources)
+    std::string drawlog_tex_;  // same, compact, for HWDER_DRAWLOG
     std::vector<Image*> dump_rts_;  // render targets drawn to during the dumped frame
 };
 
@@ -2118,6 +2185,220 @@ bool VkRenderer::read_tic(u64 pool_va, u32 limit, u32 index, u32* out) {
     return true;
 }
 
+
+
+// Farthest an object or bone may move in one tick and still be blended (world units; a running
+// character moves about 10 per tick). Larger moves are teleports, respawns or a different object.
+constexpr float kObjMaxMove = 80.0f;
+
+// A 3x4 world transform (rows: rotation/scale, translation in the 4th column) in world space.
+static bool is_world_3x4(const float* m) {
+    // Cheapest tests first (most constant data fails on the translation column).
+    float t0 = std::fabs(m[3]), t1 = std::fabs(m[7]), t2 = std::fabs(m[11]);
+    if (!(t0 >= 1.0f && t0 < 1e6f && t1 >= 1.0f && t1 < 1e6f && t2 >= 1.0f && t2 < 1e6f)) return false;
+    for (int r = 0; r < 3; r++) {
+        float n2 = m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2];
+        if (!(n2 > 0.0025f && n2 < 100.0f)) return false;
+    }
+    return true;
+}
+
+static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
+    for (u64 i = 0; i + 12 <= nf; i += 4)
+        if (is_world_3x4(m + i)) {
+            out[0] = m[i + 3], out[1] = m[i + 7], out[2] = m[i + 11];
+            return true;
+        }
+    return false;
+}
+
+void VkRenderer::obj_frame_begin(u64 tag) {
+    if (tag == obj_tag_) return;
+    // A real frame ended: it becomes the reference for the next in-between frame.
+    if (obj_tag_ && !(obj_tag_ & 1)) {
+        std::swap(obj_prev_, obj_cur_);
+        obj_prev_.tag = obj_tag_;
+    }
+    obj_cur_.reset();
+    obj_used_.clear();
+    obj_occ_.clear();
+    obj_tag_ = tag;
+    if (!(tag & 1)) obj_st_.ticks++;
+    static u64 frames = 0;
+    if ((tag & 1) && ++frames % 600 == 0) {
+        hw_log("gi: stage c over 600 extra frames: %llu c3 blocks, %llu matched the previous frame, %llu blended "
+               "(%llu matrices), %llu matrices jumped too far; cost %.2f ms per tick", (unsigned long long)obj_st_.draws,
+               (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended, (unsigned long long)obj_st_.mats,
+               (unsigned long long)obj_st_.jumps, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
+        obj_st_ = ObjStats{};
+    }
+}
+
+void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
+    if (cur_stage_ != 0 || index != 3 || bytes < 64 || bytes > 4096) return;  // world matrix / bone palette sizes
+    struct Timer {
+        double& acc;
+        LARGE_INTEGER t0;
+        explicit Timer(double& a) : acc(a) { QueryPerformanceCounter(&t0); }
+        ~Timer() {
+            static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+            LARGE_INTEGER t1;
+            QueryPerformanceCounter(&t1);
+            acc += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+        }
+    } timer(obj_st_.ms);
+    static const bool off = getenv("HWDER_GI_NO_OBJECTS") != nullptr;
+    if (!interp::game_interp() || off) return;
+    u64 tag = gpu::exec_gi_tag();
+    if (!tag) return;
+    obj_frame_begin(tag);
+    const u64 nf = bytes / 4;
+    float pb[3];
+    const bool has = obj_first_pos((const float*)data, nf, pb);
+    if (!(tag & 1)) {  // real frame: remember this draw's transforms
+        if (!has) return;  // nothing to blend in it
+        ObjEntry e{(u32)obj_cur_.arena.size(), (u32)bytes, {pb[0], pb[1], pb[2]}, true};
+        obj_cur_.arena.insert(obj_cur_.arena.end(), data, data + bytes);
+        obj_cur_.idx[cur_draw_key_].push_back(e);
+        return;
+    }
+    // In-between frame of tick n: blend against real frame n-1. Many objects share a model (the same
+    // draw key), and their order changes between frames: pair each block with the previous frame's
+    // block of the same key whose first world transform is nearest (each used once).
+    obj_st_.draws++;
+    if (!has || obj_prev_.tag != ((tag >> 1) - 1) << 1) return;
+    auto it = obj_prev_.idx.find(cur_draw_key_);
+    if (it == obj_prev_.idx.end() || it->second.empty()) return;
+    auto& used = obj_used_[cur_draw_key_];
+    if (used.size() < it->second.size()) used.resize(it->second.size(), false);  // cleared per frame, capacity kept
+    // Same draw order first (the common case), else the nearest unused block among nearby occurrences.
+    const u32 occ = obj_occ_[cur_draw_key_]++;
+    const auto& prevs = it->second;
+    auto dist = [&](size_t k) {
+        const ObjEntry& e = prevs[k];
+        return (e.pos[0] - pb[0]) * (e.pos[0] - pb[0]) + (e.pos[1] - pb[1]) * (e.pos[1] - pb[1]) + (e.pos[2] - pb[2]) * (e.pos[2] - pb[2]);
+    };
+    int best = -1;
+    float bd = kObjMaxMove * kObjMaxMove;
+    if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= bd * 0.0625f) {
+        best = (int)occ;  // within a quarter of the limit at the same position in the order
+    } else {
+        size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
+        if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+        for (size_t k = lo; k < hi; k++) {
+            if (used[k] || prevs[k].size != bytes) continue;
+            float d = dist(k);
+            if (d < bd) bd = d, best = (int)k;
+            if (d == 0.0f) break;
+        }
+    }
+    if (best < 0) return;
+    used[best] = true;
+    obj_st_.matched++;
+    const float* a = (const float*)(obj_prev_.arena.data() + it->second[best].off);
+    float* b = (float*)data;
+    auto d2 = [](const float* x, const float* y) {
+        float dx = x[3] - y[3], dy = x[7] - y[7], dz = x[11] - y[11];
+        return dx * dx + dy * dy + dz * dz;
+    };
+    // The previous block's transforms, listed once (offset in floats); the fallback search only walks these.
+    u32 prev_list[1024];
+    u32 nprev = 0;
+    bool listed = false;  // built on the first fallback only
+    bool any = false;
+    for (u64 i = 0; i + 12 <= nf; i += 4) {
+        if (!is_world_3x4(b + i)) continue;
+        // The same slot first (a bone palette keeps its order); else the nearest transform in the
+        // previous block (blocks of instances may reorder them).
+        const float* src = nullptr;
+        if (is_world_3x4(a + i) && d2(a + i, b + i) <= kObjMaxMove * kObjMaxMove) {
+            src = a + i;
+        } else {
+            if (!listed) {
+                listed = true;
+                for (u64 j = 0; j + 12 <= nf && nprev < 1024; j += 4)
+                    if (is_world_3x4(a + j)) prev_list[nprev++] = (u32)j, j += 8;
+            }
+            float bd2 = kObjMaxMove * kObjMaxMove;
+            for (u32 k = 0; k < nprev; k++) {
+                float d = d2(a + prev_list[k], b + i);
+                if (d < bd2) bd2 = d, src = a + prev_list[k];
+            }
+        }
+        if (!src) {  // nothing near enough: a teleport, a respawn or a new instance - keep tick n
+            obj_st_.jumps++;
+            i += 8;
+            continue;
+        }
+        for (int k = 0; k < 12; k++) b[i + k] = src[k] + (b[i + k] - src[k]) * 0.5f;
+        obj_st_.mats++;
+        any = true;
+        i += 8;  // the rest of this matrix
+    }
+    if (any) obj_st_.blended++;
+}
+
+// HWDER_CBUF_DUMP=<present number> (stage c research): for every draw of that frame, log each bound
+// constant buffer: size, where the newest tick's camera viewProj/view sit (4 layouts), and the offsets
+// of 3x4 affine transforms (three rows of rotation/scale with a translation in the 4th column).
+void VkRenderer::cbuf_dump(u32 index, u64 va, const u8* data, u64 bytes) {
+    static const u64 target = getenv("HWDER_CBUF_DUMP") ? strtoull(getenv("HWDER_CBUF_DUMP"), nullptr, 10) : 0;
+    if (!target || g_s.present_count != target) return;
+    static u64 last_pc = 0;
+    static u32 lines = 0;
+    if (lines > 4000) return;
+    interp::CamSnap cs[1];
+    bool cam = interp::snapshots(cs, 1) == 1;
+    const float* f = (const float*)data;
+    u64 nf = bytes / 4;
+    std::string camhits, aff;
+    if (cam) {
+        float vpt[16], vt[16];
+        for (int r = 0; r < 4; r++)
+            for (int k = 0; k < 4; k++) vpt[r * 4 + k] = cs[0].viewproj[k * 4 + r], vt[r * 4 + k] = cs[0].view[k * 4 + r];
+        const float* pats[4] = {cs[0].viewproj, vpt, cs[0].view, vt};
+        const char* names[4] = {"VP", "VPt", "V", "Vt"};
+        for (u64 i = 0; i + 12 <= nf; i++)
+            for (int k = 0; k < 4; k++)
+                if (!memcmp(f + i, pats[k], 48)) camhits += " " + std::string(names[k]) + "@" + std::to_string(i * 4);
+    }
+    int naff = 0;
+    for (u64 i = 0; i + 12 <= nf; i += 4) {
+        const float* m = f + i;
+        bool ok = true;
+        for (int r = 0; r < 3 && ok; r++) {
+            float n2 = m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2];
+            ok = n2 > 0.04f && n2 < 25.0f && std::isfinite(m[r * 4 + 3]);
+        }
+        if (ok && (std::fabs(m[3]) + std::fabs(m[7]) + std::fabs(m[11])) > 10.0f) {
+            if (naff < 8) aff += " " + std::to_string(i * 4);
+            naff++;
+            i += 8;  // skip the rest of this matrix
+        }
+    }
+    hw_log("cbufdump: draw %u key %016llx stage %d c%u va %llx %llu bytes | camera%s | %d affine 3x4:%s%s", dump_draw_,
+           (unsigned long long)cur_draw_key_, cur_stage_, index, (unsigned long long)va, (unsigned long long)bytes,
+           camhits.empty() ? " -" : camhits.c_str(), naff, aff.c_str(), naff > 8 ? " ..." : "");
+    lines++;
+    (void)last_pc;
+    // Raw floats of the first few vertex-stage c3 blocks of each size (object / bone transforms).
+    static std::map<u64, int> shown;
+    if (cur_stage_ == 0 && index == 3 && shown[bytes]++ < 3) {
+        std::string row;
+        for (u64 i = 0; i < std::min<u64>(nf, 40); i++) {
+            char b[32];
+            snprintf(b, sizeof b, "%s%g", (i % 4) ? " " : " | ", f[i]);
+            row += b;
+        }
+        hw_log("cbufdump:   floats%s", row.c_str());
+        if (cam) {
+            const float* v = cs[0].viewproj;
+            hw_log("cbufdump:   camera viewProj rows: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", v[0], v[1], v[2], v[3],
+                   v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+        }
+    }
+}
+
 // Fill descriptor set `set` for a program's resources. cbuf(index, offset) reads bound cbuf words;
 // cb_range(index, va_lo/hi...) gives the bound range of c[index]. pools: [tic va, tic limit, tsc va, tsc limit].
 bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
@@ -2158,7 +2439,17 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
         if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
         Slice s = g_rec.stage(bytes, props.minUniformBufferOffsetAlignment);
-        if (bound) {
+        // Stage c: vertex-stage c3 holds the object/bone transforms; build it in cached memory (the staging
+        // slice is write-combined: reading it back is very slow), blend, then write it out once.
+        const bool obj = bound && obj_candidate(c.index, bytes);
+        alignas(16) static thread_local u8 obj_buf[4096];
+        if (obj) {
+            u64 n = std::min<u64>(bytes, size);
+            mm_->read(va, obj_buf, n);
+            if (n < bytes) memset(obj_buf + n, 0, bytes - n);
+            obj_transforms(c.index, obj_buf, bytes);
+            memcpy(s.ptr, obj_buf, bytes);
+        } else if (bound) {
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);
@@ -2168,6 +2459,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         dw.buffers.push_back({s.buf, s.offset, bytes});
         add_write(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1).pBufferInfo = &dw.buffers.back();
         if (rec_out) rec_out->cbufs.push_back({(u32)dw.buffers.size() - 1, std::vector<u8>(s.ptr, s.ptr + bytes)});
+        cbuf_dump(c.index, va, s.ptr, bytes);
     }
     // storage buffers
     for (const auto& sb : res.storage_buffers) {
@@ -2178,6 +2470,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         if (bytes > (1u << 20)) VK_LOG_ONCE("vk: storage buffer of %llu KiB bound (copied per draw, written %d)", (unsigned long long)(bytes >> 10), (int)sb.written);
         u8* src = va ? host(va) : nullptr;
         u64 avail = src ? mm_->contiguous_size(va, size) : 0;
+        if (src && avail >= 48) cbuf_dump(100 + sb.cbuf_index, va, src, std::min<u64>(avail, size));
         if (sb.written && src) {
             g_s.replay_unsafe = true;
             Buffer* b = new Buffer(create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true));
@@ -2295,6 +2588,12 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                     tc_.validate(te->img);
                     if (te->view) ii.imageView = te->view;
                     iref = {te->img, te->vp};
+                    if (drawlog_active()) {
+                        char t[96];
+                        snprintf(t, sizeof(t), " tex[%llx %ux%u f%d%s]", (unsigned long long)te->img->addr, te->img->info.width,
+                                 te->img->info.height, (int)te->img->info.fmt.vk, te->img->gpu_modified ? " gpu" : "");
+                        drawlog_tex_ += t;
+                    }
                     if (te->img->info.render_target || te->img->gpu_modified) draw_samples_rt_ = true;
                 } else {
                 ImageInfo info;
@@ -2361,6 +2660,12 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         e.view = v;
                         e.vp = {info.fmt.vk, vt, sub.level + bl, nl, sub.layer + blayer, layers, swz, aspect};
                         tic_cache_[tkey] = e;
+                    }
+                    if (drawlog_active()) {
+                        char t[96];
+                        snprintf(t, sizeof(t), " tex[%llx %ux%u f%d%s]", (unsigned long long)img->addr, img->info.width, img->info.height,
+                                 (int)img->info.fmt.vk, img->gpu_modified ? " gpu" : "");
+                        drawlog_tex_ += t;
                     }
                     if (dumping()) {
                         char t[128];
@@ -2855,6 +3160,11 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     u32 pools[6] = {regs[TexHeader], regs[TexHeader + 1], regs[TexHeader + 2],
                     regs[TexSampler], regs[TexSampler + 1], regs[TexSampler + 2]};
     bool linked = regs[SamplerBinding] == 1;
+    {
+        u64 kw[5] = {prog_key, addr(regs, VertexStreams + 1), addr(regs, IndexBuffer), ((u64)p.count << 32) | p.first, p.topology};
+        cur_draw_key_ = hash_bytes(kw, sizeof(kw), 0x1e1e);
+        dump_draw_++;
+    }
     for (u32 s = 0; s < 5; s++) {
         if (!prog->stages[s]) continue;
         StageLayout* sl = prog->layouts[s];
@@ -2877,6 +3187,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             size = b.size;
             return b.valid;
         };
+        cur_stage_ = (int)s;
         bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post, oprec ? &oprec->draw.stages[s] : nullptr);
         if (oprec) oprec->draw.has_stage[s] = true;
     }
@@ -2913,6 +3224,17 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             dump_prog_.clear();
         }
     }
+    if (drawlog_active()) {
+        const float* vt = (const float*)(regs + ViewportTransform);
+        const u32* sc = regs + ScissorTest;
+        fprintf(g_drawlog, "%llu %llu prog %016llx topo %u count %u rt0 %llx %ux%u f%d rts %u depth %llx t%d w%d | blend %d mask %x | vp %.0f,%.0f %.0f,%.0f | sc %d %u-%u,%u-%u |%s\n",
+                (unsigned long long)g_s.present_count, (unsigned long long)draws_, (unsigned long long)prog_key, topo, count,
+                fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)fb.color_format[0], fb.num_colors,
+                fb.depth ? (unsigned long long)fb.depth->addr : 0ull, (int)key.depth_test, (int)key.depth_write, (int)key.blend_enable[0],
+                key.color_mask[0], vt[0], vt[1], vt[3], vt[4], (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16,
+                drawlog_tex_.c_str());
+    }
+    drawlog_tex_.clear();
     if (dumping()) {
         const float* vt = (const float*)(regs + ViewportTransform);
         const u32* sc = regs + ScissorTest;
@@ -3180,7 +3502,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             pc.viewport_scale[0] = 1.0f;
             if (draw_samples_rt_)  // full-screen passes keep the whole width: the side bands get drawn
                 for (u32 i = 0; i < fb.num_colors; i++)
-                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count;
+                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count, fb.color[i]->full_width_since_present = true;
         }
     }
     pc.base_vertex = p.base_vertex;
@@ -3440,8 +3762,10 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         r.rect = {{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}};
     }
     if (!r.rect.extent.width || !r.rect.extent.height) return;
-    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width)
+    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width) {
         fb.color[rt]->full_width_frame = g_s.present_count;
+        fb.color[rt]->full_width_since_present = true;
+    }
     if (recording_) {
         rec_cur_.emplace_back();
         OpRec& o = rec_cur_.back();
@@ -3585,6 +3909,15 @@ void VkRenderer::replay_draw(const DrawRec& d, const DrawRec* prev, float t) {
                                  prev->stages[s].cbufs[ci].data.size() == cr.data.size())
                                     ? &prev->stages[s].cbufs[ci]
                                     : nullptr;
+            if (cam_replay_) {  // camera mode: the frame's bytes with only the camera matrices replaced
+                if (cr.cam_hits.empty()) continue;
+                Slice sl = g_rec.stage(std::max<u64>(cr.data.size(), 16), props.minUniformBufferOffsetAlignment);
+                memcpy(sl.ptr, cr.data.data(), cr.data.size());
+                for (const CamHit& h : cr.cam_hits)
+                    memcpy(sl.ptr + h.word * 4, cam_words_[h.mat][h.layout], (h.layout < 2 ? 16 : 12) * 4);
+                bufs[cr.buffer_index] = {sl.buf, sl.offset, (VkDeviceSize)cr.data.size()};
+                continue;
+            }
             if (!pr) continue;  // unchanged binding: the original slice is pinned in the ring
             Slice sl = g_rec.stage(std::max<u64>(cr.data.size(), 16), props.minUniformBufferOffsetAlignment);
             lerp_cbuf(pr->data.data(), cr.data.data(), sl.ptr, cr.data.size(), t);
@@ -3668,8 +4001,9 @@ void VkRenderer::replay_draw(const DrawRec& d, const DrawRec* prev, float t) {
 void VkRenderer::replay_frame(float t) {
     // match draws of the previous frame by signature, in order of occurrence
     std::unordered_map<u64, std::vector<const DrawRec*>> prev_by_key;
-    for (const OpRec& o : rec_prev_)
-        if (!o.is_clear) prev_by_key[o.draw.match_key].push_back(&o.draw);
+    if (!cam_replay_)  // camera mode blends nothing from the previous frame
+        for (const OpRec& o : rec_prev_)
+            if (!o.is_clear) prev_by_key[o.draw.match_key].push_back(&o.draw);
     std::unordered_map<u64, u32> used;
     sync_shadows(rec_frame_);
     for (const OpRec& o : rec_frame_) {
@@ -3685,6 +4019,332 @@ void VkRenderer::replay_frame(float t) {
         }
         replay_draw(o.draw, prev, t);
     }
+}
+
+// The camera matrix in layout l: 0 as stored (row-major 4x4), 1 transposed, 2 the first three rows
+// as stored, 3 the first three rows of the transpose (a column-major 3x4).
+static void cam_layout(const float m[16], int l, u32 out[16]) {
+    float t[16];
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) t[r * 4 + c] = (l & 1) ? m[c * 4 + r] : m[r * 4 + c];
+    memcpy(out, t, (l < 2 ? 16 : 12) * 4);
+}
+
+// HWDER_CAM_INV=1: also replace the inverse view (matV2W) in replays. Off by default: it is
+// searched and logged either way.
+static bool cam_inv_enabled() {
+    static const bool on = getenv("HWDER_CAM_INV") && atoi(getenv("HWDER_CAM_INV")) != 0;
+    return on;
+}
+
+// Which tick's camera this frame was drawn with: exact search of every constant buffer for each
+// recorded snapshot's view, viewProj and inverse view (all layouts). The snapshot with the most
+// view/viewProj hits wins; its hits are stored on the CbufRecs for replay_draw to overwrite.
+void VkRenderer::cam_identify() {
+    cam_frame_ = CamFrame{};
+    interp::CamSnap snaps[8];
+    int ns = interp::snapshots(snaps, 8);
+    struct Pat {
+        u32 w[16];
+        u8 len, snap, mat, layout;
+    };
+    std::vector<Pat> pats;
+    for (int i = 0; i < ns; i++) {
+        float inv[16];
+        interp::view_inverse(snaps[i].view, inv);
+        const float* mats[kCamMats] = {snaps[i].view, snaps[i].viewproj, inv};
+        for (int m = 0; m < kCamMats; m++)
+            for (int l = 0; l < kCamLayouts; l++) {
+                Pat p{};
+                p.len = l < 2 ? 16 : 12;
+                p.snap = (u8)i, p.mat = (u8)m, p.layout = (u8)l;
+                cam_layout(mats[m], l, p.w);
+                // Skip near-trivial matrices (an identity-like view would match every identity model matrix).
+                int distinct = 0;
+                for (int k = 0; k < p.len; k++) {
+                    float fl;
+                    memcpy(&fl, &p.w[k], 4);
+                    if (fl != 0.0f && fl != 1.0f && fl != -1.0f) distinct++;
+                }
+                if (distinct >= 4) pats.push_back(p);
+            }
+    }
+    // 16-word layouts before their 12-word prefixes
+    std::sort(pats.begin(), pats.end(), [](const Pat& a, const Pat& b) { return a.w[0] != b.w[0] ? a.w[0] < b.w[0] : a.len > b.len; });
+    u64 bloom[64] = {};
+    auto bslot = [](u32 w) { return (u32)((w * 0x9E3779B1u) >> 20); };  // 4096 bits
+    for (const Pat& p : pats) bloom[bslot(p.w[0]) >> 6] |= 1ull << (bslot(p.w[0]) & 63);
+    struct Found {
+        CbufRec* cr;
+        u32 op;
+        CamHit h;
+        u8 snap;
+    };
+    std::vector<Found> found;
+    u32 per_snap[8] = {};
+    u64 bytes = 0, nbufs = 0;
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        OpRec& o = rec_frame_[oi];
+        if (o.is_clear) continue;
+        for (u32 s = 0; s < 5; s++) {
+            if (!o.draw.has_stage[s]) continue;
+            for (CbufRec& cr : o.draw.stages[s].cbufs) {
+                cr.cam_hits.clear();
+                if (pats.empty()) continue;
+                nbufs++;
+                bytes += cr.data.size();
+                const u32* w = (const u32*)cr.data.data();
+                size_t n = cr.data.size() / 4;
+                for (size_t i = 0; i + 12 <= n; i++) {
+                    u32 b = bslot(w[i]);
+                    if (!(bloom[b >> 6] & (1ull << (b & 63)))) continue;
+                    auto it = std::lower_bound(pats.begin(), pats.end(), w[i], [](const Pat& p, u32 v) { return p.w[0] < v; });
+                    for (; it != pats.end() && it->w[0] == w[i]; ++it) {
+                        if (i + it->len > n || memcmp(w + i, it->w, it->len * 4) != 0) continue;
+                        found.push_back({&cr, oi, {(u32)i, it->mat, it->layout}, it->snap});
+                        if (it->mat != kCamInv) per_snap[it->snap]++;
+                        i += it->len - 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    QueryPerformanceCounter(&t1);
+    int best = -1;
+    for (int i = 0; i < ns; i++)
+        if (per_snap[i] && (best < 0 || per_snap[i] > per_snap[best])) best = i;
+    u32 hits[kCamMats][kCamLayouts] = {};
+    u32 other_hits[kCamMats] = {}, other_older = 0, other_newer = 0;
+    std::vector<u8> op_hit(rec_frame_.size(), 0);  // bit m: the draw holds matrix m of the frame's tick
+    if (best >= 0) {
+        cam_frame_.matched = true;
+        cam_frame_.cur = snaps[best];
+        for (int i = 0; i < ns; i++)
+            if (snaps[i].tick + 1 == snaps[best].tick) {
+                cam_frame_.have_prev = true;
+                cam_frame_.prev = snaps[i];
+            }
+        for (const Found& fd : found) {
+            if (fd.snap == best) {
+                if (fd.h.mat != kCamInv || cam_inv_enabled()) fd.cr->cam_hits.push_back(fd.h);
+                hits[fd.h.mat][fd.h.layout]++;
+                op_hit[fd.op] |= 1 << fd.h.mat;
+            } else {
+                other_hits[fd.h.mat]++;
+                (snaps[fd.snap].tick < snaps[best].tick ? other_older : other_newer)++;
+            }
+        }
+        // Presented frames should use consecutive ticks. A tick that goes backwards or repeats means a
+        // frame was drawn with another tick's camera (the one-frame camera jumps at native 60 fps).
+        static u64 last_tick = 0;
+        static bool have_last = false;
+        u64 tk = snaps[best].tick;
+        if (have_last && interp::cam_log_every() > 0 && tk != last_tick + 1)
+            hw_log("cam: order: frame drawn with tick %llu after tick %llu (%s; newest tick %llu, %u other-tick hits)",
+                   (unsigned long long)tk, (unsigned long long)last_tick,
+                   tk <= last_tick ? (tk == last_tick ? "repeat" : "BACKWARDS") : "skip", (unsigned long long)snaps[0].tick,
+                   other_hits[0] + other_hits[1] + other_hits[2]);
+        last_tick = tk;
+        have_last = true;
+    }
+    // Per-frame anomaly check: a frame whose view or viewProj hit count drops well below the running
+    // average was drawn (at least partly) with matrices that are not any recorded tick's.
+    if (interp::cam_log_every() > 0) {
+        u32 hv = 0, hvp = 0;
+        for (int l = 0; l < kCamLayouts; l++) hv += hits[kCamView][l], hvp += hits[kCamViewProj][l];
+        static double avg_v = 0, avg_vp = 0;
+        if (avg_v > 50 && (hv < avg_v * 0.6 || hvp < avg_vp * 0.6))
+            hw_log("cam: anomaly: present %llu: view hits %u (avg %.0f), viewProj hits %u (avg %.0f), %u draws, tick %llu, other-tick hits %u/%u/%u",
+                   (unsigned long long)g_s.present_count, hv, avg_v, hvp, avg_vp, (u32)rec_frame_.size(),
+                   best >= 0 ? (unsigned long long)snaps[best].tick : 0ull, other_hits[0], other_hits[1], other_hits[2]);
+        avg_v = avg_v * 0.9 + hv * 0.1;
+        avg_vp = avg_vp * 0.9 + hvp * 0.1;
+    }
+    if (interp::cam_log_every() <= 0) return;
+    // ---- HWDER_CAM_LOG diagnostics, once per second
+    // Draws: how many carry the tick's view/viewProj (moved by the replay) or only its inverse view
+    // (whose world reconstruction then disagrees with the moved geometry unless HWDER_CAM_INV=1).
+    u32 draws = 0, draws_cam = 0, draws_inv_only = 0;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        if (rec_frame_[oi].is_clear) continue;
+        draws++;
+        if (op_hit[oi] & 3) draws_cam++;
+        else if (op_hit[oi] & 4) draws_inv_only++;
+    }
+    // Near matches: 3D draws (depth bound) with no exact camera hit, whose constant buffers hold a run
+    // of 12+ floats within 0.1% of the tick's view / viewProj (any layout) - matrices the game builds
+    // slightly differently, which a replay leaves at the tick's camera. Logged per second with the
+    // most common draw signatures.
+    static u64 near_draws = 0, unmatched_3d = 0, near_runs[2][kCamLayouts] = {};
+    static std::unordered_map<u64, u32> near_keys, plain_keys;
+    if (best >= 0) {
+        u32 pat[2][kCamLayouts][16];
+        for (int l = 0; l < kCamLayouts; l++) {
+            cam_layout(snaps[best].view, l, pat[0][l]);
+            cam_layout(snaps[best].viewproj, l, pat[1][l]);
+        }
+        for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+            const OpRec& o = rec_frame_[oi];
+            if (o.is_clear || op_hit[oi] || !o.draw.fb.depth) continue;
+            unmatched_3d++;
+            bool any = false;
+            for (u32 st = 0; st < 5 && !any; st++) {
+                if (!o.draw.has_stage[st]) continue;
+                for (const CbufRec& cr : o.draw.stages[st].cbufs) {
+                    const float* w = (const float*)cr.data.data();
+                    size_t n = cr.data.size() / 4;
+                    for (size_t i = 0; i + 12 <= n && !any; i++)
+                        for (int m = 0; m < 2 && !any; m++)
+                            for (int l = 0; l < kCamLayouts && !any; l++) {
+                                int len = l < 2 ? 16 : 12;
+                                if (i + len > n) continue;
+                                const float* q = (const float*)pat[m][l];
+                                int k = 0;
+                                for (; k < len; k++) {
+                                    float tol = 1e-3f * std::max(1.0f, std::fabs(q[k]));
+                                    if (!(std::fabs(w[i + k] - q[k]) <= tol)) break;
+                                }
+                                if (k == len && memcmp(w + i, q, len * 4) != 0) {
+                                    any = true;
+                                    near_runs[m][l]++;
+                                }
+                            }
+                }
+            }
+            (any ? near_keys : plain_keys)[o.draw.match_key >> 32]++;
+            if (any) near_draws++;
+        }
+    }
+    // History reads: render targets sampled before this frame writes them. A replay reads their
+    // current contents (synced from the real target, which already holds this frame's or a later
+    // result), so whatever accumulates across frames (exposure, TAA, ...) is applied twice.
+    std::unordered_map<Image*, u32> first_write;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        const OpRec& o = rec_frame_[oi];
+        const Framebuffer& fb = o.is_clear ? o.clear.fb : o.draw.fb;
+        for (u32 c = 0; c < fb.num_colors; c++)
+            if (fb.color[c]) first_write.emplace(fb.color[c], oi);
+        if (fb.depth) first_write.emplace(fb.depth, oi);
+    }
+    std::unordered_set<Image*> hist_imgs;
+    u32 hist_draws = 0;
+    for (u32 oi = 0; oi < rec_frame_.size(); oi++) {
+        const OpRec& o = rec_frame_[oi];
+        if (o.is_clear) continue;
+        bool any = false;
+        for (u32 s = 0; s < 5; s++) {
+            if (!o.draw.has_stage[s]) continue;
+            for (const ImageRef& r : o.draw.stages[s].image_refs) {
+                auto it = r.img ? first_write.find(r.img) : first_write.end();
+                if (it != first_write.end() && it->second >= oi) {
+                    hist_imgs.insert(r.img);
+                    any = true;
+                }
+            }
+        }
+        if (any) hist_draws++;
+    }
+    static u64 frames, matched, other_frames, lag[3], sum_hits[kCamMats][kCamLayouts], sum_bytes, sum_bufs;
+    static u64 sum_other[kCamMats], sum_older, sum_newer, sum_draws, sum_draws_cam, sum_inv_only, sum_hist_imgs, sum_hist_draws;
+    static double scan_ms, scan_max, last_ms;
+    double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+    double now = t1.QuadPart * 1000.0 / f.QuadPart;
+    frames++;
+    if (best >= 0) {
+        matched++;
+        lag[std::min(best, 2)]++;
+        for (int i = 0; i < ns; i++)
+            if (i != best && per_snap[i]) {
+                other_frames++;
+                break;
+            }
+    }
+    for (int m = 0; m < kCamMats; m++) {
+        for (int l = 0; l < kCamLayouts; l++) sum_hits[m][l] += hits[m][l];
+        sum_other[m] += other_hits[m];
+    }
+    sum_older += other_older;
+    sum_newer += other_newer;
+    sum_draws += draws;
+    sum_draws_cam += draws_cam;
+    sum_inv_only += draws_inv_only;
+    sum_hist_imgs += hist_imgs.size();
+    sum_hist_draws += hist_draws;
+    sum_bytes += bytes;
+    sum_bufs += nbufs;
+    scan_ms += ms;
+    scan_max = std::max(scan_max, ms);
+    if (!last_ms) last_ms = now;
+    if (now - last_ms >= 1000.0) {
+        double n = (double)frames;
+        hw_log("cam: match: %llu/%llu frames matched (tick lag 0/1/2+: %llu/%llu/%llu, %llu also hold another tick) | "
+               "hits per frame: view 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, viewProj 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f, "
+               "invView 4x4 %.1f 4x4T %.1f 3x4 %.1f 3x4T %.1f%s | scan %.0f cbufs %.0f KiB per frame, %.2f ms avg %.2f max",
+               (unsigned long long)matched, (unsigned long long)frames, (unsigned long long)lag[0], (unsigned long long)lag[1],
+               (unsigned long long)lag[2], (unsigned long long)other_frames, sum_hits[0][0] / n, sum_hits[0][1] / n,
+               sum_hits[0][2] / n, sum_hits[0][3] / n, sum_hits[1][0] / n, sum_hits[1][1] / n, sum_hits[1][2] / n,
+               sum_hits[1][3] / n, sum_hits[2][0] / n, sum_hits[2][1] / n, sum_hits[2][2] / n, sum_hits[2][3] / n,
+               cam_inv_enabled() ? " (replaced)" : " (not replaced)", sum_bufs / n, sum_bytes / n / 1024.0, scan_ms / n, scan_max);
+        hw_log("cam: frame: %.0f draws per frame, %.0f with the tick's view/viewProj, %.0f with only its inverse view | "
+               "other ticks' matrices per frame: view %.1f viewProj %.1f invView %.1f (%.1f older, %.1f newer) | "
+               "history reads per frame: %.1f render targets sampled before written, by %.1f draws",
+               sum_draws / n, sum_draws_cam / n, sum_inv_only / n, sum_other[0] / n, sum_other[1] / n, sum_other[2] / n,
+               sum_older / n, sum_newer / n, sum_hist_imgs / n, sum_hist_draws / n);
+        {
+            auto top = [](std::unordered_map<u64, u32>& m) {
+                std::vector<std::pair<u32, u64>> v;
+                for (auto& [k, c] : m) v.push_back({c, k});
+                std::sort(v.rbegin(), v.rend());
+                std::string t;
+                for (size_t i = 0; i < v.size() && i < 6; i++) {
+                    char b[48];
+                    snprintf(b, sizeof(b), " %08llx x%u", (unsigned long long)v[i].second, v[i].first);
+                    t += b;
+                }
+                m.clear();
+                return t;
+            };
+            std::string nk = top(near_keys), pk = top(plain_keys);
+            hw_log("cam: near: %.1f unmatched 3D draws per frame, %.1f hold a near-copy of the camera (view 4x4 %llu 4x4T %llu 3x4 %llu 3x4T %llu, "
+                   "viewProj 4x4 %llu 4x4T %llu 3x4 %llu 3x4T %llu runs) | near-copy signatures:%s | other unmatched:%s",
+                   unmatched_3d / n, near_draws / n, (unsigned long long)near_runs[0][0], (unsigned long long)near_runs[0][1],
+                   (unsigned long long)near_runs[0][2], (unsigned long long)near_runs[0][3], (unsigned long long)near_runs[1][0],
+                   (unsigned long long)near_runs[1][1], (unsigned long long)near_runs[1][2], (unsigned long long)near_runs[1][3], nk.c_str(),
+                   pk.c_str());
+            near_draws = unmatched_3d = 0;
+            memset(near_runs, 0, sizeof(near_runs));
+        }
+        frames = matched = other_frames = sum_bytes = sum_bufs = 0;
+        sum_older = sum_newer = sum_draws = sum_draws_cam = sum_inv_only = sum_hist_imgs = sum_hist_draws = 0;
+        memset(lag, 0, sizeof(lag));
+        memset(sum_hits, 0, sizeof(sum_hits));
+        memset(sum_other, 0, sizeof(sum_other));
+        scan_ms = scan_max = 0;
+        last_ms = now;
+    }
+}
+
+// The interpolated camera for one replay, in every layout. False: show the tick unblended.
+// HWDER_CAM_REPLAY_ONLY=1 (test): replays use the tick's own camera, so each replay should look
+// exactly like the real frame; any flashing left comes from the replay itself, not the blend.
+bool VkRenderer::cam_prepare(float alpha) {
+    if (!cam_frame_.matched || !cam_frame_.have_prev) return false;
+    static const bool replay_only = getenv("HWDER_CAM_REPLAY_ONLY") && atoi(getenv("HWDER_CAM_REPLAY_ONLY")) != 0;
+    float mats[kCamMats][16];
+    if (replay_only) {
+        memcpy(mats[kCamView], cam_frame_.cur.view, 64);
+        memcpy(mats[kCamViewProj], cam_frame_.cur.viewproj, 64);
+    } else if (!interp::lerp_camera(cam_frame_.prev, cam_frame_.cur, alpha, mats[kCamView], mats[kCamViewProj])) {
+        return false;
+    }
+    interp::view_inverse(mats[kCamView], mats[kCamInv]);
+    for (int m = 0; m < kCamMats; m++)
+        for (int l = 0; l < kCamLayouts; l++) cam_layout(mats[m], l, cam_words_[m][l]);
+    return true;
 }
 
 bool VkRenderer::ensure_saved_image(u32 w, u32 h, VkFormat fmt) {
@@ -4001,17 +4661,19 @@ static void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const cha
     destroy_buffer(rb);
 }
 
+// Filmstrip index tag of the next capture: what the output is (real frame or replay, and its alpha).
+static char g_strip_tag[64] = "real";
+
 // HWDER_FILMSTRIP=<dir>: a 96x54 thumbnail of every presented frame (f_<present>.raw RGBA8 + index.txt),
 // read back two presents later so it never stalls. For frame-by-frame inspection of transitions/cadence.
 static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     // HWDER_FILMSTRIP_W=<width> (default 96): thumbnail width, 16:9.
     static const u32 SW = getenv("HWDER_FILMSTRIP_W") ? std::max(16, atoi(getenv("HWDER_FILMSTRIP_W"))) : 96, SH = SW * 9 / 16;
-    // HWDER_FILMSTRIP_BATTLE=<s>: start that long after the first battle-sized frame (> 450 draws);
-    // HWDER_FILMSTRIP_AFTER=<s>: or at that time since boot; HWDER_FILMSTRIP_FOR=<s>: stop after that long.
+    // HWDER_FILMSTRIP_BATTLE=<s>: start capturing that long after the first battle-sized frame (more
+    // than 450 draws); HWDER_FILMSTRIP_FOR=<s>: stop after that long.
     {
         static const char* battle = getenv("HWDER_FILMSTRIP_BATTLE");
         static const double dur = getenv("HWDER_FILMSTRIP_FOR") ? atof(getenv("HWDER_FILMSTRIP_FOR")) : 1e9;
-        static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
         static double start = -1;
         double now = (GetTickCount64() - g_start_ms) / 1000.0;
         if (battle && start < 0) {
@@ -4019,8 +4681,11 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
             start = now + atof(battle);
             hw_log("filmstrip: battle frame seen, capturing from t=%.1f for %.1f s", start, dur);
         }
+        // HWDER_FILMSTRIP_AFTER=<s>: start at that time since boot instead.
+        static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
         if (start < 0) start = std::max(now, after);
-        if (now < start || now > start + dur) return;
+        g_drawlog_window = now >= start && now <= start + dur;
+        if (!g_drawlog_window) return;
     }
     static VkImage simg = VK_NULL_HANDLE;
     static VkDeviceMemory smem = VK_NULL_HANDLE;
@@ -4095,7 +4760,7 @@ static void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     presents[sl] = cap_seq;
     pending[sl] = true;
     if (index) {
-        fprintf(index, "%llu %.3f real present=%llu\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0,
+        fprintf(index, "%llu %.3f %s present=%llu\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0, g_strip_tag,
                 (unsigned long long)g_s.present_count);
         fflush(index);
     }
@@ -4199,8 +4864,25 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         // Fill ultrawide: the orthographic HUD (and movies, which the game draws as a 2D quad) stays in
         // the centred 16:9; when nothing full-width (a 3D frame's post passes, a full clear) wrote this
         // frame, the side bands hold stale memory. Clear them to black before presenting.
+        // "Since it was last presented", not "during this present's frame number": with frames queued ahead
+        // (stage b's triple buffering) the GPU thread draws the next frame before this one is presented,
+        // and a frame-number check blacked out side bands that were in fact drawn (flashing bars).
+        const bool full_width = img->full_width_since_present;
+        img->full_width_since_present = false;
+        {
+            // Every 600 presents: how many had their side bands blacked out (should be ~0 in 3D scenes).
+            static u32 n = 0, cleared = 0;
+            if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y) {
+                n++;
+                if (!full_width) cleared++;
+                if (n == 600) {
+                    hw_log("vk: ultrawide side bands blacked out on %u of %u presents", cleared, n);
+                    n = cleared = 0;
+                }
+            }
+        }
         if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y &&
-            img->full_width_frame != g_s.present_count && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+            !full_width && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
             u32 iw = img->level_width(0), ih = img->level_height(0);
             u32 center = std::min(iw, (u32)(iw * (img->scale_y / img->scale) + 0.5f));
             u32 band = (iw - center) / 2;
@@ -4231,6 +4913,22 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             static u64 draws_at_last = 0;
             hw_last_frame_draws = (u32)(draws_ - draws_at_last);
             draws_at_last = draws_;
+        }
+        {   // HWDER_RENDERDOC_AT=<present>[:<count>]: when running under RenderDoc (renderdoccmd capture),
+            // capture <count> consecutive frames starting at that present.
+            static const char* rd = getenv("HWDER_RENDERDOC_AT");
+            if (rd && g_s.present_count == strtoull(rd, nullptr, 10)) {
+                u32 n = strchr(rd, ':') ? (u32)atoi(strchr(rd, ':') + 1) : 1;
+                RENDERDOC_API_1_1_2* api = nullptr;
+                HMODULE m = GetModuleHandleA("renderdoc.dll");
+                auto get = m ? (pRENDERDOC_GetAPI)GetProcAddress(m, "RENDERDOC_GetAPI") : nullptr;
+                if (get && get(eRENDERDOC_API_Version_1_1_2, (void**)&api) && api) {
+                    api->TriggerMultiFrameCapture(n);
+                    hw_log("renderdoc: capturing %u frames from present %llu", n, (unsigned long long)g_s.present_count);
+                } else {
+                    hw_log("renderdoc: HWDER_RENDERDOC_AT set but RenderDoc is not loaded");
+                }
+            }
         }
         {   // F1 menu changed the internal resolution: apply between frames
             static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
@@ -4319,9 +5017,10 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     SlowTimer timer("present", 60.0);
     ProfScope ps(kProfPresent);
     int out_hz = settings::kInterpEnabled ? settings::video().interp_hz : 0;
-    if (out_hz < 0) out_hz = (int)display::monitor_hz();
-    static const char* env_interp = getenv("HWDER_INTERP");
+    static const char* env_interp = getenv("HWDER_INTERP");  // Hz, or -1 for the monitor's rate
     if (env_interp) out_hz = atoi(env_interp);
+    if (out_hz < 0) out_hz = (int)display::monitor_hz();
+    const bool cam_mode = interp::camera_mode();
     std::unique_lock<std::recursive_mutex> interp_lock(m_);
     Image* final_img = nullptr;
     if (out_hz > 0 && image) {
@@ -4350,20 +5049,22 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         int k = (int)interp_acc_;
         interp_acc_ -= k;
         if (k < 1) k = 1;
-        bool can = recording_ && !rec_prev_.empty() && !rec_frame_.empty() && tc_.destroy_count == rec_destroy_count_ &&
-                   g_s.pin_serial != 0 && !g_s.replay_unsafe && !prev_unsafe_ && final_img && shadows_.count(final_img) == 0 + shadows_.count(final_img);
+        // Camera mode reads nothing from the previous frame: rec_prev_ and its safety don't matter.
+        bool can = recording_ && (cam_mode || (!rec_prev_.empty() && !prev_unsafe_)) && !rec_frame_.empty() &&
+                   tc_.destroy_count == rec_destroy_count_ && g_s.pin_serial != 0 && !g_s.replay_unsafe && final_img &&
+                   shadows_.count(final_img) == 0 + shadows_.count(final_img);
         {
             static u32 skipped_frames = 0, total_frames = 0, why[8] = {};
             total_frames++;
             if (!can) {
                 skipped_frames++;
                 if (!recording_) why[0]++;
-                else if (rec_prev_.empty()) why[1]++;
+                else if (!cam_mode && rec_prev_.empty()) why[1]++;
                 else if (rec_frame_.empty()) why[2]++;
                 else if (tc_.destroy_count != rec_destroy_count_) why[3]++;
                 else if (g_s.pin_serial == 0) why[4]++;
                 else if (g_s.replay_unsafe) why[5]++;
-                else if (prev_unsafe_) why[6]++;
+                else if (!cam_mode && prev_unsafe_) why[6]++;
                 else why[7]++;
             }
             if (total_frames % 600 == 0) {
@@ -4374,18 +5075,62 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             }
         }
         interp_lock.unlock();  // the replays render into shadow targets: the renderer thread may continue
+        // rec_frame_ belongs to this thread until the swap below: scan it unlocked.
+        if (cam_mode && !rec_frame_.empty()) cam_identify();
         for (int j = 1; j < k; j++) {
             VkImage out = image;
-            if (can) {
+            bool replay = can;
+            snprintf(g_strip_tag, sizeof(g_strip_tag), "replay %d/%d t=%.3f", j, k, (float)j / k);
+            if (can && cam_mode) {
+                // Render one tick behind: this frame's tick b is shown unblended at the last of its k
+                // output slots, so output j is (k - j) slots earlier on the game clock, measured
+                // against the host-time spacing of ticks a and b (not the fixed j/k).
+                const interp::CamSnap& a = cam_frame_.prev;
+                const interp::CamSnap& b = cam_frame_.cur;
+                double dt = b.t_ms - a.t_ms;
+                float alpha = dt > 0 ? (float)std::clamp(1.0 - (k - j) * (1000.0 / out_hz) / dt, 0.0, 1.0) : 1.0f;
+                replay = cam_prepare(alpha);
+                snprintf(g_strip_tag, sizeof(g_strip_tag), "replay %d/%d a=%.3f tick=%llu", j, k, alpha, (unsigned long long)b.tick);
+                // HWDER_CAM_LOG: replay outcomes once per second
+                if (interp::cam_log_every() > 0) {
+                    static u64 blended, nomatch, noprev, gap, cut, last;
+                    static double asum;
+                    if (replay) blended++, asum += alpha;
+                    else if (!cam_frame_.matched) nomatch++;
+                    else if (!cam_frame_.have_prev) noprev++;
+                    else if (dt > 250.0 || b.tick != a.tick + 1) gap++;
+                    else cut++;  // a cut, a projection change or alpha 1
+                    u64 now = GetTickCount64();
+                    if (!last) last = now;
+                    if (now - last >= 1000) {
+                        hw_log("cam: replays: %llu blended (mean alpha %.2f), unblended: %llu no match, %llu no previous tick, "
+                               "%llu tick gap, %llu cut/projection change/alpha 1",
+                               (unsigned long long)blended, blended ? asum / blended : 0.0, (unsigned long long)nomatch,
+                               (unsigned long long)noprev, (unsigned long long)gap, (unsigned long long)cut);
+                        blended = nomatch = noprev = gap = cut = 0;
+                        asum = 0;
+                        last = now;
+                    }
+                }
+            }
+            if (replay) {
                 std::lock_guard<std::recursive_mutex> l(m_);  // the recorder itself is shared
+                cam_replay_ = cam_mode;
                 replay_frame((float)j / k);
+                cam_replay_ = false;
                 out = shadow_of(final_img)->image;
                 static const char* strip_dir2 = getenv("HWDER_FILMSTRIP");
                 if (strip_dir2) filmstrip_capture(out, w, h, strip_dir2);
                 g_rec.flush();
+            } else if (getenv("HWDER_FILMSTRIP")) {  // the real frame shown early: capture it too, tagged
+                std::lock_guard<std::recursive_mutex> l(m_);
+                snprintf(g_strip_tag, sizeof(g_strip_tag), "dup %d/%d", j, k);
+                filmstrip_capture(out, w, h, getenv("HWDER_FILMSTRIP"));
+                g_rec.flush();
             }
             display::present_image(out, w, h, 1, g_s.timeline, g_rec.serial() - 1);
         }
+        snprintf(g_strip_tag, sizeof(g_strip_tag), "real");
         display::present_image(image, w, h, 1, g_s.timeline, g_rec.serial() - 1);
         recording_ = true;
     } else {

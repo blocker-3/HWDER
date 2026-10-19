@@ -15,6 +15,9 @@
 #include <unordered_map>
 #include <vector>
 
+extern "C" bool hw_game_interp_hold_60();  // interp/interp_draw.cpp
+extern "C" bool hw_game_interp_on();
+
 
 namespace display {
 void validation_report();  // HWDER_VALIDATION message counts (below)
@@ -419,6 +422,10 @@ static void frame_limit(u32 interval) {
     // The game is frame-locked (its logic advances per released frame), so the release grid stays at
     // 60 Hz whatever the display runs at; HWDER_FPS exists only for experiments.
     double fps = env ? atof(env) : (g_output_hz > 0 ? g_output_hz : 60.0);
+    // Stage b (HWDER_GAME_INTERP): the game is frame-locked, so a faster release grid is only right while
+    // it draws an in-between frame per tick; menus and loading screens (one present per tick) stay at 60.
+    if (hw_game_interp_hold_60()) fps = 60.0;
+    else if (!env && hw_game_interp_on()) fps = 120.0;  // "120 fps": two presents per 60 Hz tick
     static u32 last_interval = 0;
     if (interval != last_interval) {
         last_interval = interval;

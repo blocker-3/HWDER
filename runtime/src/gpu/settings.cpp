@@ -79,6 +79,7 @@ void load() {
         else if (k == "res_scale") g_video.res_scale = (float)atof(v);
         else if (k == "unlocked_res") g_video.unlocked_res = atoi(v) != 0;
         else if (k == "ultrawide") g_video.ultrawide = atoi(v) != 0;
+        else if (k == "fps120") g_video.fps120 = atoi(v) != 0;
         else if (k == "show_fps") g_video.show_fps = atoi(v) != 0;
         else if (k == "display_60hz") g_video.display_60hz = atoi(v) != 0;
         else if (k == "volume") g_audio.volume = std::clamp(atoi(v), 0, 100);
@@ -151,8 +152,8 @@ void save() {
     fprintf(f, "volume=%d\nmute=%d\nmute_background=%d\nhold_view_menu=%d\nrumble=%d\nbackground_pad=%d\nmenu_scale=%d\nasync_shaders=%d\n",
             g_audio.volume, (int)g_audio.mute, (int)g_audio.mute_background, (int)g_input.hold_view_menu, (int)g_input.rumble,
             (int)g_input.background_pad, g_video.menu_scale, (int)g_debug.async_shaders);
-    fprintf(f, "contrast=%d\nbloom=%d\nfov=%d\nfxaa=%d\nsharpen=%d\n", g_video.contrast, g_video.bloom,
-            g_video.fov, (int)g_video.fxaa, g_video.sharpen);
+    fprintf(f, "contrast=%d\nbloom=%d\nfov=%d\nfxaa=%d\nsharpen=%d\nfps120=%d\n", g_video.contrast, g_video.bloom,
+            g_video.fov, (int)g_video.fxaa, g_video.sharpen, (int)g_video.fps120);
     fprintf(f, "rumble_strength=%d\nface_labels=%d\ndeadzone_l=%d\ndeadzone_r=%d\ninvert_lx=%d\ninvert_ly=%d\ninvert_rx=%d\ninvert_ry=%d\n"
                "motion=%d\n",
             g_input.rumble_strength, (int)g_input.face_labels, g_input.deadzone_l, g_input.deadzone_r, (int)g_input.invert_lx,

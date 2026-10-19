@@ -52,7 +52,7 @@ set(RUNTIME_SOURCES
     runtime/src/service/applet.cpp
     runtime/src/service/misc.cpp
 )
-foreach(sub hid fs audio gpu gpu/vk shader video game)
+foreach(sub hid fs audio gpu gpu/vk shader video game interp)
     include(${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/${sub}/sources.cmake)
 endforeach()
 add_executable(hwder ${RUNTIME_SOURCES})

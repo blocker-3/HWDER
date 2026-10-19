@@ -373,27 +373,10 @@ static void restart_marker(bool pending) {
 
 void opt_interpolation(bool& changed) {
     settings::Video& v = settings::video();
-    {
-        // interp_hz: 0 off, -1 match the display, else a fixed output rate. Greyed out while the feature is stubbed.
-        const int values[] = {0, -1, 120, 144};
-        const char* items[] = {"Off (60 fps)", "Match display refresh", "120 Hz", "144 Hz"};
-        int cur = 0;
-        if (settings::kInterpEnabled)
-            for (int i = 0; i < 4; i++)
-                if (values[i] == v.interp_hz) cur = i;
-        ImGui::BeginDisabled(!settings::kInterpEnabled);
-        if (ImGui::Combo("Frame interpolation (Experimental)", &cur, items, 4)) {
-            v.interp_hz = values[cur];
-            changed = true;
-        }
-        ImGui::EndDisabled();
-        help(settings::kInterpEnabled
-                 ? "Experimental: re-renders each game frame with blended 3D positions for 120/144 Hz panels.\n"
-                   "Expect flashing, ghosting and broken effects in menus and gameplay."
-                 : "Experimental: re-renders each game frame with blended 3D positions for 120/144 Hz panels.\n"
-                   "Expect flashing, ghosting and broken effects in menus and gameplay.\n"
-                   "Disabled in this build; the game stays at its native 60 fps.");
-    }
+    if (ImGui::Checkbox("120 fps (experimental)", &v.fps120)) changed = true;
+    help("The game keeps its 60 steps per second; between two steps it draws an extra frame with the camera,\n"
+         "characters and objects halfway between them, shown at 120 Hz. Menus and loading screens stay at 60.\n"
+         "Best on a 120 Hz screen or with G-Sync/FreeSync. Very busy views can drop some extra frames.");
 }
 
 void opt_borderless(bool& changed) {
