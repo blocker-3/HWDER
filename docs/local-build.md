@@ -37,8 +37,10 @@ Setup reads/decrypts the user's NSP with the project's existing `nx_extract` pri
 checks title/module hashes, hashes the complete NSP, then writes only those five modules to
 the private cache. It never extracts RomFS, logos or movies. It runs the existing
 `python -m recomp.gen_main`, then the full `tools/build.py` with isolated generated/build
-paths. The shared `%LOCALAPPDATA%\hwder\build.lock` still serializes native builds across
-worktrees. Runtime/graphics code and the original manual developer output paths are unchanged.
+paths. The shared host Local AppData `hwder\build.lock` serializes native builds and single-file
+compiler probes across worktrees. Windows resolves this directory through Shell32 with package
+redirection disabled, including inside an AppContainer. Runtime/graphics code and the original
+manual developer output paths are unchanged.
 
 Progress and subprocess errors appear in the terminal. A failed/interrupted setup exits
 nonzero and never launches. Rerun the same command to reuse verified extraction/generation
@@ -56,7 +58,8 @@ coordinators sharing one cache and release automatically when a process dies.
 - Extraction identity includes the complete NSP hash and module hashes.
 - Generation identity includes the extraction identity, generator/NSO/extractor code,
   hooks, tracked entries, optional private `data/extra_entries.txt`, Python version and lz4.
-- Native build identity includes generation identity, actual runtime/tools/CMake/third-party
+- Native build identity includes generation identity and the exact generated file hashes,
+  actual runtime/tools/CMake/third-party
   file contents (including uncommitted changes), source location and discovered toolchain
   versions/paths, including SDK/MSVC versions and a digest of compiler/linker overrides and
   include/library search paths. Normal source updates get separate build output.
@@ -64,13 +67,22 @@ coordinators sharing one cache and release automatically when a process dies.
   Native output requires a successful full build and matching executable SHA-256. A stale
   executable left by a failed compile is never accepted without rerunning the build. Uncertified
   executables are removed to force Ninja to relink, while partial compiler objects remain reusable.
-- Changes to build inputs during setup cause a failure instead of publishing a mixed version.
+- Changes to source or cached build inputs during setup cause a failure instead of publishing a
+  mixed version. If cached inputs change during compilation, that build directory is retained
+  with an `.invalid-*` suffix so suspect compiler objects cannot be reused on retry.
 
 After success, setup atomically replaces `play/hwder.exe`; that stable folder retains settings,
 saves, logs, private texture/shader/pipeline caches and any configured custom save path across
 source updates. `last-success.json` is updated only after publication. Failed extraction,
 generation, compilation or publication leaves the previous playable executable and existing
-save/cache data in place. No old cache entries are deleted automatically. Keep backups of saves;
+save/cache data in place. No old cache entries are deleted automatically. If updating
+`last-success.json` fails after executable replacement, setup restores the previous
+executable. An abrupt process/OS termination can leave a `play/hwder-previous-*.tmp` recovery
+copy; rerun setup to reconcile the verified executable and success marker. If restoration itself
+fails (for example because an external launcher opened the new executable), retain that recovery
+copy and close the game before retrying.
+
+Keep backups of saves;
 to reclaim space, close the game/setup and remove unneeded `exefs`, `generated` or `builds`
 entries, or failed `.partial-*`/`.invalid-*` directories. **Do not delete `play` to clear build
 artifacts: it contains your user state.**

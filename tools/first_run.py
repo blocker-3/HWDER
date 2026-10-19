@@ -216,6 +216,7 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         for name, data in modules.items():
             (out / name).write_bytes(data)
     exefs = completed_stage(cache, "exefs", exefs_key, extract)
+    exefs_files = tree_hashes(exefs)
     gen_key = digest({"exefs": exefs_key, "generator": generation_inputs, "python": sys.version,
                       "lz4": toolchain.get("lz4")})
     def generate(out):
@@ -225,6 +226,8 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         if (root / "data" / "extra_entries.txt").is_file():
             args += ["--extra", root / "data" / "extra_entries.txt"]
         run(args, root / "tools")
+        if tree_hashes(exefs) != exefs_files:
+            raise ValueError("Extracted inputs changed during generation; rerun")
         for name in ("sources.cmake", "funcs.h", "functable.c", "module_info.c"):
             if not (out / name).is_file():
                 raise ValueError(f"Generator did not produce {name}")
@@ -233,7 +236,9 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         if source_fingerprints(root)[0] != generation_inputs:
             raise ValueError("Generator inputs changed during generation; rerun")
     generated = completed_stage(cache, "generated", gen_key, generate)
-    build_key = digest({"generated": gen_key, "runtime": build_inputs, "toolchain": toolchain})
+    generated_files = tree_hashes(generated)
+    build_key = digest({"generated": gen_key, "generated_files": digest(generated_files),
+                        "runtime": build_inputs, "toolchain": toolchain})
     bdir = cache / "builds" / build_key[:24]
     exe = bdir / "hwder.exe"
     marker = read_json(bdir / "complete.json")
@@ -252,6 +257,11 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
             magic = f.read(2)
         if magic != b"MZ":
             raise ValueError("Build succeeded without a Windows executable")
+        if tree_hashes(generated) != generated_files or tree_hashes(exefs) != exefs_files:
+            # Objects may have consumed the changed bytes. Keep them for inspection, but
+            # never reuse those objects after restoring the verified generated sources.
+            bdir.rename(bdir.with_name(bdir.name + ".invalid-" + uuid.uuid4().hex[:8]))
+            raise ValueError("Cached build inputs changed during compilation; rerun")
         if source_fingerprints(root) != (generation_inputs, build_inputs):
             raise ValueError("Build inputs changed during setup; rerun to build the new source version")
         if before != (nsp.stat().st_size, nsp.stat().st_mtime_ns):
@@ -263,6 +273,8 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         log("build: verified complete cached executable")
     if source_fingerprints(root) != (generation_inputs, build_inputs):
         raise ValueError("Source inputs changed during setup; rerun")
+    if tree_hashes(exefs) != exefs_files or tree_hashes(generated) != generated_files:
+        raise ValueError("Cached build inputs changed during setup; rerun")
     if (before != (nsp.stat().st_size, nsp.stat().st_mtime_ns)
             or keys_before != (keys.stat().st_size, keys.stat().st_mtime_ns)):
         raise ValueError("Game or keys input changed during setup; rerun")
@@ -272,14 +284,38 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
     target = play / "hwder.exe"
     if not target.is_file() or file_hash(target) != marker["exe_sha256"]:
         tmp = play / ("hwder-" + uuid.uuid4().hex + ".tmp")
+        previous = play / ("hwder-previous-" + uuid.uuid4().hex + ".tmp")
+        published = False
         try:
             shutil.copyfile(exe, tmp)
             if file_hash(tmp) != marker["exe_sha256"]:
                 raise ValueError("Executable publication checksum mismatch")
+            if target.is_file():
+                try:
+                    os.link(target, previous)
+                except OSError:
+                    # A cache may live on a filesystem without hard-link support.
+                    shutil.copyfile(target, previous)
             os.replace(tmp, target)
+            published = True
+            atomic_json(cache / "last-success.json", marker)
+        except BaseException:
+            if published:
+                if previous.exists():
+                    # Keep the recovery copy if rollback itself fails (e.g. an external
+                    # launcher has opened the newly published executable).
+                    os.replace(previous, target)
+                else:
+                    target.unlink(missing_ok=True)
+            raise
+        else:
+            previous.unlink(missing_ok=True)
         finally:
             tmp.unlink(missing_ok=True)
-    atomic_json(cache / "last-success.json", marker)
+            if not published:
+                previous.unlink(missing_ok=True)
+    else:
+        atomic_json(cache / "last-success.json", marker)
     log(f"ready: {target}")
     return target
 

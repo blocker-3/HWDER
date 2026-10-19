@@ -1,6 +1,7 @@
 """Offline synthetic tests: never need/decrypt/distribute a real game or keys."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -15,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import first_run as setup
 import local_game
 import make_dist
+import build
+import build_lock
 
 TEST_ROOT = Path(__file__).resolve().parents[2] / "build" / "setup-tests"
 TEST_ROOT.mkdir(parents=True, exist_ok=True)
@@ -45,7 +48,7 @@ class Fixture(unittest.TestCase):
         self.nsp.write_bytes(b"synthetic NSP; no game content")
         self.keys.write_text("SYNTHETIC SECRET MUST NEVER BE COPIED")
         self.calls = []
-        self.fail = None
+        self.failure = None
         self.toolchain = {"lz4": "fixture", "clang": "fixture"}
 
     def run_stage(self, args, cwd):
@@ -53,21 +56,21 @@ class Fixture(unittest.TestCase):
             self.calls.append("generate")
             out = Path(args[args.index("--out") + 1])
             (out / "rc_main_000.c").write_text("synthetic translated fixture")
-            if self.fail == "generate":
+            if self.failure == "generate":
                 raise subprocess.CalledProcessError(7, ["synthetic-generator"])
-            if self.fail == "interrupt":
+            if self.failure == "interrupt":
                 raise KeyboardInterrupt()
             for n in ("sources.cmake", "funcs.h", "functable.c", "module_info.c"):
-                if self.fail != "missing-generated":
+                if self.failure != "missing-generated":
                     (out / n).write_text("synthetic output")
         else:
             self.calls.append("build")
             out = Path(args[args.index("--build-dir") + 1])
             out.mkdir(parents=True, exist_ok=True)
             (out / "partial.obj").write_text("compiler progress")
-            if self.fail == "build":
+            if self.failure == "build":
                 raise subprocess.CalledProcessError(8, ["synthetic-build"])
-            if self.fail == "noop-build":
+            if self.failure == "noop-build":
                 self.assertFalse((out / "hwder.exe").exists(), "uncertified exe must force Ninja relink")
                 return
             (out / "hwder.exe").write_bytes(b"MZsynthetic-program-" + str(len(self.calls)).encode())
@@ -124,26 +127,26 @@ class Fixture(unittest.TestCase):
         exe = self.prepare()
         previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
         (self.root / "runtime/source.cpp").write_text("updated runtime")
-        self.fail = "build"
+        self.failure = "build"
         with self.assertRaises(subprocess.CalledProcessError):
             self.prepare()
         self.assertEqual(exe.read_bytes(), previous)
         self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
         partial_build = next(p.parent for p in (self.cache / "builds").rglob("partial.obj")
                              if not (p.parent / "complete.json").exists())
-        self.fail = None
+        self.failure = None
         self.prepare()
         self.assertTrue((partial_build / "complete.json").exists())
         self.assertEqual(self.calls, ["generate", "build", "build", "build"])
 
     def test_partial_and_interrupted_generation_never_ready(self):
         for failure in ("generate", "interrupt", "missing-generated"):
-            self.fail = failure
+            self.failure = failure
             with self.assertRaises((subprocess.CalledProcessError, KeyboardInterrupt, ValueError)):
                 self.prepare()
             self.assertFalse((self.cache / "last-success.json").exists())
             self.assertFalse(list((self.cache / "generated").glob("*/complete.json")))
-        self.fail = None
+        self.failure = None
         self.prepare()
         self.assertEqual(self.calls, ["generate"] * 4 + ["build"])
 
@@ -158,12 +161,12 @@ class Fixture(unittest.TestCase):
         original = exe.read_bytes()
         cached = next((self.cache / "builds").glob("*/hwder.exe"))
         cached.write_bytes(b"MZcorrupted")
-        self.fail = "build"
+        self.failure = "build"
         with self.assertRaises(subprocess.CalledProcessError):
             self.prepare()
         self.assertEqual(exe.read_bytes(), original)
         self.assertFalse((cached.parent / "complete.json").exists())
-        self.fail = None
+        self.failure = None
         self.prepare()
         self.assertEqual(self.calls, ["generate", "build", "build", "build"])
 
@@ -172,7 +175,7 @@ class Fixture(unittest.TestCase):
         previous = exe.read_bytes()
         cached = next((self.cache / "builds").glob("*/hwder.exe"))
         cached.write_bytes(b"MZdamaged-newer-file")
-        self.fail = "noop-build"
+        self.failure = "noop-build"
         with self.assertRaisesRegex(ValueError, "without a Windows executable"):
             self.prepare()
         self.assertEqual(exe.read_bytes(), previous)
@@ -209,6 +212,56 @@ class Fixture(unittest.TestCase):
         self.assertFalse((self.cache / "last-success.json").exists())
         self.assertFalse(list((self.cache / "builds").glob("*/complete.json")))
 
+    def test_extracted_input_change_during_generation_is_not_certified(self):
+        runner = self.run_stage
+        def mutate(args, cwd):
+            runner(args, cwd)
+            if "-m" in args:
+                exefs = Path(args[args.index("--exefs") + 1])
+                (exefs / "main").write_bytes(b"NSO0changed during generation")
+        with self.assertRaisesRegex(ValueError, "Extracted inputs changed"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          mutate, lambda n, k: self.modules)
+        self.assertFalse(list((self.cache / "generated").glob("*/complete.json")))
+        self.assertNotIn("build", self.calls)
+        self.prepare()
+        self.assertTrue((self.cache / "last-success.json").exists())
+
+    def test_generated_input_change_during_build_quarantines_partial_objects(self):
+        exe = self.prepare()
+        previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
+        (self.root / "runtime/source.cpp").write_text("updated runtime")
+        runner = self.run_stage
+        damaged_build = []
+        def mutate(args, cwd):
+            runner(args, cwd)
+            if "--build-dir" in args:
+                damaged_build.append(Path(args[args.index("--build-dir") + 1]))
+                generated = Path(args[args.index("--generated-dir") + 1])
+                (generated / "rc_main_000.c").write_text("changed during compilation")
+        with self.assertRaisesRegex(ValueError, "Cached build inputs changed during compilation"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          mutate, lambda n, k: self.modules)
+        self.assertEqual(exe.read_bytes(), previous)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
+        self.assertFalse(damaged_build[0].exists())
+        invalid = list((self.cache / "builds").glob("*.invalid-*"))
+        self.assertEqual(len(invalid), 1)
+        self.assertTrue((invalid[0] / "partial.obj").exists())
+        self.assertFalse((invalid[0] / "complete.json").exists())
+        self.prepare()
+        self.assertEqual(self.calls, ["generate", "build", "build", "generate", "build"])
+
+    def test_generated_content_identity_controls_native_cache(self):
+        self.prepare()
+        generated = next((self.cache / "generated").glob("*/output"))
+        (generated / "rc_main_000.c").write_text("a different completed generator result")
+        marker = setup.read_json(generated.parent / "complete.json")
+        marker["files"] = setup.tree_hashes(generated)
+        setup.atomic_json(generated.parent / "complete.json", marker)
+        self.prepare()
+        self.assertEqual(self.calls, ["generate", "build", "build"])
+
     def test_publish_failure_preserves_last_success(self):
         exe = self.prepare()
         previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
@@ -220,6 +273,43 @@ class Fixture(unittest.TestCase):
         self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
         self.prepare()
         self.assertEqual(self.calls, ["generate", "build", "build"])
+
+    def test_success_pointer_failure_rolls_back_executable_and_preserves_user_state(self):
+        exe = self.prepare()
+        previous, pointer = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
+        save = exe.parent / "save.bin"
+        save.write_bytes(b"precious save and private state")
+        (self.root / "runtime/source.cpp").write_text("updated runtime")
+        write_json = setup.atomic_json
+        def fail_pointer(path, value):
+            if Path(path) == self.cache / "last-success.json":
+                raise OSError("synthetic last-success replacement failure")
+            return write_json(path, value)
+        with patch.object(setup, "atomic_json", side_effect=fail_pointer):
+            with self.assertRaisesRegex(OSError, "synthetic last-success"):
+                self.prepare()
+        self.assertEqual(exe.read_bytes(), previous)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
+        self.assertEqual(save.read_bytes(), b"precious save and private state")
+        self.assertEqual(list(exe.parent.glob("*.tmp")), [])
+        self.prepare()
+        self.assertEqual(self.calls, ["generate", "build", "build"])
+
+    def test_first_publication_pointer_failure_leaves_no_uncertified_playable(self):
+        write_json = setup.atomic_json
+        def fail_pointer(path, value):
+            if Path(path) == self.cache / "last-success.json":
+                raise OSError("synthetic pointer failure")
+            return write_json(path, value)
+        with patch.object(setup, "atomic_json", side_effect=fail_pointer):
+            with self.assertRaisesRegex(OSError, "synthetic pointer failure"):
+                self.prepare()
+        self.assertFalse((self.cache / "play/hwder.exe").exists())
+        self.assertFalse((self.cache / "last-success.json").exists())
+
+    def test_success_pointer_failure_rolls_back_without_hardlink_support(self):
+        with patch.object(setup.os, "link", side_effect=OSError("hardlinks unavailable")):
+            self.test_success_pointer_failure_rolls_back_executable_and_preserves_user_state()
 
     def test_keys_changed_during_build_prevents_publication(self):
         runner = self.run_stage
@@ -261,6 +351,72 @@ class Fixture(unittest.TestCase):
                 raise RuntimeError("synthetic failure")
         with setup.setup_lock(self.cache):
             pass
+
+
+class BuildLock(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "host known-folder contract is Windows-specific")
+    def test_redirected_localappdata_cannot_split_machine_lock(self):
+        expected = build_lock.lock_path()
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(TEST_ROOT / "redirected-profile")}):
+            self.assertEqual(build_lock.lock_path(), expected)
+        self.assertEqual(expected.name, "build.lock")
+        self.assertEqual(expected.parent.name, "hwder")
+
+    @unittest.skipUnless(os.name == "nt", "host profile contract is Windows-specific")
+    def test_known_folder_is_actual_host_profile_not_package_redirection(self):
+        import winreg
+        registry_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path) as key:
+            local_appdata = os.path.expandvars(winreg.QueryValueEx(key, "Local AppData")[0])
+        self.assertEqual(build_lock.lock_path(), Path(local_appdata) / "hwder/build.lock")
+
+    def test_single_file_build_is_inside_shared_lock(self):
+        events = []
+        from contextlib import contextmanager
+        @contextmanager
+        def synthetic_lock():
+            events.append("lock")
+            try:
+                yield
+            finally:
+                events.append("unlock")
+        with patch.object(build, "build_lock", synthetic_lock), \
+             patch.object(build, "build", side_effect=lambda a: events.append(a.only_file)), \
+             patch.object(sys, "argv", ["build.py", "--only-file", "synthetic.cpp"]):
+            build.main()
+        self.assertEqual(events, ["lock", "synthetic.cpp", "unlock"])
+
+    def test_empty_legacy_lock_serializes_and_recovers_after_process_exit(self):
+        with temporary_directory() as tmp:
+            path, marker = Path(tmp) / "build.lock", Path(tmp) / "entered.txt"
+            script = (f"import sys; sys.path.insert(0, {str(Path(build_lock.__file__).parent)!r}); "
+                      "import build_lock; from pathlib import Path\n"
+                      f"build_lock.lock_path = lambda: Path({str(path)!r})\n"
+                      "with build_lock.build_lock():\n"
+                      f"    Path({str(marker)!r}).write_text('entered')\n")
+            with path.open("a+b") as legacy:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(legacy.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                child = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL)
+                try:
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        child.wait(timeout=0.25)
+                    self.assertFalse(marker.exists())
+                except BaseException:
+                    child.terminate()
+                    child.wait(timeout=5)
+                    raise
+            try:
+                self.assertEqual(child.wait(timeout=10), 0)
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    child.wait(timeout=5)
+            self.assertTrue(marker.is_file())
 
 
 class Parsers(unittest.TestCase):

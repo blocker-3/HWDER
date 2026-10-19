@@ -10,6 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import msvc  # noqa: E402
+from build_lock import build_lock  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,6 +37,11 @@ def main():
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
+    with build_lock():
+        build(a)
+
+
+def build(a):
     env = msvc.vs_env()
     if a.only_file:
         inc = os.path.join(ROOT, "runtime", "include")
@@ -52,24 +58,6 @@ def main():
         sys.exit(r.returncode)
     bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", "release"))
     os.makedirs(bdir, exist_ok=True)
-    # Several agents may build at once, possibly from different worktrees: serialize on one
-    # machine-wide lock file so their compilers don't compete for the same cores and memory.
-    import msvcrt
-    import time
-    lockdir = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "hwder")
-    os.makedirs(lockdir, exist_ok=True)
-    lockf = open(os.path.join(lockdir, "build.lock"), "a+")
-    lockf.seek(0)
-    waited = False
-    while True:
-        try:
-            msvcrt.locking(lockf.fileno(), msvcrt.LK_NBLCK, 1)
-            break
-        except OSError:
-            if not waited:
-                print(f"build.py: waiting for another build to finish ({lockf.name})", flush=True)
-                waited = True
-            time.sleep(1)
     cmake = vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env)
     ninja = vs_tool("Ninja", "ninja.exe", env)
     # Reconfigure explicit first-run builds on every resume; CMake checks its existing cache.
