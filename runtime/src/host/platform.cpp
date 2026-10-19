@@ -1,6 +1,8 @@
 #include "host/platform.h"
 
 #include <cstdlib>
+#include <algorithm>
+#include <cstdio>
 #ifdef _WIN32
 #include <windows.h>
 #include <malloc.h>
@@ -104,4 +106,33 @@ bool memory_release(void* address, std::size_t size) {
 }
 unsigned long memory_error() { return static_cast<unsigned long>(errno); }
 #endif
+std::size_t memory_readable(void* address, std::size_t size) {
+    const auto start = reinterpret_cast<std::uintptr_t>(address);
+    if (!size || size > UINTPTR_MAX - start) return 0;
+    std::uintptr_t position = start;
+#ifdef _WIN32
+    while (position < start + size) {
+        MEMORY_BASIC_INFORMATION information;
+        if (!VirtualQuery(reinterpret_cast<void*>(position), &information, sizeof(information)) ||
+            information.State != MEM_COMMIT || (information.Protect & (PAGE_NOACCESS | PAGE_GUARD))) break;
+        position = reinterpret_cast<std::uintptr_t>(information.BaseAddress) + information.RegionSize;
+    }
+#else
+    // Used only when the guest's region map cannot answer (host allocations).
+    FILE* maps = std::fopen("/proc/self/maps", "r");
+    if (!maps) return 0;
+    char line[1024];
+    while (std::fgets(line, sizeof(line), maps)) {
+        unsigned long long low = 0, high = 0;
+        char permissions[5]{};
+        if (std::sscanf(line, "%llx-%llx %4s", &low, &high, permissions) != 3) continue;
+        if (high <= position) continue;
+        if (low > position || permissions[0] != 'r') break;
+        position = static_cast<std::uintptr_t>(high);
+        if (position >= start + size) break;
+    }
+    std::fclose(maps);
+#endif
+    return std::min(size, static_cast<std::size_t>(position - start));
+}
 }  // namespace host

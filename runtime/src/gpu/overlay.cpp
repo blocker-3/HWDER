@@ -8,7 +8,14 @@
 
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
+#ifdef _WIN32
 #include "imgui_impl_win32.h"
+#else
+#include <SDL3/SDL.h>
+#include "imgui_impl_sdl3.h"
+#endif
+#include "gpu/display.h"
+#include "host/timing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,11 +26,13 @@
 #include <mutex>
 #include <unordered_map>
 
+#ifdef _WIN32
 #include <shellapi.h>
 #include "debug_flags.h"
 #pragma comment(lib, "shell32.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
 extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 
 float hwder_render_scale_x();  // texture_cache.cpp: active internal resolution scale
@@ -36,14 +45,18 @@ static std::recursive_mutex g_m;
 static bool g_inited = false;
 static bool g_visible = false;
 static bool g_swapchain_dirty = false;
+#ifdef _WIN32
 static HWND g_hwnd;
+#else
+static SDL_Window* g_hwnd;
+#endif
 static VkDevice g_dev;
 static VkInstance g_instance;
 static VkFormat g_fmt;
 static std::unordered_map<VkImage, VkImageView> g_views;
 static double g_frame_ms[120];
 static int g_frame_i = 0;
-static LARGE_INTEGER g_last_t;
+static host::Counter g_last_t;
 static bool g_close_armed = false;  // Escape / B must be released after opening before they close the menu
 static bool g_focus_menu = false;   // give the menu keyboard/gamepad focus on its first frame
 static int g_tab = 0;
@@ -54,7 +67,7 @@ static float g_style_scale = 0.0f;     // scale the style was last built for
 // until every button is up, so the press that was bound does not also act in the menu.
 struct Capture {
     int slot = -1;
-    ULONGLONG started = 0;
+    unsigned long long started = 0;
     uint32_t ignore = 0;
 };
 static Capture g_capture;
@@ -159,8 +172,14 @@ void section(const char* label) {
     if (g_font_bold) ImGui::PopFont();
 }
 
+#ifdef _WIN32
 void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, uint32_t queue_family, VkQueue queue,
-          VkFormat swapchain_format) {
+          VkFormat swapchain_format)
+#else
+void init(SDL_Window* hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, uint32_t queue_family, VkQueue queue,
+          VkFormat swapchain_format)
+#endif
+{
     std::lock_guard<std::recursive_mutex> l(g_m);
     g_hwnd = hwnd;
     g_dev = dev;
@@ -174,6 +193,7 @@ void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, u
     {
         // Segoe UI (on every Windows install) instead of the 13-pixel bitmap default. Font sizes are dynamic
         // in this ImGui, so one load covers every menu scale.
+#ifdef _WIN32
         char win[MAX_PATH] = {};
         GetWindowsDirectoryA(win, MAX_PATH);
         const std::string dir = std::string(win) + "\\Fonts\\";
@@ -182,9 +202,21 @@ void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, u
         else io.Fonts->AddFontDefault();
         if (std::filesystem::exists(dir + "seguisb.ttf", ec))
             g_font_bold = io.Fonts->AddFontFromFileTTF((dir + "seguisb.ttf").c_str(), kFontPx);
+#else
+        // Use a freely licensed system font when present, otherwise ImGui's default.
+        const char* font = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf";
+        if (!std::filesystem::is_regular_file(font)) font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+        if (std::filesystem::is_regular_file(font)) io.Fonts->AddFontFromFileTTF(font, kFontPx);
+        else io.Fonts->AddFontDefault();
+#endif
     }
     apply_theme(1.0f);
+#ifdef _WIN32
     ImGui_ImplWin32_Init(hwnd);
+#else
+    ImGui_ImplSDL3_InitForVulkan(hwnd);
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, nullptr, 0);
+#endif
     ImGui_ImplVulkan_LoadFunctions(
         VK_API_VERSION_1_3,
         [](const char* name, void* ud) { return vkGetInstanceProcAddr((VkInstance)ud, name); }, instance);
@@ -210,10 +242,11 @@ void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, u
     }
     g_inited = true;
     if (debug::flag(debug::Overlay)) set_visible(true);
-    QueryPerformanceCounter(&g_last_t);
+    host::counter(&g_last_t);
     hw_log("overlay: ready (Escape, F1 or holding View opens the menu)");
 }
 
+#ifdef _WIN32
 bool wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (!g_inited) return false;
     std::lock_guard<std::recursive_mutex> l(g_m);
@@ -231,6 +264,21 @@ bool wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return false;
 }
+
+#else
+bool process_event(const SDL_Event& event) {
+    if (!g_inited) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_m);
+    if (!g_visible && !g_screen) return false;
+    if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE && event.key.repeat) return true;
+    ImGui_ImplSDL3_ProcessEvent(&event);
+    if (event.type == SDL_EVENT_KEY_DOWN)
+        return event.key.key != SDLK_F1 && event.key.key != SDLK_F11;
+    return event.type == SDL_EVENT_KEY_UP || event.type == SDL_EVENT_TEXT_INPUT ||
+           event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+           event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL;
+}
+#endif
 
 // Opening clears ImGui's input and blocks the game's; closing hands input back to the game.
 static void set_visible(bool on) {
@@ -347,11 +395,7 @@ void on_swapchain(const std::vector<VkImage>& images, VkFormat fmt) {
     }
 }
 
-static void post_window_change() {
-    settings::Video& v = settings::video();
-    PostMessageW(g_hwnd, kMsgBorderless, 0, v.borderless ? 1 : 0);
-    if (!v.borderless && v.window_w && v.window_h) PostMessageW(g_hwnd, kMsgClientSize, 0, (LPARAM)((v.window_w << 16) | v.window_h));
-}
+static void post_window_change() { display::apply_window_settings(); }
 
 // Save file helpers for the Gameplay and Tools tabs.
 static std::string save_path() {
@@ -486,7 +530,7 @@ static void tab_display(VkExtent2D extent, bool& changed) {
     opt_interpolation(changed);
     if (ImGui::Checkbox("Switch monitor to 60 Hz while playing", &v.display_60hz)) {
         changed = true;
-        PostMessageW(g_hwnd, kMsgDisplay60, 0, v.display_60hz ? 1 : 0);
+        display::apply_refresh_rate();
     }
     help("The game renders at 60 fps and its movies at 30 fps. On a 144 Hz panel each frame is shown for\n"
          "2 or 3 (movies: 4 or 5) refreshes in turn, which looks like stutter. At 60 Hz every frame is\n"
@@ -608,7 +652,7 @@ static void update_capture(int family, bool& changed) {
         map[g_capture.slot] = host;
         changed = true;
         done = true;
-    } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || GetTickCount64() - g_capture.started > 5000) {
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || host::ticks_ms() - g_capture.started > 5000) {
         done = true;
     }
     if (done) {
@@ -703,13 +747,13 @@ static void tab_input(bool& changed) {
             const bool capturing = g_capture.slot == i;
             if (capturing)
                 snprintf(label, sizeof(label), "Press a button... (%d s, Esc cancels)###bind%d",
-                         (int)(5 - std::min<ULONGLONG>(5, (GetTickCount64() - g_capture.started) / 1000)), i);
+                         (int)(5 - std::min<unsigned long long>(5, (host::ticks_ms() - g_capture.started) / 1000)), i);
             else
                 snprintf(label, sizeof(label), "%s###bind%d", map[i] < 0 ? "(none)" : hid::host_button_name(map[i], type), i);
             if (capturing) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
             if (ImGui::Button(label, ImVec2(-FLT_MIN, 0)) && g_capture.slot < 0) {
                 g_capture.slot = i;
-                g_capture.started = GetTickCount64();
+                g_capture.started = host::ticks_ms();
                 g_capture.ignore = pad.buttons;
             }
             if (capturing) ImGui::PopStyleColor();
@@ -844,9 +888,9 @@ static void tab_gameplay(bool& changed) {
 
 static void tab_tools(bool& changed) {
     section("Files");
-    if (ImGui::Button("Open hwder.log")) ShellExecuteW(nullptr, L"open", L"hwder.log", nullptr, nullptr, SW_SHOWNORMAL);
+    if (ImGui::Button("Open hwder.log")) display::open_path("hwder.log");
     ImGui::SameLine();
-    if (ImGui::Button("Open game folder")) ShellExecuteW(nullptr, L"open", L".", nullptr, nullptr, SW_SHOWNORMAL);
+    if (ImGui::Button("Open game folder")) display::open_path(".");
 
     section("Debug switches");
     ImGui::TextDisabled("Each writes extra detail to hwder.log and can slow the game down. Read once at startup.");
@@ -1086,12 +1130,18 @@ static void build_ui(VkExtent2D extent) {
 }
 
 void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
+#ifndef _WIN32
+    if (!SDL_IsMainThread()) {
+        display::on_main_thread([=] { render(cb, image, extent); });
+        return;
+    }
+#endif
     if (!g_inited) return;
     std::lock_guard<std::recursive_mutex> l(g_m);
     if (hid::take_menu_request()) set_visible(!g_visible);
-    LARGE_INTEGER t, f;
-    QueryPerformanceCounter(&t);
-    QueryPerformanceFrequency(&f);
+    host::Counter t, f;
+    host::counter(&t);
+    host::counter_frequency(&f);
     g_frame_ms[g_frame_i++ % 120] = (t.QuadPart - g_last_t.QuadPart) * 1000.0 / f.QuadPart;
     g_last_t = t;
     settings::Video& v = settings::video();
@@ -1104,9 +1154,16 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
         apply_theme(scale);
         g_style_scale = scale;
     }
+#ifdef _WIN32
     if (g_visible || g_screen) feed_gamepad();  // the menu, or a full-window screen such as the startup one
+#endif
     ImGui_ImplVulkan_NewFrame();
+#ifdef _WIN32
     ImGui_ImplWin32_NewFrame();
+#else
+    ImGui_ImplSDL3_NewFrame();
+    if (g_visible || g_screen) feed_gamepad();
+#endif
     ImGui::NewFrame();
     if (g_screen) g_screen(extent);
     else build_ui(extent);

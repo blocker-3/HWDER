@@ -14,6 +14,7 @@ bool memory_commit(void* address, std::size_t size);
 bool memory_decommit(void* address, std::size_t size);
 bool memory_release(void* address, std::size_t size);
 unsigned long memory_error();
+std::size_t memory_readable(void* address, std::size_t size);
 
 // Auto-reset events retain one pending wake (including a wake before a wait).
 void* event_create();

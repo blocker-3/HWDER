@@ -4,8 +4,13 @@
 
 #include "gpu/settings.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <xinput.h>
+#else
+#include "host/media.h"
+#endif
+#include "host/timing.h"
 
 #include <SDL3/SDL.h>
 
@@ -36,7 +41,7 @@ RawPad g_raw;  // the HID thread writes it each poll, the overlay reads it
 
 // Rumble the game asked for per player slot (from its service threads), applied on the HID thread.
 std::atomic<float> g_rumble_low[kPlayerSlots], g_rumble_high[kPlayerSlots];
-std::atomic<u64> g_preview_until{0};  // GetTickCount64() until which preview_rumble's pulse runs
+std::atomic<u64> g_preview_until{0};  // host::ticks_ms() until which preview_rumble's pulse runs
 
 // Slots with a controller or the keyboard, and the device names, for the controller applet and the menu.
 std::atomic<u32> g_connected_mask{0};
@@ -90,7 +95,7 @@ void update_view_button(int slot, bool down, u64 tap_bits, u64& buttons) {
         down_at = 0;
         return;
     }
-    const u64 now = GetTickCount64();
+    const u64 now = host::ticks_ms();
     if (down) {
         if (!down_at) down_at = now;
         if (!held && now - down_at >= kMenuHoldMs) {
@@ -108,6 +113,7 @@ void update_view_button(int slot, bool down, u64 tap_bits, u64& buttons) {
 s16 clamp16(int v) { return (s16)std::clamp(v, -kStickMax, kStickMax); }
 
 // ------------------------------------------------------------------ XInput fallback
+#ifdef _WIN32
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 using XInputSetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*);
 XInputGetStateFn g_get_state = nullptr;
@@ -181,6 +187,15 @@ void poll_xinput(RawPad raws[kPlayerSlots]) {
     }
 }
 
+#else
+void poll_xinput(RawPad&) {}
+std::atomic<bool> g_keys[SDL_SCANCODE_COUNT]{};
+std::mutex g_hotplug_mutex;
+std::vector<std::pair<u32, u32>> g_hotplug;
+constexpr int VK_UP=0x26, VK_DOWN=0x28, VK_LEFT=0x25, VK_RIGHT=0x27;
+constexpr int VK_RETURN=0x0d, VK_BACK=0x08, VK_SPACE=0x20, VK_TAB=0x09;
+#endif
+
 // ------------------------------------------------------------------ SDL3
 struct SdlPad {
     SDL_Gamepad* gp = nullptr;
@@ -245,7 +260,12 @@ bool sdl_init() {
     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
-    if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_SENSOR)) {
+#ifdef _WIN32
+    const bool initialized = SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_SENSOR);
+#else
+    const bool initialized = (SDL_WasInit(SDL_INIT_GAMEPAD) & SDL_INIT_GAMEPAD) != 0;
+#endif
+    if (!initialized) {
         hw_log("hid: SDL init failed (%s) - falling back to XInput", SDL_GetError());
         return false;
     }
@@ -284,12 +304,21 @@ void sdl_read(SdlPad& p, u32 buttons, RawPad& raw) {
 // recently used pad. `motion` gets player 1's six-axis state in the Switch convention. Returns false while no
 // pad is open.
 bool sdl_poll(bool want_sensors, RawPad raws[kPlayerSlots], RawPad& menu, MotionInput& motion) {
+#ifdef _WIN32
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) sdl_open(e.gdevice.which);
         else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) sdl_close(e.gdevice.which);
     }
-    const u64 now = GetTickCount64();
+#else
+    std::vector<std::pair<u32,u32>> events;
+    { std::lock_guard lock(g_hotplug_mutex); events.swap(g_hotplug); }
+    for (const auto& [type,id] : events) {
+        if (type == SDL_EVENT_GAMEPAD_ADDED) sdl_open(id);
+        else sdl_close(id);
+    }
+#endif
+    const u64 now = host::ticks_ms();
     SdlPad* best = nullptr;
     u32 best_buttons = 0;
     for (SdlPad& p : g_pads) {
@@ -342,7 +371,7 @@ bool sdl_poll(bool want_sensors, RawPad raws[kPlayerSlots], RawPad& menu, Motion
 void apply_rumble(bool sdl_pads) {
     const settings::Input& cfg = settings::input();
     const float k = cfg.rumble ? cfg.rumble_strength / 100.0f : 0.0f;
-    const u64 now = GetTickCount64();
+    const u64 now = host::ticks_ms();
     const bool preview = now < g_preview_until.load();
     u16 lo[kPlayerSlots], hi[kPlayerSlots];
     for (int s = 0; s < kPlayerSlots; s++) {
@@ -366,6 +395,7 @@ void apply_rumble(bool sdl_pads) {
         return;
     }
     // No SDL pad open: the XInput fallback pads (poll_host_input).
+#ifdef _WIN32
     if (!g_set_state) return;
     for (int s = 0; s < kPlayerSlots; s++) {
         if (g_xi_user[s] < 0 || (lo[s] == g_xi_sent[s][0] && hi[s] == g_xi_sent[s][1])) continue;
@@ -376,6 +406,7 @@ void apply_rumble(bool sdl_pads) {
         g_xi_sent[s][0] = lo[s];
         g_xi_sent[s][1] = hi[s];
     }
+#endif
 }
 
 // Radial deadzone rescaled so the stick still reaches full deflection; -1..1 per axis.
@@ -393,7 +424,22 @@ void deadzone(s16 x, s16 y, int dz_pct, float& ox, float& oy) {
 
 s32 to_axis(float v) { return (s32)std::lround(std::clamp(v, -1.0f, 1.0f) * kStickMax); }
 
-bool key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+bool key(int vk) {
+#ifdef _WIN32
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+#else
+    int scan = SDL_SCANCODE_UNKNOWN;
+    if (vk >= 'A' && vk <= 'Z') scan = SDL_SCANCODE_A + vk - 'A';
+    else if (vk >= '1' && vk <= '9') scan = SDL_SCANCODE_1 + vk - '1';
+    else switch (vk) {
+    case VK_UP: scan=SDL_SCANCODE_UP;break; case VK_DOWN: scan=SDL_SCANCODE_DOWN;break;
+    case VK_LEFT: scan=SDL_SCANCODE_LEFT;break; case VK_RIGHT: scan=SDL_SCANCODE_RIGHT;break;
+    case VK_RETURN: scan=SDL_SCANCODE_RETURN;break; case VK_BACK: scan=SDL_SCANCODE_BACKSPACE;break;
+    case VK_SPACE: scan=SDL_SCANCODE_SPACE;break; case VK_TAB: scan=SDL_SCANCODE_TAB;break;
+    }
+    return g_keys[scan].load();
+#endif
+}
 
 }  // namespace
 
@@ -493,6 +539,17 @@ const char* host_button_name(int button, int type) {
     return names[button][family_of(type)];
 }
 
+#ifndef _WIN32
+void host_keyboard_event(int scancode, bool down) {
+    if (scancode >= 0 && scancode < SDL_SCANCODE_COUNT) g_keys[scancode] = down;
+}
+void host_keyboard_clear() { for (auto& key : g_keys) key = false; }
+void host_gamepad_event(u32 type, u32 id) {
+    std::lock_guard lock(g_hotplug_mutex);
+    g_hotplug.emplace_back(type,id);
+}
+#endif
+
 // ------------------------------------------------------------------ polling
 // Keyboard keys to Switch input, merged into one slot's pad.
 void poll_keyboard(PadInput& s) {
@@ -542,9 +599,13 @@ void poll_host_input(HostInput& out) {
         g_sdl_tried = true;
         g_sdl_ok = sdl_init();
     }
+#ifdef _WIN32
     DWORD fg_pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &fg_pid);
     const bool focused = fg_pid == GetCurrentProcessId();
+#else
+    const bool focused = host::media_has_focus();
+#endif
 
     RawPad raws[kPlayerSlots];
     RawPad menu;
@@ -645,7 +706,7 @@ RawPad raw_pad() {
 void set_game_input_blocked(bool blocked) { g_blocked = blocked; }
 bool take_menu_request() { return g_menu_request.exchange(false); }
 
-void preview_rumble() { g_preview_until = GetTickCount64() + 250; }
+void preview_rumble() { g_preview_until = host::ticks_ms() + 250; }
 
 void set_rumble(int slot, float low, float high) {
     if (slot < 0 || slot >= kPlayerSlots) return;

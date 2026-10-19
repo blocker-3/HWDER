@@ -1,4 +1,5 @@
 #include "host/timing.h"
+#include "host/platform.h"
 // Texture cache: guest surfaces (block-linear / pitch) <-> VkImages keyed by guest address.
 #include "gpu/settings.h"
 #include <algorithm>
@@ -105,15 +106,9 @@ void release(const Alloc& a) {
 
 // Committed bytes from addr (VirtualQuery walk; slow when memory is committed in small pieces).
 static u64 walk_committed(u64 addr, u64 size) {
-    u64 done = 0;
-    while (done < size) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((void*)(addr + done), &mbi, sizeof(mbi))) break;
-        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) break;
-        done = (u64)mbi.BaseAddress + mbi.RegionSize - addr;
-    }
-    return std::min(done, size);
+    return host::memory_readable(reinterpret_cast<void*>(addr), size);
 }
+
 u64 readable_size(u64 addr, u64 size) {
     // The kernel's region map (whole heaps per region) answers this in a few lookups; memory that is
     // not a kernel region (host-side allocations) falls back to the OS view.

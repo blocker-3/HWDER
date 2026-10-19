@@ -58,7 +58,7 @@ add_executable(pipeline_catalog_test EXCLUDE_FROM_ALL
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp ${CATALOG_TRANSLATOR_SOURCES})
 if(WIN32)
 add_executable(pipeline_catalog_tool EXCLUDE_FROM_ALL
-    tools/pipeline_catalog/main.cpp runtime/src/config.cpp runtime/src/fs/nsp.cpp
+    tools/pipeline_catalog/main.cpp runtime/src/config.cpp runtime/src/fs/nsp.cpp runtime/src/host/file.cpp
     runtime/src/gpu/vk/catalog_game_sources.cpp runtime/src/gpu/vk/pipeline_catalog.cpp
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp ${CATALOG_TRANSLATOR_SOURCES})
 endif()

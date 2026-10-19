@@ -1,3 +1,4 @@
+#include <cstring>
 // IFileSystem / IFile / IDirectory backed by a host directory (save data, SD card).
 #include "host/file.h"
 #ifdef _WIN32

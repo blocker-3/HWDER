@@ -10,8 +10,14 @@
 #include "gpu/settings.h"
 #include "hwder/runtime.h"
 
+#ifdef _WIN32
 #include <shellapi.h>
 #include <shobjidl.h>
+#else
+#include <SDL3/SDL.h>
+#include <condition_variable>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <filesystem>
@@ -38,6 +44,7 @@ bool g_ask_there = false;  // the save folder already has a save the import woul
 std::string g_status;
 ImVec4 g_status_color = kOk;
 
+#ifdef _WIN32
 std::wstring to_wide(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
     std::wstring w(n > 0 ? n - 1 : 0, L'\0');
@@ -95,14 +102,48 @@ void pick_thread(std::string start) {
     g_picking = false;
 }
 
+#else
+void pick_thread(std::string start) {
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable wake;
+        std::string result;
+        bool complete = false;
+    } request;
+    display::on_main_thread([&] {
+        SDL_ShowOpenFolderDialog([](void* opaque, const char* const* files, int) {
+            auto& result = *static_cast<Request*>(opaque);
+            { std::lock_guard lock(result.mutex);
+              if (files && files[0]) result.result = files[0];
+              result.complete = true;
+              result.wake.notify_one(); }
+        }, &request, display::window(), start.c_str(), false);
+    });
+    std::unique_lock lock(request.mutex);
+    request.wake.wait(lock, [&] { return request.complete; });
+    std::lock_guard guard(g_m);
+    g_pick = request.result; g_picked = true; g_picking = false;
+}
+#endif
+
 bool writable(const std::string& dir) {
     std::error_code ec;
+#ifdef _WIN32
     std::filesystem::create_directories(to_wide(dir), ec);
     HANDLE h = CreateFileW(to_wide(dir + "\\hwder-write-test.tmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     CloseHandle(h);
     return true;
+#else
+    std::filesystem::create_directories(std::filesystem::path(dir), ec);
+    if (ec) return false;
+    std::string candidate = (std::filesystem::path(dir) / ".hwder-write-test-XXXXXX").string();
+    const int file = mkstemp(candidate.data());
+    if (file < 0) return false;
+    close(file);
+    return unlink(candidate.c_str()) == 0;
+#endif
 }
 
 void set_status(const ImVec4& color, const std::string& text) {
@@ -204,8 +245,8 @@ void opt_save_folder(bool in_game, bool& changed) {
     ImGui::SameLine();
     if (ImGui::Button("Open save folder")) {
         std::error_code ec;
-        std::filesystem::create_directories(to_wide(chosen), ec);
-        ShellExecuteW(nullptr, L"open", to_wide(chosen).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        std::filesystem::create_directories(std::filesystem::u8path(chosen), ec);
+        display::open_path(chosen);
     }
     if (!g_status.empty()) ImGui::TextColored(g_status_color, "%s", g_status.c_str());
 

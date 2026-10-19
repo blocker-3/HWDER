@@ -26,7 +26,8 @@ void file_close(FileHandle file) { if (file != invalid_file) CloseHandle(native(
 std::int64_t file_read_at(FileHandle file, void* bytes, std::size_t size, std::uint64_t offset) {
     OVERLAPPED operation{};operation.Offset = DWORD(offset);operation.OffsetHigh = DWORD(offset >> 32);
     DWORD count = 0;
-    if (!ReadFile(native(file), bytes, DWORD(std::min<std::size_t>(size, 0x40000000)), &count, &operation)) return -1;
+    if (!ReadFile(native(file), bytes, DWORD(std::min<std::size_t>(size, 0x40000000)), &count, &operation))
+        return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
     return count;
 }
 std::int64_t file_write_at(FileHandle file, const void* bytes, std::size_t size, std::uint64_t offset) {

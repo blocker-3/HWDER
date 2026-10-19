@@ -3,7 +3,17 @@
 #include "gpu/settings.h"
 #include "display.h"
 
+#ifdef _WIN32
 #include <timeapi.h>
+#include <shellapi.h>
+#else
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#include "host/media.h"
+#endif
+#include <filesystem>
+#include "host/timing.h"
+#include "host/platform.h"
 
 #include <algorithm>
 #include <chrono>
@@ -23,7 +33,13 @@ void validation_report();  // HWDER_VALIDATION message counts (below)
 static Device g_dev;
 Device& device() { return g_dev; }
 
+#ifdef _WIN32
 static HWND g_hwnd;
+#else
+static SDL_Window* g_hwnd;
+static std::atomic<int> g_window_w{1280}, g_window_h{720};
+static std::atomic<double> g_monitor_hz{60};
+#endif
 static std::atomic<bool> g_window_ready{false}, g_resize{false};
 static VkSurfaceKHR g_surface;
 static VkSwapchainKHR g_swapchain;
@@ -48,10 +64,11 @@ static double g_present_ms = 0, g_limiter_ms = 0;  // accumulated per 300 frames
         }                                                                            \
     } while (0)
 
-static u64 now_ms() { return GetTickCount64(); }
+static u64 now_ms() { return host::ticks_ms(); }
 
 // ------------------------------------------------------------------ window
 // Borderless fullscreen on the window's monitor (F11 / overlay option).
+#ifdef _WIN32
 static void set_borderless(HWND h, bool on) {
     static WINDOWPLACEMENT prev = {sizeof(prev)};
     DWORD style = GetWindowLong(h, GWL_STYLE);
@@ -165,6 +182,92 @@ static void window_thread() {
     }
 }
 
+#else
+static void update_window_metrics() {
+    int w = 0, h = 0;
+    if (SDL_GetWindowSizeInPixels(g_hwnd, &w, &h)) { g_window_w = w; g_window_h = h; }
+    if (const auto* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_hwnd)))
+        g_monitor_hz = mode->refresh_rate > 1 ? mode->refresh_rate : 60;
+}
+static void set_borderless(SDL_Window* window, bool on) {
+    if (!SDL_SetWindowFullscreen(window, on)) hw_log("display: fullscreen failed: %s", SDL_GetError());
+    else settings::video().borderless = on;
+    update_window_metrics();
+}
+static void set_client_size(SDL_Window* window, int width, int height) {
+    if (!SDL_SetWindowSize(window, width, height)) hw_log("display: resize failed: %s", SDL_GetError());
+}
+static void set_display_60hz(SDL_Window* window, bool on) {
+    if (!on) { SDL_SetWindowFullscreenMode(window, nullptr); return; }
+    const auto* current = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    SDL_DisplayMode requested{};
+    if (current && SDL_GetClosestFullscreenDisplayMode(current->displayID, current->w, current->h, 60.0f, false, &requested)) {
+        if (!SDL_SetWindowFullscreenMode(window, &requested)) hw_log("display: 60 Hz mode unavailable: %s", SDL_GetError());
+        if (!(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN))
+            hw_log("display: 60 Hz mode applies while fullscreen; desktop refresh is unchanged");
+    }
+}
+static void window_thread() {
+    auto flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (getenv("HWDER_OFFSCREEN")) flags |= SDL_WINDOW_HIDDEN;
+    g_hwnd = SDL_CreateWindow("Hyrule Warriors: Definitive Edition (HWDER)", 1280, 720, flags);
+    if (!g_hwnd) hw_fatal(SDL_GetError());
+    host::set_media_focus((SDL_GetWindowFlags(g_hwnd) & SDL_WINDOW_INPUT_FOCUS) != 0);
+    update_window_metrics(); g_window_ready = true;
+}
+void handle_window_event(const SDL_Event& event) {
+    if (event.type < SDL_EVENT_WINDOW_FIRST || event.type > SDL_EVENT_WINDOW_LAST) return;
+    if (!g_hwnd || event.window.windowID != SDL_GetWindowID(g_hwnd)) return;
+    if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+        event.type == SDL_EVENT_WINDOW_RESTORED || event.type == SDL_EVENT_WINDOW_MINIMIZED) {
+        update_window_metrics(); g_resize = true;
+    }
+}
+void toggle_borderless() { set_borderless(g_hwnd, !settings::video().borderless); settings::save(); }
+#endif
+
+void apply_window_settings() {
+#ifdef _WIN32
+    const auto& video = settings::video();
+    PostMessageW(g_hwnd, overlay::kMsgBorderless, 0, video.borderless ? 1 : 0);
+    if (!video.borderless && video.window_w && video.window_h)
+        PostMessageW(g_hwnd, overlay::kMsgClientSize, 0, (LPARAM)((video.window_w << 16) | video.window_h));
+#else
+    on_main_thread([] {
+        const auto& video = settings::video();
+        set_borderless(g_hwnd, video.borderless);
+        if (!video.borderless && video.window_w && video.window_h) set_client_size(g_hwnd, video.window_w, video.window_h);
+    });
+#endif
+}
+void apply_refresh_rate() {
+#ifdef _WIN32
+    PostMessageW(g_hwnd, overlay::kMsgDisplay60, 0, settings::video().display_60hz ? 1 : 0);
+#else
+    on_main_thread([] { set_display_60hz(g_hwnd, settings::video().display_60hz); });
+#endif
+}
+void open_path(const std::string& path) {
+#ifdef _WIN32
+    auto native = std::filesystem::u8path(path).wstring();
+    ShellExecuteW(nullptr, L"open", native.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    on_main_thread([path] {
+        std::error_code error;
+        const auto bytes = std::filesystem::absolute(std::filesystem::path(path), error).generic_string();
+        if (error) return;
+        constexpr char hex[] = "0123456789ABCDEF";
+        std::string uri = "file://";
+        for (unsigned char byte : bytes) {
+            if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+                (byte >= '0' && byte <= '9') || byte == '/' || byte == '-' || byte == '_' || byte == '.' || byte == '~') uri += char(byte);
+            else { uri += '%'; uri += hex[byte >> 4]; uri += hex[byte & 15]; }
+        }
+        if (!SDL_OpenURL(uri.c_str())) hw_log("open path: %s", SDL_GetError());
+    });
+#endif
+}
+
 // ------------------------------------------------------------------ Vulkan
 static bool has_ext(const std::vector<VkExtensionProperties>& v, const char* n) {
     for (auto& e : v)
@@ -176,7 +279,14 @@ static void create_swapchain() {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_dev.phys, g_surface, &caps);
     VkExtent2D ext = caps.currentExtent;
-    if (ext.width == 0xFFFFFFFF) ext = {1280, 720};
+    if (ext.width == 0xFFFFFFFF) {
+#ifdef _WIN32
+        ext = {1280, 720};
+#else
+        ext = {std::clamp(static_cast<u32>(g_window_w.load()), caps.minImageExtent.width, caps.maxImageExtent.width),
+               std::clamp(static_cast<u32>(g_window_h.load()), caps.minImageExtent.height, caps.maxImageExtent.height)};
+#endif
+    }
     if (ext.width == 0 || ext.height == 0) return;
     u32 n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_dev.phys, g_surface, &n, nullptr);
@@ -219,7 +329,7 @@ static std::unordered_map<std::string, u64> g_val_counts;
 static u64 g_val_last_summary = 0;
 static void validation_summary(bool force) {
     std::lock_guard<std::mutex> l(g_val_m);
-    u64 now = GetTickCount64();
+    u64 now = host::ticks_ms();
     if (!force && now - g_val_last_summary < 10000) return;
     g_val_last_summary = now;
     if (g_val_counts.empty()) return;
@@ -262,11 +372,18 @@ static void init_vulkan() {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "HWDER";
     app.apiVersion = VK_API_VERSION_1_3;
-    const char* inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+#ifdef _WIN32
+    std::vector<const char*> inst_ext{VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#else
+    Uint32 extension_count = 0;
+    const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extension_count);
+    if (!extensions) hw_fatal(SDL_GetError());
+    std::vector<const char*> inst_ext(extensions, extensions + extension_count);
+#endif
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
-    ici.enabledExtensionCount = 2;
-    ici.ppEnabledExtensionNames = inst_ext;
+    ici.enabledExtensionCount = static_cast<u32>(inst_ext.size());
+    ici.ppEnabledExtensionNames = inst_ext.data();
     bool messenger = false;
     const char* layer = "VK_LAYER_KHRONOS_validation";
     if (debug::flag(debug::Validation)) {
@@ -281,7 +398,7 @@ static void init_vulkan() {
         if (have) {
             ici.enabledLayerCount = 1;
             ici.ppEnabledLayerNames = &layer;
-            ici.enabledExtensionCount = 3;  // VK_EXT_debug_utils (provided by the layer): messages into hwder.log
+            inst_ext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             messenger = true;
             hw_log("display: HWDER_VALIDATION: %s enabled, messages go to hwder.log", layer);
         } else {
@@ -289,6 +406,8 @@ static void init_vulkan() {
                    "starting without validation", layer);
         }
     }
+    ici.enabledExtensionCount = static_cast<u32>(inst_ext.size());
+    ici.ppEnabledExtensionNames = inst_ext.data();
     if (VkResult r = vkCreateInstance(&ici, nullptr, &g_dev.instance); r != VK_SUCCESS) {
         hw_log("vkCreateInstance failed: %d", (int)r);
         no_vulkan("vkCreateInstance failed");
@@ -330,10 +449,14 @@ static void init_vulkan() {
     vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &g_dev.mem);
     hw_log("vulkan: %s (api %u.%u)", g_dev.props.deviceName, VK_API_VERSION_MAJOR(g_dev.props.apiVersion),
            VK_API_VERSION_MINOR(g_dev.props.apiVersion));
+#ifdef _WIN32
     VkWin32SurfaceCreateInfoKHR wsci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     wsci.hinstance = GetModuleHandleW(nullptr);
     wsci.hwnd = g_hwnd;
     VKCHECK(vkCreateWin32SurfaceKHR(g_dev.instance, &wsci, nullptr, &g_surface));
+#else
+    if (!SDL_Vulkan_CreateSurface(g_hwnd, g_dev.instance, nullptr, &g_surface)) hw_fatal(SDL_GetError());
+#endif
     vkGetPhysicalDeviceQueueFamilyProperties(g_dev.phys, &n, nullptr);
     std::vector<VkQueueFamilyProperties> qfs(n);
     vkGetPhysicalDeviceQueueFamilyProperties(g_dev.phys, &n, qfs.data());
@@ -430,15 +553,19 @@ void client_size(unsigned* w, unsigned* h) {
     *h = g_extent.height;
 }
 double monitor_hz() {
+#ifdef _WIN32
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
     if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) return (double)dm.dmDisplayFrequency;
     return 60.0;
+#else
+    return g_monitor_hz.load();
+#endif
 }
 static void frame_limit(u32 interval, u32 release_hz) {
-    static LARGE_INTEGER freq, next;
-    static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    static host::Counter freq, next;
+
+    if (!freq.QuadPart) host::counter_frequency(&freq);
     const char* env = debug::str(debug::Fps);
     // The presenter runs at a fixed 60 Hz like the console's display. A swap interval of 2 means the
     // frame stays up for two vsyncs: pace such a present two slots ahead instead of re-targeting the
@@ -463,10 +590,12 @@ static void frame_limit(u32 interval, u32 release_hz) {
     static bool prio = false;
     if (!prio) {
         prio = true;
+#ifdef _WIN32
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
     }
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
+    host::Counter now;
+    host::counter(&now);
     s64 period = (s64)(freq.QuadPart / fps);
     // `next` is the virtual vblank grid. In steady state we arrive here a little after the grid point
     // (the game produced its frame right after we released the previous buffer). A frame up to one period
@@ -487,17 +616,14 @@ static void frame_limit(u32 interval, u32 release_hz) {
     s64 wait = next.QuadPart - now.QuadPart;
     if (wait <= 0) return;
     s64 sleep_100ns = wait * 10000000 / freq.QuadPart - 10000;
-    if (sleep_100ns > 0 && timer) {
-        LARGE_INTEGER due;
-        due.QuadPart = -sleep_100ns;
-        SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0);
-        WaitForSingleObject(timer, INFINITE);
-        LARGE_INTEGER woke;
-        QueryPerformanceCounter(&woke);
+    if (sleep_100ns > 0) {
+        host::sleep_ns(sleep_100ns * 100);
+        host::Counter woke;
+        host::counter(&woke);
         // How late the timer woke us relative to the requested due time (pacing diagnostics).
         g_trace_overshoot_ms = ((woke.QuadPart - now.QuadPart) * 1000.0 / freq.QuadPart) - sleep_100ns / 10000.0;
     }
-    do QueryPerformanceCounter(&now);
+    do host::counter(&now);
     while (now.QuadPart < next.QuadPart);
 }
 
@@ -514,10 +640,20 @@ static void update_title(bool guest) {
         std::lock_guard<std::mutex> g(g_status_lock);
         status = g_status;
     }
+#ifdef _WIN32
     wchar_t title[256];
     if (guest) swprintf(title, 256, L"Hyrule Warriors: Definitive Edition (HWDER) - %.1f fps", fps);
     else swprintf(title, 256, L"Hyrule Warriors: Definitive Edition (HWDER) - %hs", status.c_str());
     SetWindowTextW(g_hwnd, title);
+#else
+    char title[256];
+    if (guest) snprintf(title, sizeof(title), "Hyrule Warriors: Definitive Edition (HWDER) - %.1f fps", fps);
+    else snprintf(title, sizeof(title), "Hyrule Warriors: Definitive Edition (HWDER) - %s", status.c_str());
+    auto* copy = new std::string(title);
+    if (!SDL_RunOnMainThread([](void* data) {
+        auto* text = static_cast<std::string*>(data); SDL_SetWindowTitle(g_hwnd, text->c_str()); delete text;
+    }, copy, false)) delete copy;
+#endif
 }
 
 // Record + submit one frame: clear, optionally blit `src`, present.
@@ -548,15 +684,15 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
         ai.commandBufferCount = 1;
         vkAllocateCommandBuffers(g_dev.dev, &ai, &fs.cb);
     }
-    LARGE_INTEGER tf, ta, tb, tc;
-    QueryPerformanceFrequency(&tf);
-    QueryPerformanceCounter(&ta);
+    host::Counter tf, ta, tb, tc;
+    host::counter_frequency(&tf);
+    host::counter(&ta);
     vkWaitForFences(g_dev.dev, 1, &fs.fence, VK_TRUE, UINT64_MAX);
-    QueryPerformanceCounter(&tb);
+    host::counter(&tb);
     u32 idx;
     // Bounded: a hidden/minimized window may never hand out an image; the game must not stall on it.
     VkResult r = vkAcquireNextImageKHR(g_dev.dev, g_swapchain, 100000000ull, fs.acquired, VK_NULL_HANDLE, &idx);
-    QueryPerformanceCounter(&tc);
+    host::counter(&tc);
     g_trace_fence_ms = (tb.QuadPart - ta.QuadPart) * 1000.0 / tf.QuadPart;
     g_trace_acq_ms = (tc.QuadPart - tb.QuadPart) * 1000.0 / tf.QuadPart;
     if (g_trace_fence_ms > 20 || g_trace_acq_ms > 20)
@@ -610,10 +746,10 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     vkCmdPipelineBarrier(fs.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &b);
-    LARGE_INTEGER pq0, pq1, pq2, pq3;
-    QueryPerformanceCounter(&pq0);
+    host::Counter pq0, pq1, pq2, pq3;
+    host::counter(&pq0);
     overlay::render(fs.cb, dst, g_extent);
-    QueryPerformanceCounter(&pq1);
+    host::counter(&pq1);
     b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -659,9 +795,9 @@ static u64 present(VkImage src, u32 w, u32 h, const VkClearColorValue& bg, VkSem
     if (shared) q.lock();
     else q2.lock();
     VKCHECK(vkQueueSubmit(g_dev.present_queue, 1, &si, fs.fence));
-    QueryPerformanceCounter(&pq2);
+    host::counter(&pq2);
     r = vkQueuePresentKHR(g_dev.present_queue, &pi);
-    QueryPerformanceCounter(&pq3);
+    host::counter(&pq3);
     if ((pq3.QuadPart - pq0.QuadPart) * 1000.0 / tf.QuadPart > 20.0)
         hw_log("display: slow: present body %.0f ms (overlay %.0f, record+submit %.0f, queue-present %.0f)",
                (pq3.QuadPart - pq0.QuadPart) * 1000.0 / tf.QuadPart, (pq1.QuadPart - pq0.QuadPart) * 1000.0 / tf.QuadPart,
@@ -690,12 +826,12 @@ void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSe
                    u32 release_hz) {
     {
         // Frame pacing statistics: interval between guest presents, logged every 300 frames.
-        static LARGE_INTEGER freq, last;
+        static host::Counter freq, last;
         static double sum = 0, worst = 0;
         static u32 n = 0, slow = 0;
-        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
+        if (!freq.QuadPart) host::counter_frequency(&freq);
+        host::Counter now;
+        host::counter(&now);
         if (last.QuadPart) {
             double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
             sum += ms;
@@ -714,23 +850,23 @@ void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSe
     }
     g_last_guest_frame = now_ms();
     VkClearColorValue black{};
-    LARGE_INTEGER f, t0, t1, t2;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&t0);
+    host::Counter f, t0, t1, t2;
+    host::counter_frequency(&f);
+    host::counter(&t0);
     // Wait for the slot first, then present: the caller's work for the next output (frame
     // interpolation replays) overlaps the wait instead of delaying the present.
     frame_limit(swap_interval, release_hz);
-    QueryPerformanceCounter(&t1);
+    host::counter(&t1);
     g_last_image_ticket = present(image, width, height, black, wait_sem, wait_value);
     update_title(true);
-    QueryPerformanceCounter(&t2);
+    host::counter(&t2);
     g_limiter_ms += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
     g_present_ms += (t2.QuadPart - t1.QuadPart) * 1000.0 / f.QuadPart;
     // HWDER_PACE_TRACE=1: one line per present (interval since the previous present call, requested swap
     // interval, fence wait / acquire / whole present() / limiter time) for frame pacing analysis.
     static const bool trace = debug::flag(debug::PaceTrace);
     if (trace) {
-        static LARGE_INTEGER prev;
+        static host::Counter prev;
         double dt = prev.QuadPart ? (t0.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0;
         prev = t0;
         hw_log("pace: present dt %.2f iv %u fence %.2f acq %.2f present %.2f limit %.2f overshoot %.2f", dt, swap_interval,
@@ -760,15 +896,20 @@ static void boot_screen_thread() {
             present(VK_NULL_HANDLE, 0, 0, c, VK_NULL_HANDLE, 0);
             update_title(false);
         }
-        Sleep(16);
+        host::sleep_ms(16);
     }
 }
 
 void init() {
+#ifndef _WIN32
+    if (!SDL_IsMainThread()) { on_main_thread([] { init(); }); return; }
+#endif
     // Frame pacing relies on ~1 ms timer accuracy. Request it, and opt out of Windows 11's timer
     // coarsening for processes whose window is not in the foreground / minimized (test runs, or the
     // user alt-tabbing away while the game keeps running).
+#ifdef _WIN32
     timeBeginPeriod(1);
+#endif
 #ifdef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
     PROCESS_POWER_THROTTLING_STATE pt{};
     pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
@@ -777,19 +918,21 @@ void init() {
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt));
 #endif
     settings::load();
+#ifdef _WIN32
     std::thread(window_thread).detach();
-    while (!g_window_ready) Sleep(1);
+    while (!g_window_ready) host::sleep_ms(1);
+#else
+    window_thread();
+#endif
     init_vulkan();
     overlay::init(g_hwnd, g_dev.instance, g_dev.phys, g_dev.dev, g_dev.queue_family, g_dev.present_queue, VK_FORMAT_B8G8R8A8_UNORM);
     if (!g_images.empty()) overlay::on_swapchain(g_images, VK_FORMAT_B8G8R8A8_UNORM);
-    if (settings::video().borderless) PostMessageW(g_hwnd, overlay::kMsgBorderless, 0, 1);
-    else if (settings::video().window_w && settings::video().window_h)
-        PostMessageW(g_hwnd, overlay::kMsgClientSize, 0, (LPARAM)((settings::video().window_w << 16) | settings::video().window_h));
+    apply_window_settings();
     hw_log("display: window open");
 }
 
 void start() {
-    if (settings::video().display_60hz) PostMessageW(g_hwnd, overlay::kMsgDisplay60, 0, 1);
+    if (settings::video().display_60hz) apply_refresh_rate();
     std::thread(boot_screen_thread).detach();
 }
 
@@ -802,6 +945,10 @@ void present_overlay_frame() {
     present(VK_NULL_HANDLE, 0, 0, bg, VK_NULL_HANDLE, 0);
 }
 
+#ifdef _WIN32
 HWND window() { return g_hwnd; }
+#else
+SDL_Window* window() { return g_hwnd; }
+#endif
 
 }  // namespace display

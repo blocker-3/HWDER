@@ -167,8 +167,8 @@ static void output_thread() {
         while (g_ring.pop(scratch, 512)) {}
     };
     for (;;) {
-        if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-            hw_log("audio: SDL audio initialization failed: %s", SDL_GetError());
+        if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO)) {
+            hw_log("audio: main-thread SDL audio initialization unavailable");
             discard();host::sleep_ms(1000);continue;
         }
         SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);

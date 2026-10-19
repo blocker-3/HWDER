@@ -671,7 +671,7 @@ static void prefer_performance_cores() {
 }
 #endif
 
-int main(int argc, char** argv) {
+static int runtime_main(int argc, char** argv) {
     std::string dir = exe_dir();
 #ifdef _WIN32
     SetCurrentDirectoryW(to_w(dir).c_str());
@@ -817,4 +817,12 @@ int main(int argc, char** argv) {
     t->host_handle = nullptr;
     hw_log("main thread exited");
     host::process_exit(0);
+}
+
+int main(int argc, char** argv) {
+#ifdef _WIN32
+    return runtime_main(argc, argv);
+#else
+    return display::run_main(argc, argv, runtime_main);
+#endif
 }

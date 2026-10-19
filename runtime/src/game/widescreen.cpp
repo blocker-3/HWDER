@@ -8,7 +8,9 @@
 // undoes the horizontal squeeze (runtime/src/gpu/vk/vk_renderer.cpp, unlocked scale).
 //
 // Hook: Camera_BuildProj (x0 = camera). The camera layout is game::Camera (game/structs.h, docs/camera.md).
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -44,7 +46,11 @@ float wide_aspect() {
     if (!v.unlocked_res || !v.ultrawide) return 0.0f;
     unsigned w = 0, h = 0;
     display::client_size(&w, &h);
+#ifdef _WIN32
     if (!w || !h) w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+#else
+    if (!w || !h) return 0.0f;
+#endif
     float a = (float)w / (float)h;
     return a > k169 + 0.01f ? a : 0.0f;
 }

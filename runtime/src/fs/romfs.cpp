@@ -1,3 +1,4 @@
+#include <cstdlib>
 // Virtual RomFS image.
 //
 // The SDK's RomFS driver reads the raw (level 3) RomFS image through the IStorage returned by

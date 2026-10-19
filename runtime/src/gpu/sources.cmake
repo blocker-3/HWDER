@@ -12,9 +12,14 @@ list(APPEND RUNTIME_SOURCES
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_vulkan.cpp
-    third_party/imgui/backends/imgui_impl_win32.cpp
     runtime/src/gpu/services.cpp
     runtime/src/gpu/nvdrv.cpp
     runtime/src/gpu/gpu.cpp
     runtime/src/gpu/vi.cpp
 )
+
+if(WIN32)
+    list(APPEND RUNTIME_SOURCES third_party/imgui/backends/imgui_impl_win32.cpp)
+else()
+    list(APPEND RUNTIME_SOURCES third_party/imgui/backends/imgui_impl_sdl3.cpp)
+endif()

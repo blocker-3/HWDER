@@ -1,3 +1,4 @@
+#include <cstdio>
 // In-process NSP reader: PFS0 container -> program NCA3 -> ExeFS (PFS0 section) + RomFS (IVFC
 // section), decrypted on demand. Nothing is written to disk; file data comes out of the user's
 // own dump with the user's own keys.

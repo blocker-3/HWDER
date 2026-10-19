@@ -1,7 +1,10 @@
 // hid services: IHidServer / IAppletResource with the HID shared memory (0x40000) kept up to date by a
 // host thread. Layout: switchbrew "HID_Shared_Memory".
 #include "host/timing.h"
+#ifdef _WIN32
+#include <windows.h>
 #include <timeapi.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -280,7 +283,9 @@ void update_once(const hid::HostInput& in) {
 }
 
 void update_thread() {
+#ifdef _WIN32
     timeBeginPeriod(1);
+#endif
     hid::HostInput in;
     // HWDER_AUTOPLAY=1: tap A every 1.5 s (after 5 s) so unattended runs advance through the menus.
     static const bool autoplay = debug::flag(debug::Autoplay);
