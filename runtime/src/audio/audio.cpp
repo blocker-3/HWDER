@@ -1,25 +1,35 @@
-// Audio: audren:u (the audio renderer: voices -> mixes -> sink), audout:u, and WASAPI output.
+// Audio: audren:u (voices -> mixes -> sink), audout:u, and WASAPI/SDL3 host output.
 //
 // The renderer runs on its own thread at the Switch's rate (one frame = sample_count samples,
 // 5 ms at 48 kHz). The game drives it through RequestUpdate: a blob of per-object input
 // parameters (behavior, memory pools, voice resources, voices, effects, splitters, mixes, sinks,
 // performance) answered with a blob of per-object statuses. Layouts follow the NX audio
 // renderer protocol (revision given by the game; this SDK uses an early one).
+#ifdef _WIN32
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#else
+#include <SDL3/SDL.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
 #include "gpu/settings.h"
+#include "host/media.h"
+#include "host/timing.h"
 #include "service/common.h"
 #include "debug_flags.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "ole32.lib")
+#endif
 
 namespace ipc {
 namespace {
@@ -65,23 +75,28 @@ static float output_gain() {
     const settings::Audio& a = settings::audio();
     if (a.mute) return 0.0f;
     if (a.mute_background) {
+#ifdef _WIN32
         DWORD pid = 0;
         GetWindowThreadProcessId(GetForegroundWindow(), &pid);
         if (pid != GetCurrentProcessId()) return 0.0f;
+#else
+        if (!host::media_has_focus()) return 0.0f;
+#endif
     }
     return a.volume / 100.0f;
 }
 
-static void wasapi_thread() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER audio out");
+static void output_thread() {
+    host::name_thread(L"HWDER audio out");
     if (debug::flag(debug::Mute)) {  // test runs: never open the output device
         hw_log("audio: muted (HWDER_MUTE) - output disabled");
         for (;;) {
             s16 sink[1024];
             g_ring.pop(sink, 256);
-            Sleep(5);
+            host::sleep_ms(5);
         }
     }
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IMMDeviceEnumerator* en = nullptr;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en))) {
@@ -142,6 +157,53 @@ static void wasapi_thread() {
         CloseHandle(ev);
         Sleep(500);
     }
+#else
+    // SDL converts this application format to the default device's native format.
+    // Keep at most 20 ms in SDL in addition to the existing bounded mixer ring.
+    constexpr int queued_bytes = kTargetRate / 50 * 2 * sizeof(s16);
+    const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, int(kTargetRate)};
+    auto discard = [] {
+        s16 scratch[1024];
+        while (g_ring.pop(scratch, 512)) {}
+    };
+    for (;;) {
+        if (!(SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            hw_log("audio: SDL audio initialization failed: %s", SDL_GetError());
+            discard();host::sleep_ms(1000);continue;
+        }
+        SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+        if (!stream || !SDL_ResumeAudioStreamDevice(stream)) {
+            hw_log("audio: SDL output unavailable: %s", SDL_GetError());
+            if (stream) SDL_DestroyAudioStream(stream);
+            discard();host::sleep_ms(1000);continue;
+        }
+        discard();
+        hw_log("audio: SDL output open (stereo s16, 48000 Hz)");
+        u64 stalled_since = 0;
+        for (;;) {
+            const int queued = SDL_GetAudioStreamQueued(stream);
+            if (queued < 0) break;
+            if (queued >= queued_bytes) {
+                const u64 now = host::ticks_ms();
+                if (!stalled_since) stalled_since = now;
+                if (now - stalled_since > 2000) break;
+                host::sleep_ms(2);continue;
+            }
+            stalled_since = 0;
+            const u32 frames = std::min<u32>(256, (queued_bytes - queued) / (2 * sizeof(s16)));
+            if (!frames) { host::sleep_ms(1);continue; }
+            s16 samples[256 * 2]{};
+            g_ring.pop(samples, frames);
+            const float gain = output_gain();
+            if (gain <= 0.0f) memset(samples, 0, sizeof(samples));
+            else if (gain < 1.0f) for (s16& sample : samples) sample = s16(sample * gain);
+            if (!SDL_PutAudioStreamData(stream, samples, int(frames * 2 * sizeof(s16)))) break;
+        }
+        hw_log("audio: SDL output lost or stalled - retrying");
+        SDL_DestroyAudioStream(stream);
+        discard();host::sleep_ms(500);
+    }
+#endif
 }
 
 // ------------------------------------------------------------------ renderer
@@ -780,11 +842,13 @@ static std::mutex g_renderers_lock;
 static std::vector<std::shared_ptr<Renderer>> g_renderers;
 
 static void audio_thread() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER audio render");
+    host::name_thread(L"HWDER audio render");
+#ifdef _WIN32
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    LARGE_INTEGER freq, next, now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&next);
+#endif
+    host::Counter freq, next, now;
+    host::counter_frequency(&freq);
+    host::counter(&next);
     std::vector<s16> frame, resampled;
     double out_frac = 0;
     s16 last[2] = {};
@@ -822,13 +886,17 @@ static void audio_thread() {
         }
         for (auto& r : rs) r->event()->signal();
         next.QuadPart += period_ticks;
-        QueryPerformanceCounter(&now);
+        host::counter(&now);
         s64 wait = next.QuadPart - now.QuadPart;
         if (wait > 0) {
+#ifdef _WIN32
             LARGE_INTEGER due;
             due.QuadPart = -(wait * 10000000 / freq.QuadPart);
             SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0);
             WaitForSingleObject(timer, INFINITE);
+#else
+            host::sleep_counter_ticks(wait, freq.QuadPart);
+#endif
         } else if (wait < -period_ticks * 8) {
             next = now;  // fell far behind: resync rather than burst
         }
@@ -839,7 +907,7 @@ static void ensure_threads() {
     static std::once_flag once;
     std::call_once(once, [] {
         std::thread(audio_thread).detach();
-        std::thread(wasapi_thread).detach();
+        std::thread(output_thread).detach();
     });
 }
 
