@@ -43,6 +43,7 @@ extern "C" void f_100051e67c(Ctx* c);      // Present
 // Tag of the GPU work being submitted: (tick << 1) | 1 during an extra frame (nvdrv copies it into each
 // submission; the renderer reads it back while executing).
 extern "C" std::atomic<unsigned long long> hw_gi_submit_tag{0};
+extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last presented frame
 
 namespace interp {
 
@@ -69,7 +70,7 @@ struct Stats {
     u64 late = 0;                      // skipped: the previous tick ran late
     // Per-tick timing (ms): tick entry -> BeginFrame (update jobs), extra frame's draw part and present
     // part (includes DequeueBuffer's wait), BeginFrame -> tick exit (real frame), tick exit -> next entry.
-    double t_update = 0, t_xdraw = 0, t_xpresent = 0, t_real = 0, t_loop = 0;
+    double t_update = 0, t_xdraw = 0, t_xpresent = 0, t_real = 0, t_loop = 0, draws = 0;
     double m_update = 0, m_xdraw = 0, m_xpresent = 0, m_real = 0, m_loop = 0;
     u64 ticks = 0;
     double ms = 0;
@@ -82,7 +83,8 @@ void report() {
     static const bool on = getenv("HWDER_GI_LOG") != nullptr;
     static u64 last = 0;
     u64 t = GetTickCount64();
-    if (t - last < 5000) return;
+    static const u64 every = getenv("HWDER_GI_LOG_MS") ? strtoull(getenv("HWDER_GI_LOG_MS"), nullptr, 10) : 5000;
+    if (t - last < every) return;
     last = t;
     if (on)
         hw_log("gi: %llu extra frames (mean %.2f ms each, %llu without a present), skipped: %llu begin failed, "
@@ -92,9 +94,9 @@ void report() {
                g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
     if (on && g_st.ticks)
         hw_log("gi: per tick (mean/max ms): update %.2f/%.1f, extra draw %.2f/%.1f, extra present %.2f/%.1f, "
-               "real frame %.2f/%.1f, loop %.2f/%.1f", g_st.t_update / g_st.ticks, g_st.m_update,
+               "real frame %.2f/%.1f, loop %.2f/%.1f; %.0f draws per frame", g_st.t_update / g_st.ticks, g_st.m_update,
                g_st.t_xdraw / g_st.ticks, g_st.m_xdraw, g_st.t_xpresent / g_st.ticks, g_st.m_xpresent,
-               g_st.t_real / g_st.ticks, g_st.m_real, g_st.t_loop / g_st.ticks, g_st.m_loop);
+               g_st.t_real / g_st.ticks, g_st.m_real, g_st.t_loop / g_st.ticks, g_st.m_loop, g_st.draws / g_st.ticks);
     g_st = Stats{};
     if (on) report_ipc();
 }
@@ -296,6 +298,7 @@ extern "C" void f_100051e9c4(Ctx* c) {
         }
         if (g_tick_in > 0) {
             g_st.ticks++;
+            g_st.draws += hw_last_frame_draws.load();
             add(g_st.t_update, g_st.m_update, g_begin - g_tick_in);
             add(g_st.t_xdraw, g_st.m_xdraw, g_xdraw - g_begin);
             add(g_st.t_xpresent, g_st.m_xpresent, g_xpresent - g_xdraw);

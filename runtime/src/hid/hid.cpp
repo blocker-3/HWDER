@@ -347,6 +347,14 @@ void update_thread() {
                 if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
                 in.pad.ly = 20000;
                 in.pad.lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
+                // HWDER_AUTOPLAY_CIRCLE=1: run in a slow circle (one turn every 8 s) so Link crosses the map
+                // and the view covers every direction instead of pushing against a wall.
+                static const bool circle = getenv("HWDER_AUTOPLAY_CIRCLE") != nullptr;
+                if (circle) {
+                    double a = (t % 8000) / 8000.0 * 6.283185307;
+                    in.pad.lx = (s32)(24000 * std::cos(a));
+                    in.pad.ly = (s32)(24000 * std::sin(a));
+                }
                 // HWDER_AUTOPLAY_CAM=1: also turn the camera with the right stick (2 s right, 2 s left,
                 // 2 s still), for camera interpolation tests.
                 static const bool cam = getenv("HWDER_AUTOPLAY_CAM") != nullptr;
