@@ -18,8 +18,14 @@ struct Video {
                                 // (true 21:9) instead of pillarboxing; the HUD stays a centred 16:9
     bool show_fps = false;      // small frame-time readout in the corner
     int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
+    bool fps120 = false;        // 120 fps: the game draws an in-between frame per 60 Hz tick (runtime/src/interp/interp_draw.cpp)
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)
     int menu_scale = 100;       // in-game menu text size, percent
+    int contrast = 100;         // picture contrast in the game's final tonemap pass, percent (100 = unchanged)
+    int bloom = 100;            // bloom strength, percent of the game's own (0 = off)
+    int fov = 100;              // field of view, percent of the game's visible extent (runtime/src/game/widescreen.cpp)
+    bool fxaa = false;          // FXAA on the 3D picture before the HUD
+    int sharpen = 0;            // contrast-adaptive sharpening of the 3D picture, percent (0 = off)
 };
 
 struct Audio {
@@ -46,11 +52,13 @@ struct Input {
     Input();
 };
 
-// Startup screen: files picked there and whether it shows when everything checks out.
+// Startup screen: files picked there, whether it shows when everything checks out, and the save folder.
 struct Launch {
     std::string nsp_path;   // game file; empty = search beside the exe (HWDER_NSP wins)
     std::string keys_path;  // prod.keys; empty = search the usual places (HWDER_KEYS wins)
     bool skip_prelaunch = false;
+    std::string save_dir;        // save folder; empty = <exe dir>\save (see fs/save_dir.h)
+    std::string save_copy_from;  // copy saves from this folder into save_dir at the next launch (set in the in-game menu)
 };
 
 // Startup switches. Each is applied as its environment variable before the subsystems read it, so a

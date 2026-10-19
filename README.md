@@ -31,7 +31,9 @@ keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, 
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 
 Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
-`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete).
+`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). The save folder can be
+moved on the startup screen or in the menu's Gameplay tab; your saves are copied there only if you say so, and
+nothing in the old folder is moved or deleted.
 
 ## Reporting a bug
 
@@ -148,7 +150,8 @@ ExeFS partition and the RomFS section (IVFC level 5) through on-demand AES-CTR d
 Windows CNG. The SDK's own RomFS driver then parses that image through the `IStorage`
 interface, as it would on the console. An extracted `exefs/` + `romfs/` pair works too: `romfs.cpp`
 synthesises a RomFS image (header, hash tables, directory and file tables) over the host files
-so the same driver path is used. Save data maps to `save\<title>\<save id>\` on the host.
+so the same driver path is used. Save data maps to `save\<title>\<save id>\` on the host
+(or the save folder picked in the settings, `fs/save_dir.cpp`).
 
 **Audio.** `audio/audio.cpp` implements the `audren` renderer: it parses the per-frame update
 (voices, mixes, splitters, effects, sinks, wave buffers), decodes PCM16 and ADPCM voices with
@@ -228,6 +231,21 @@ log file; `HWDER_MUTE=1` silences audio; `HWDER_RES_SCALE` overrides the resolut
 `HWDER_VALIDATION=1` enables Vulkan validation layers; `HWDER_VK_FRAME_DUMP`, `HWDER_GPU_TRACE`,
 `HWDER_IPC_TRACE`, `HWDER_FS_TRACE` and the other `HWDER_*_TRACE` switches dump the respective
 subsystem's activity to the log.
+
+Successful graphics pipelines are recorded with their shader code and binding metadata in
+`pipeline_warmup.bin`. A compatible file prebuilds those recipes on the single pipeline
+worker before the startup screen and guest boot. Warmed results are reused only after
+fresh live translation exactly matches the saved shader and metadata. Absent or incompatible
+files leave startup lazy. `HWDER_PIPELINE_PREWARM=0` disables early prebuilding for comparison
+while continuing to record successful live pipelines. The file is disposable; delete it to
+start fresh. Logs report startup costs, completion before the first live draw, adoption,
+mismatches, failures and recording. Performance and visual acceptance require matched runs.
+
+Unattended test runs: `HWDER_AUTOPLAY=2` drives into a battle and keeps fighting (`HWDER_AUTOPLAY_SKIP=1`
+also skips story cutscenes and tutorial pop-ups and gets past the pre-battle menu - Battlefield Info: B,
+then Start Battle; `HWDER_AUTOPLAY_CAM=1` turns the camera; `HWDER_AUTOPLAY_IDLE=1` stands still in
+battle). `HWDER_FILMSTRIP=<dir>` saves every presented frame (`HWDER_FILMSTRIP_W=<width>`; window:
+`HWDER_FILMSTRIP_BATTLE=<s after the battle starts>` or `_AFTER=<s>`, and `_FOR=<s>`).
 
 ## Status
 

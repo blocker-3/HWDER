@@ -16,6 +16,7 @@
 #include <vector>
 
 extern "C" bool hw_game_interp_hold_60();  // interp/interp_draw.cpp
+extern "C" bool hw_game_interp_on();
 
 
 namespace display {
@@ -424,6 +425,7 @@ static void frame_limit(u32 interval) {
     // Stage b (HWDER_GAME_INTERP): the game is frame-locked, so a faster release grid is only right while
     // it draws an in-between frame per tick; menus and loading screens (one present per tick) stay at 60.
     if (hw_game_interp_hold_60()) fps = 60.0;
+    else if (!env && hw_game_interp_on()) fps = 120.0;  // "120 fps": two presents per 60 Hz tick
     static u32 last_interval = 0;
     if (interval != last_interval) {
         last_interval = interval;

@@ -1,5 +1,6 @@
 // Memory, attribute, texture and warp instructions.
 #include "shader/translator.h"
+#include "gpu/graphics_audit.h"
 
 namespace shader {
 
@@ -370,6 +371,10 @@ void Translator::emit_tex(Inst in, Op op) {
             if (ty_bits <= 1) a.offset = sx(0);
             else if (ty_bits <= 3) a.offset = b.op(spv::OpCompositeConstruct, b.t_vec(t_s32, 2), {sx(0), sx(4)});
             else if (ty_bits <= 5) a.offset = b.op(spv::OpCompositeConstruct, b.t_vec(t_s32, 3), {sx(0), sx(4), sx(8)});
+            // Extract/bitcast instructions are non-constant SPIR-V even for literal-zero R255.
+            // Count only emitted offsets (cube forms leave offset unset), once per translation.
+            if (a.offset && ++gpu::audit::tex_dynamic_offsets == 1)
+                log_once("TEX AOFFI non-constant SPIR-V offset from R" + std::to_string(m - 1));
         }
         if (dc) a.dref = F(m++);
         Tex& tex = texture(in.bits(36, 13) * 4, tex_type(ty_bits), dc);

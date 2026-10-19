@@ -79,6 +79,7 @@ void load() {
         else if (k == "res_scale") g_video.res_scale = (float)atof(v);
         else if (k == "unlocked_res") g_video.unlocked_res = atoi(v) != 0;
         else if (k == "ultrawide") g_video.ultrawide = atoi(v) != 0;
+        else if (k == "fps120") g_video.fps120 = atoi(v) != 0;
         else if (k == "show_fps") g_video.show_fps = atoi(v) != 0;
         else if (k == "display_60hz") g_video.display_60hz = atoi(v) != 0;
         else if (k == "volume") g_audio.volume = std::clamp(atoi(v), 0, 100);
@@ -101,6 +102,11 @@ void load() {
                 if (k == kFamilyKeys[fam]) parse_remap(v, g_input.remap[fam]);
         }
         else if (k == "menu_scale") g_video.menu_scale = std::clamp(atoi(v), 50, 300);
+        else if (k == "contrast") g_video.contrast = std::clamp(atoi(v), 50, 150);
+        else if (k == "bloom") g_video.bloom = std::clamp(atoi(v), 0, 200);
+        else if (k == "fov") g_video.fov = std::clamp(atoi(v), 70, 150);
+        else if (k == "fxaa") g_video.fxaa = atoi(v) != 0;
+        else if (k == "sharpen") g_video.sharpen = std::clamp(atoi(v), 0, 100);
         else if (k == "async_shaders") g_debug.async_shaders = atoi(v) != 0;
         else if (k == "debug_env") {
             // Comma-separated HWDER_* names; anything else is ignored.
@@ -115,10 +121,13 @@ void load() {
             }
         }
         else if (k == "interp_hz") g_video.interp_hz = atoi(v);
-        else if (k == "nsp_path" || k == "keys_path") {
+        else if (k == "nsp_path" || k == "keys_path" || k == "save_dir" || k == "save_copy_from") {
             std::string path = v;  // UTF-8, as written by save()
             while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
-            (k == "nsp_path" ? g_launch.nsp_path : g_launch.keys_path) = path;
+            (k == "nsp_path"    ? g_launch.nsp_path
+             : k == "keys_path" ? g_launch.keys_path
+             : k == "save_dir"  ? g_launch.save_dir
+                                : g_launch.save_copy_from) = path;
         }
         else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
@@ -143,6 +152,8 @@ void save() {
     fprintf(f, "volume=%d\nmute=%d\nmute_background=%d\nhold_view_menu=%d\nrumble=%d\nbackground_pad=%d\nmenu_scale=%d\nasync_shaders=%d\n",
             g_audio.volume, (int)g_audio.mute, (int)g_audio.mute_background, (int)g_input.hold_view_menu, (int)g_input.rumble,
             (int)g_input.background_pad, g_video.menu_scale, (int)g_debug.async_shaders);
+    fprintf(f, "contrast=%d\nbloom=%d\nfov=%d\nfxaa=%d\nsharpen=%d\nfps120=%d\n", g_video.contrast, g_video.bloom,
+            g_video.fov, (int)g_video.fxaa, g_video.sharpen, (int)g_video.fps120);
     fprintf(f, "rumble_strength=%d\nface_labels=%d\ndeadzone_l=%d\ndeadzone_r=%d\ninvert_lx=%d\ninvert_ly=%d\ninvert_rx=%d\ninvert_ry=%d\n"
                "motion=%d\n",
             g_input.rumble_strength, (int)g_input.face_labels, g_input.deadzone_l, g_input.deadzone_r, (int)g_input.invert_lx,
@@ -157,6 +168,8 @@ void save() {
     fprintf(f, "debug_env=%s\n", env.c_str());
     fprintf(f, "nsp_path=%s\nkeys_path=%s\nskip_prelaunch=%d\n", g_launch.nsp_path.c_str(), g_launch.keys_path.c_str(),
             (int)g_launch.skip_prelaunch);
+    fprintf(f, "save_dir=%s\n", g_launch.save_dir.c_str());
+    if (!g_launch.save_copy_from.empty()) fprintf(f, "save_copy_from=%s\n", g_launch.save_copy_from.c_str());
     fclose(f);
 }
 

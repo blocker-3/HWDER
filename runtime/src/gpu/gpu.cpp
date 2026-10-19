@@ -1,5 +1,6 @@
 // GPU command processor: GPFIFO entries -> pushbuffer methods -> engines.
 #include "gpu.h"
+#include "gpu/graphics_audit.h"
 
 #include <windows.h>
 
@@ -272,10 +273,12 @@ static void i2m_data(Channel* ch, EngineI2M& e, u32 value) {
     MemoryManager* mm = ch->mm;
     if (!e.block_linear) {
         if (e.line_count <= 1 || e.pitch == e.line_length) {
+            rnd->audit_cpu_write((u64)mm->translate(e.dst), total);
             rnd->invalidate_region((u64)mm->translate(e.dst), total);
             mm->write(e.dst, e.data.data(), total);
         } else {
             for (u32 l = 0; l < e.line_count; l++) mm->write(e.dst + (u64)l * e.pitch, &e.data[(size_t)l * e.line_length], e.line_length);
+            rnd->audit_cpu_write((u64)mm->translate(e.dst), (u64)e.pitch * e.line_count);
             rnd->invalidate_region((u64)mm->translate(e.dst), (u64)e.pitch * e.line_count);
         }
         return;
@@ -600,6 +603,7 @@ static void dma_copy(Channel* ch) {
             u64 total = (u64)len * bpp;
             for (u32 l = 0; l < lines; l++) {
                 u64 row = dst + (u64)l * pitch_out;
+                rnd->audit_cpu_write((u64)mm->translate(row), total);
                 rnd->invalidate_region((u64)mm->translate(row), total);
                 for (u64 x = 0; x < total; x += comp_size) mm->write(row + x, &cv, comp_size);
             }
@@ -613,6 +617,7 @@ static void dma_copy(Channel* ch) {
             u8* s = mm->translate(src);
             u8* d = mm->translate(dst);
             rnd->flush_region((u64)s, total);
+            rnd->audit_cpu_write((u64)d, total);
             rnd->invalidate_region((u64)d, total);
             if (s && d && mm->contiguous_size(src, total) == total && mm->contiguous_size(dst, total) == total) {
                 memmove(d, s, total);
@@ -627,6 +632,7 @@ static void dma_copy(Channel* ch) {
                 rnd->flush_region((u64)mm->translate(src + (u64)l * pitch_in), row_bytes);
                 mm->read(src + (u64)l * pitch_in, tmp.data(), row_bytes);
                 mm->write(dst + (u64)l * pitch_out, tmp.data(), row_bytes);
+                rnd->audit_cpu_write((u64)mm->translate(dst + (u64)l * pitch_out), row_bytes);
                 rnd->invalidate_region((u64)mm->translate(dst + (u64)l * pitch_out), row_bytes);
             }
         }
@@ -650,6 +656,7 @@ static void dma_copy(Channel* ch) {
         std::vector<u8> tmp((size_t)pitch_out * lines);
         deswizzle(bl, s, tmp.data(), pitch_out, ox, oy, (u32)row_bytes, lines, layer);
         for (u32 l = 0; l < lines; l++) mm->write(dst + (u64)l * pitch_out, &tmp[(size_t)l * pitch_out], row_bytes);
+        rnd->audit_cpu_write((u64)mm->translate(dst), (u64)pitch_out * lines);
         rnd->invalidate_region((u64)mm->translate(dst), (u64)pitch_out * lines);
         return;
     }
@@ -885,6 +892,7 @@ static void execute_inner(Channel* ch, Submission& s) {
     if (s.wait) {
         // Bounded so a fence that can only be produced by later queued work cannot wedge the GPU thread.
         while (!nv::syncpoint_wait(s.wait_fence.id, s.wait_fence.value, 100 * 1000000)) {
+            audit::fence_timeouts.fetch_add(1, std::memory_order_relaxed);
             LOG_ONCE("gpu: submission waiting >100 ms for syncpt %u >= %u (value %u) - continuing", s.wait_fence.id,
                      s.wait_fence.value, nv::syncpoint_read(s.wait_fence.id));
             break;

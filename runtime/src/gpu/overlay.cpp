@@ -1,6 +1,7 @@
 #include "gpu/overlay.h"
 #include "gpu/overlay_ui.h"
 
+#include "fs/save_dir.h"
 #include "gpu/settings.h"
 #include "hid/host_input.h"
 #include "hwder/runtime.h"
@@ -334,7 +335,7 @@ static void post_window_change() {
 static std::string save_path() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    for (auto& t : fs::directory_iterator("save", ec))
+    for (auto& t : fs::directory_iterator(fs::path(hwfs::active_save_root()), ec))
         for (auto& u : fs::directory_iterator(t.path(), ec)) {
             fs::path p = u.path() / "zmha.bin";
             if (fs::exists(p, ec)) return p.string();
@@ -372,27 +373,10 @@ static void restart_marker(bool pending) {
 
 void opt_interpolation(bool& changed) {
     settings::Video& v = settings::video();
-    {
-        // interp_hz: 0 off, -1 match the display, else a fixed output rate. Greyed out while the feature is stubbed.
-        const int values[] = {0, -1, 120, 144};
-        const char* items[] = {"Off (60 fps)", "Match display refresh", "120 Hz", "144 Hz"};
-        int cur = 0;
-        if (settings::kInterpEnabled)
-            for (int i = 0; i < 4; i++)
-                if (values[i] == v.interp_hz) cur = i;
-        ImGui::BeginDisabled(!settings::kInterpEnabled);
-        if (ImGui::Combo("Frame interpolation (Experimental)", &cur, items, 4)) {
-            v.interp_hz = values[cur];
-            changed = true;
-        }
-        ImGui::EndDisabled();
-        help(settings::kInterpEnabled
-                 ? "Experimental: re-renders each game frame with blended 3D positions for 120/144 Hz panels.\n"
-                   "Expect flashing, ghosting and broken effects in menus and gameplay."
-                 : "Experimental: re-renders each game frame with blended 3D positions for 120/144 Hz panels.\n"
-                   "Expect flashing, ghosting and broken effects in menus and gameplay.\n"
-                   "Disabled in this build; the game stays at its native 60 fps.");
-    }
+    if (ImGui::Checkbox("120 fps (experimental)", &v.fps120)) changed = true;
+    help("The game keeps its 60 steps per second; between two steps it draws an extra frame with the camera,\n"
+         "characters and objects halfway between them, shown at 120 Hz. Menus and loading screens stay at 60.\n"
+         "Best on a 120 Hz screen or with G-Sync/FreeSync. Very busy views can drop some extra frames.");
 }
 
 void opt_borderless(bool& changed) {
@@ -544,6 +528,29 @@ static void tab_graphics(bool& changed) {
                                    rw, rh, cost);
         }
     }
+
+    section("Picture");
+    if (ImGui::SliderInt("Contrast", &v.contrast, 50, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast of the 3D picture around mid-grey, applied in the game's own tonemap pass, so the HUD and\n"
+         "menus keep their colours. 100% = the game's look. Applies immediately.");
+    if (ImGui::SliderInt("Bloom", &v.bloom, 0, 200, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Strength of the glow around bright areas, relative to the game's own (0% = off, 100% = unchanged).\n"
+         "Applies immediately.");
+    if (v.contrast != 100 || v.bloom != 100) {
+        if (ImGui::Button("Reset picture")) {
+            v.contrast = v.bloom = 100;
+            changed = true;
+        }
+    }
+    if (ImGui::SliderInt("Field of view", &v.fov, 70, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("How much of the scene the camera shows, relative to the game's own (100% = unchanged). Higher\n"
+         "shows more around your warrior. Applies immediately.");
+    if (ImGui::Checkbox("Anti-aliasing (FXAA)", &v.fxaa)) changed = true;
+    help("Smooths jagged edges on the 3D picture (the game has no anti-aliasing of its own). The HUD is not\n"
+         "affected. Small GPU cost.");
+    if (ImGui::SliderInt("Sharpening", &v.sharpen, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
+    help("Contrast-adaptive sharpening of the 3D picture (0% = off). Counters the game's soft look,\n"
+         "and the softening from FXAA. The HUD is not affected.");
 
     section("Shaders");
     settings::Debug& d = settings::debug();
@@ -731,11 +738,14 @@ static void tab_input(bool& changed) {
                         hid::host_button_name(hid::kHostLeftShoulder, type), hid::host_button_name(hid::kHostRightShoulder, type));
 }
 
-static void tab_gameplay() {
+static void tab_gameplay(bool& changed) {
+    section("Save folder");
+    opt_save_folder(true, changed);
+
     section("Cheats (save file)");
     static std::string status;
     std::string sp = save_path();
-    ImGui::TextDisabled("%s", sp.empty() ? "no save found under ./save" : sp.c_str());
+    ImGui::TextDisabled("%s", sp.empty() ? "no save found in the save folder" : sp.c_str());
     if (ImGui::Button("Import unlocks from reference")) {
         // Reference = a 100% save at save_reference/zmha.bin. Every byte that is 0 here and 1 there
         // is set (unlock/clear flags); counters and other values are left alone. The game reads its
@@ -902,7 +912,7 @@ static void build_ui(VkExtent2D extent) {
             case kGraphics: tab_graphics(changed); break;
             case kAudio: tab_audio(changed); break;
             case kInput: tab_input(changed); break;
-            case kGameplay: tab_gameplay(); break;
+            case kGameplay: tab_gameplay(changed); break;
             case kTools: tab_tools(changed); break;
             }
             ImGui::PopItemWidth();

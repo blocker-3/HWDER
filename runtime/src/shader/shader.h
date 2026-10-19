@@ -65,6 +65,7 @@ struct PushConstants {
     u32 base_vertex, base_instance;
     u32 rt_mask;               // enabled render targets
     u32 pad;
+    float picture[4];          // Settings > Graphics picture controls: contrast, bloom scale (1 = the game's look)
 };
 
 struct Program {
@@ -102,6 +103,11 @@ struct Options {
     // Alternatively leave it false and use a negative-height viewport.
     bool flip_y = false;
     bool convert_depth_mode = false;  // GL [-1,1] -> Vulkan [0,1] in the last pre-raster stage: z = (z + w) / 2
+    // Fragment: the game's final tonemap pass (the renderer recognises it by shader key). Reads of
+    // c[bloom_cbuf][bloom_offset], the weight the pass adds bloom with, are scaled by picture[1], and
+    // render target 0's colour gets contrast picture[0] around mid-grey.
+    bool picture_controls = false;
+    u32 bloom_cbuf = 0, bloom_offset = 0;
 };
 // Push constants: the translator only declares the block when a shader needs it (currently
 // base_instance for InstanceId, which is gl_InstanceIndex - base_instance as on Maxwell).

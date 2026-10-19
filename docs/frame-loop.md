@@ -224,3 +224,14 @@ Since triple buffering, the side bands of "Fill ultrawide" were blacked out on f
 pass had run before the previous present (the check compared frame numbers). Now each image remembers
 whether a full-width pass wrote it since it was last presented; the log line "ultrawide side bands
 blacked out on N of 600 presents" stays at 0 in battle.
+
+## Menu option (merged into main, 2026-10-19)
+
+Settings > Display > Frame rate > "120 fps (experimental)", off by default, saved as `fps120=` in
+hwder_settings.ini and switchable while playing. It turns on stages b-d (in-between frames, blended
+camera and transforms, triple buffering, 120 Hz release only while extra frames are drawn). Test
+overrides: `HWDER_GAME_INTERP=0/1`, `HWDER_FPS=<Hz>`. The old greyed-out "Frame interpolation" entry
+(GPU replay, still env-only through `HWDER_INTERP`) is gone from the menu.
+
+Merge check (autoplay battle, fixed save): option off: ~17 ms frames, no extra frames; option on:
+295/295 extra frames, 8.48 ms frames, menus at 16.7 ms, stage c 0.11 ms per tick.

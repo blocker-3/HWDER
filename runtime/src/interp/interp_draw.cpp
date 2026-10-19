@@ -28,6 +28,7 @@
 #include <map>
 
 #include "hwder/runtime.h"
+#include "gpu/settings.h"
 #include "interp/camera.h"
 
 #pragma clang fp contract(off)
@@ -47,9 +48,11 @@ extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last p
 
 namespace interp {
 
+// Settings > Display > "120 fps" (settings::video().fps120, switchable while playing); HWDER_GAME_INTERP=0/1
+// overrides it for tests.
 bool game_interp() {
-    static const bool on = getenv("HWDER_GAME_INTERP") && atoi(getenv("HWDER_GAME_INTERP")) != 0;
-    return on;
+    static const int env = getenv("HWDER_GAME_INTERP") ? (atoi(getenv("HWDER_GAME_INTERP")) != 0) : -1;
+    return env >= 0 ? env != 0 : settings::video().fps120;
 }
 
 }  // namespace interp

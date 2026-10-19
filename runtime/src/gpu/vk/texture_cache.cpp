@@ -7,6 +7,7 @@
 
 #include "kernel/kernel.h"
 #include "vk_common.h"
+#include "gpu/graphics_audit.h"
 
 namespace gpu::vk {
 
@@ -983,6 +984,19 @@ void TextureCache::flush(u64 addr, u64 size) {
             continue;
         }
         download(img);
+    }
+}
+
+void TextureCache::audit_cpu_write(u64 addr, u64 size) {
+    std::vector<Image*> overlaps;
+    collect_overlaps(addr, size, overlaps);
+    for (Image* img : overlaps) {
+        if (!img->gpu_modified) continue;
+        if (++audit::cpu_image_writes == 1)
+            hw_log("gfx-audit: first CPU image write: dst %llx bytes %llu image %llx bytes %llu (%ux%u, format %u)",
+                   (unsigned long long)addr, (unsigned long long)size, (unsigned long long)img->addr,
+                   (unsigned long long)img->guest_size, img->info.width, img->info.height, (unsigned)img->info.fmt.vk);
+        break; // count destination ranges, not aliases of the same range
     }
 }
 
