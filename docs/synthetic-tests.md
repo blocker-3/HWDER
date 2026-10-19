@@ -17,6 +17,12 @@ been run locally; a hosted Actions run requires separately authorized publicatio
 
 Coverage:
 
+- Four Python build-lock regressions run on every invocation, including
+  `--python-only`. They compare the actual host Local AppData from the registry
+  against the known-folder result, reject environment/package redirection,
+  exercise contention with an empty legacy byte-lock file across processes,
+  verify exception release and check that single-file compilation holds the lock.
+  Tests use temporary synthetic lock files and never reserve the host build lock.
 - Existing warmup-cache tests exercise canonical codec round trips, malformed
   payloads, bounded parsing, exact shader identity, private-history retention,
   failed atomic replacement and preservation of previous cache bytes.
@@ -29,7 +35,7 @@ Coverage:
   preservation over 8,896 edge/random execution cases. Fixtures are public ISA
   values rather than instructions sampled from a game dump.
 - When the separately reviewed first-run candidate is integrated, its tracked
-  `test_first_run.py` suite runs automatically. That suite has 23 synthetic tests,
+  `test_first_run.py` suite runs automatically. The reviewed candidate has 33 synthetic tests,
   including cache invalidation/recovery, coordinator locking, bounded container
   parsing and source-package exclusions with per-file hashes. Its absence is
   reported as an explicit skip and workflow warning; partial integration fails.
