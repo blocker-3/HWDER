@@ -50,7 +50,11 @@ Launch& launch() { return g_launch; }
 // display::init, ahead of Vulkan, the services and the game). Variables set outside the game win.
 static void apply_env() {
     auto set = [](const char* name) {
+#ifdef _WIN32
         if (!getenv(name)) _putenv_s(name, "1");
+#else
+        setenv(name, "1", 0);  // Existing values, including an empty value, take precedence.
+#endif
     };
     if (!g_debug.async_shaders) set("HWDER_SYNC_PIPELINES");
     for (const std::string& name : g_debug.env) set(name.c_str());
