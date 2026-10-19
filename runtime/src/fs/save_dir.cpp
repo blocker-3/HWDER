@@ -1,5 +1,7 @@
 // Save folder location and the copy offered when it changes (save_dir.h).
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include "fs/save_dir.h"
 #include "fs/save_folder_selection.h"
@@ -19,6 +21,7 @@ namespace {
 
 namespace fsys = std::filesystem;
 
+#ifdef _WIN32
 std::wstring strip_prefix(std::wstring w) {
     if (w.rfind(L"\\\\?\\UNC\\", 0) == 0) return L"\\\\" + w.substr(8);
     if (w.rfind(L"\\\\?\\", 0) == 0) return w.substr(4);
@@ -49,13 +52,34 @@ bool inside(const std::string& child, const std::string& parent) {
     if (p.back() != L'\\') p += L'\\';
     return c.size() > p.size() && CompareStringOrdinal(c.c_str(), (int)p.size(), p.c_str(), (int)p.size(), TRUE) == CSTR_EQUAL;
 }
+#else
+HostPath normalize(const std::string& dir) {
+    std::error_code error;
+    const auto path = fsys::absolute(fsys::u8path(dir), error);
+    if (error) return fsys::u8path(dir).lexically_normal();
+    const auto resolved = fsys::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : resolved;
+}
+HostPath long_path(const std::string& dir) { return normalize(dir); }
+bool inside(const std::string& child, const std::string& parent) {
+    const auto relative = normalize(child).lexically_relative(normalize(parent));
+    return !relative.empty() && relative != "." && *relative.begin() != "..";
+}
+#endif
+std::string display_path(const HostPath& path) {
+#ifdef _WIN32
+    return wide_to_utf8(strip_prefix(path.native()));
+#else
+    return path_utf8(path);
+#endif
+}
 
 std::mutex g_m;
-std::wstring g_active;  // set when the game first opens a save
+HostPath g_active;  // set when the game first opens a save
 
 }  // namespace
 
-std::string default_save_dir() { return wide_to_utf8(strip_prefix(exe_dir()) + L"\\save"); }
+std::string default_save_dir() { return display_path(exe_dir() / "save"); }
 
 std::string chosen_save_dir() {
     const std::string& s = settings::launch().save_dir;
@@ -63,12 +87,12 @@ std::string chosen_save_dir() {
     std::string root, report;
     // Also repair the interpretation of a leaf already saved by an older picker.
     // Do not rewrite preferences or move/copy any save files here.
-    return resolve_save_folder(s, root, report) ? root : wide_to_utf8(normalize(s));
+    return resolve_save_folder(s, root, report) ? root : display_path(HostPath(normalize(s)));
 }
 
 bool resolve_save_folder(const std::string& selected, std::string& root, std::string& report) {
     const auto result = inspect_save_folder(fsys::path(normalize(selected)));
-    root = result.error ? "" : wide_to_utf8(result.root.wstring());
+    root = result.error ? "" : display_path(result.root);
     report = result.error ? result.error : result.account_leaf
         ? "Recognized the account save folder. The save root used by the game is " + root + "." : "";
     return !result.error;
@@ -76,34 +100,38 @@ bool resolve_save_folder(const std::string& selected, std::string& root, std::st
 
 bool resolve_save_file(const std::string& file, std::string& root, std::string& import_from, std::string& report) {
     const auto result = inspect_save_file(fsys::path(normalize(file)));
-    root = result.root.empty() ? "" : wide_to_utf8(result.root.wstring());
-    import_from = result.import_from.empty() ? "" : wide_to_utf8(result.import_from.wstring());
+    root = result.root.empty() ? "" : display_path(result.root);
+    import_from = result.import_from.empty() ? "" : display_path(result.import_from);
     report = result.error ? result.error : "";
     return !result.error;
 }
 
 bool is_save_file_folder(const std::string& dir) {
     std::error_code ec;
-    return fsys::is_regular_file(fsys::path(long_path(dir)) / L"zmha.bin", ec);
+    return fsys::is_regular_file(fsys::path(long_path(dir)) / "zmha.bin", ec);
 }
 
-std::wstring active_save_root() {
+HostPath active_save_root() {
     std::lock_guard<std::mutex> l(g_m);
     if (g_active.empty()) {
         g_active = long_path(chosen_save_dir());
-        hw_log("fs: save folder %s", wide_to_utf8(strip_prefix(g_active)).c_str());
+        hw_log("fs: save folder %s", display_path(g_active).c_str());
     }
     return g_active;
 }
 
 std::string active_save_dir() {
     std::lock_guard<std::mutex> l(g_m);
-    return g_active.empty() ? chosen_save_dir() : wide_to_utf8(strip_prefix(g_active));
+    return g_active.empty() ? chosen_save_dir() : display_path(g_active);
 }
 
 bool same_dir(const std::string& a, const std::string& b) {
-    std::wstring x = normalize(a), y = normalize(b);
+#ifdef _WIN32
+    const auto x = normalize(a), y = normalize(b);
     return CompareStringOrdinal(x.c_str(), (int)x.size(), y.c_str(), (int)y.size(), TRUE) == CSTR_EQUAL;
+#else
+    return normalize(a) == normalize(b);
+#endif
 }
 
 bool has_files(const std::string& dir) {
@@ -115,8 +143,8 @@ bool has_files(const std::string& dir) {
 
 namespace {
 
-// copy_saves and import_save: copy `files` (relative to from, or every file under it when empty) into to\sub,
-// backing up what they replace first into <to>.bak-<date>-<time>\sub.
+// copy_saves and import_save: copy `files` (relative to from, or every file under it when empty) into to/sub,
+// backing up what they replace first into <to>.bak-<date>-<time>/sub.
 bool copy_files(const std::string& from, const std::string& to, const fsys::path& sub, std::vector<fsys::path> files,
                 std::string& report) {
     if (same_dir(from, to)) {
@@ -127,11 +155,19 @@ bool copy_files(const std::string& from, const std::string& to, const fsys::path
         report = "Can't copy: the new folder is inside the old save folder.";
         return false;
     }
-    const fsys::path src = long_path(from), dst = fsys::path(long_path(to)) / sub;
+    const fsys::path src = long_path(from), root = long_path(to), dst = root / sub;
     std::error_code ec;
-    if (files.empty())  // relative to src
-        for (fsys::recursive_directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec))
-            if (it->is_regular_file(ec)) files.push_back(fsys::relative(it->path(), src, ec));
+    if (files.empty()) {  // relative to src
+        for (fsys::recursive_directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec)) {
+#ifndef _WIN32
+            if (it->is_symlink(ec)) {
+                report = "Can't copy: the save folder contains a symbolic link.";
+                return false;
+            }
+#endif
+            if (it->is_regular_file(ec)) files.push_back(it->path().lexically_relative(src));
+        }
+    }
     if (ec) {
         report = "Can't read " + from + ": " + ec.message();
         return false;
@@ -144,20 +180,39 @@ bool copy_files(const std::string& from, const std::string& to, const fsys::path
     char stamp[32];
     time_t now = time(nullptr);
     tm lt;
+#ifdef _WIN32
     localtime_s(&lt, &now);
+#else
+    localtime_r(&now, &lt);
+#endif
     strftime(stamp, sizeof(stamp), ".bak-%Y%m%d-%H%M%S", &lt);
-    const std::wstring dw = normalize(to);
-    const fsys::path backup = (dw.size() > 3 ? fsys::path(long_path(to) + utf8_to_wide(stamp))                    // beside it
-                                             : fsys::path(long_path(to) + L"\\hwder-save" + utf8_to_wide(stamp))) /  // drive root
-                              sub;
+    fsys::path backup_root = root;
+    if (root == root.root_path()) backup_root /= std::string("hwder-save") + stamp;  // drive root
+    else backup_root += fsys::u8path(stamp);                                        // beside it
+    const fsys::path backup = backup_root / sub;
+#ifndef _WIN32
+    // Validate all targets before any copy, including paths through existing
+    // directories. A static symlink must not redirect a save write outside to.
+    const auto destination_root = fsys::weakly_canonical(root, ec);
+    if (ec) { report = "Can't resolve the new save folder: " + ec.message(); return false; }
+    for (const auto& rel : files) {
+        const auto resolved = fsys::weakly_canonical(dst / rel, ec);
+        const auto relative = resolved.lexically_relative(destination_root);
+        if (ec || relative.empty() || *relative.begin() == ".." || fsys::is_symlink(dst / rel, ec)) {
+            report = "Can't copy: a destination save path resolves outside the save folder or is a symbolic link.";
+            return false;
+        }
+        // A missing destination is expected and may set ENOENT in is_symlink.
+        ec.clear();
+    }
+#endif
     size_t backed_up = 0;
     for (const fsys::path& rel : files) {
         if (!fsys::exists(dst / rel, ec)) continue;
         fsys::create_directories((backup / rel).parent_path(), ec);
         if (!ec) fsys::copy_file(dst / rel, backup / rel, fsys::copy_options::overwrite_existing, ec);
         if (ec) {
-            report = "Nothing was copied: backing up " + wide_to_utf8(strip_prefix((dst / rel).wstring())) + " failed (" +
-                     ec.message() + ").";
+            report = "Nothing was copied: backing up " + display_path(dst / rel) + " failed (" + ec.message() + ").";
             return false;
         }
         backed_up++;
@@ -166,15 +221,15 @@ bool copy_files(const std::string& from, const std::string& to, const fsys::path
         fsys::create_directories((dst / rel).parent_path(), ec);
         if (!ec) fsys::copy_file(src / rel, dst / rel, fsys::copy_options::overwrite_existing, ec);
         if (ec) {
-            report = "Copying " + wide_to_utf8(rel.wstring()) + " failed (" + ec.message() + ")." +
-                     (backed_up ? " The files it replaced are in " + wide_to_utf8(strip_prefix(backup.wstring())) + "." : "");
+            report = "Copying " + path_utf8(rel) + " failed (" + ec.message() + ")." +
+                     (backed_up ? " The files it replaced are in " + display_path(backup) + "." : "");
             return false;
         }
     }
     report = "Copied " + std::to_string(files.size()) + (files.size() == 1 ? " file" : " files") + " from " + from + ".";
     if (backed_up)
         report += " The " + std::to_string(backed_up) + " it replaced " + (backed_up == 1 ? "is" : "are") + " backed up in " +
-                  wide_to_utf8(strip_prefix(backup.wstring())) + ".";
+                  display_path(backup) + ".";
     return true;
 }
 
@@ -185,13 +240,13 @@ bool copy_saves(const std::string& from, const std::string& to, std::string& rep
 }
 
 bool import_save(const std::string& from, const std::string& root, std::string& report) {
-    const fsys::path sub = fsys::path(L"0100AE00096EA000") / L"48574445525F55530000000000000001";
-    const std::string leaf = wide_to_utf8((fsys::path(normalize(root)) / sub).wstring());
+    const fsys::path sub = fsys::path("0100AE00096EA000") / "48574445525F55530000000000000001";
+    const std::string leaf = display_path(HostPath(normalize(root)) / sub);
     if (inside(leaf, from) || inside(from, leaf) || same_dir(from, leaf)) {
         report = "That save is already in the save folder.";
         return false;
     }
-    return copy_files(from, root, sub, {L"zmha.bin", L"zmhasd.bin"}, report);
+    return copy_files(from, root, sub, {"zmha.bin", "zmhasd.bin"}, report);
 }
 
 void run_pending_save_copy() {
@@ -206,11 +261,13 @@ void run_pending_save_copy() {
     // (An import never changed the folder.)
     if (!ok && !is_save_file_folder(from)) l.save_dir = same_dir(from, default_save_dir()) ? "" : from;
     settings::save();
+#ifdef _WIN32
     if (!ok && !debug::flag(debug::Mute))
         MessageBoxW(nullptr, utf8_to_wide("Your saves could not be copied to the new save folder.\n\n" + report +
                                           "\n\nThe game keeps using " + from + ". Choose the folder again in the menu to retry.")
                                  .c_str(),
                     L"HWDER", MB_ICONWARNING | MB_OK);
+#endif
 }
 
 }  // namespace hwfs

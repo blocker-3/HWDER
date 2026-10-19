@@ -6,7 +6,9 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #endif
 
@@ -15,7 +17,8 @@ namespace host {
 namespace { HANDLE native(FileHandle file) { return reinterpret_cast<HANDLE>(file); } }
 FileHandle file_open(const std::filesystem::path& path, unsigned mode) {
     DWORD access = (mode & file_read ? GENERIC_READ : 0) | (mode & file_write ? GENERIC_WRITE : 0);
-    return reinterpret_cast<FileHandle>(CreateFileW(path.c_str(), access ? access : GENERIC_READ,
+    auto preferred = path;preferred.make_preferred();
+    return reinterpret_cast<FileHandle>(CreateFileW(preferred.c_str(), access ? access : GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         mode & file_create_new ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
 }
@@ -43,10 +46,15 @@ bool file_size(FileHandle file, std::uint64_t& size) {
     size = std::uint64_t(result.QuadPart);return true;
 }
 bool file_flush(FileHandle file) { return FlushFileBuffers(native(file)) != 0; }
+bool file_rename_new(const std::filesystem::path& from, const std::filesystem::path& to) {
+    auto source = from, destination = to;source.make_preferred();destination.make_preferred();
+    return MoveFileExW(source.c_str(), destination.c_str(), 0) != 0;
+}
 unsigned long file_error() { return GetLastError(); }
 bool file_times(const std::filesystem::path& path, FileTimes& result) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
+    auto preferred = path;preferred.make_preferred();
+    if (!GetFileAttributesExW(preferred.c_str(), GetFileExInfoStandard, &data)) return false;
     auto seconds = [](const FILETIME& time) {
         const std::uint64_t ticks = (std::uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime;
         return ticks < 116444736000000000ull ? 0ull : (ticks - 116444736000000000ull) / 10000000;
@@ -97,6 +105,9 @@ bool file_flush(FileHandle file) {
     int result;
     do { result = fsync(int(file)); } while (result < 0 && errno == EINTR);
     return result == 0;
+}
+bool file_rename_new(const std::filesystem::path& from, const std::filesystem::path& to) {
+    return syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE) == 0;
 }
 unsigned long file_error() { return static_cast<unsigned long>(errno); }
 bool file_times(const std::filesystem::path& path, FileTimes& result) {

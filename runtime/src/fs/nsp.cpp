@@ -8,14 +8,24 @@
 //   titlekey       rights id set: titlekey from the ticket (or title.keys), AES-ECB with titlekek_<keygen>
 //   sections       AES-128-CTR, counter = ctr_hi (8 bytes from the FS header, byte-reversed) ++ (offset >> 4)
 //   section data   hash type 2 (HierarchicalSha256 / PFS0): last layer; hash type 3 (IVFC): level 5
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include <openssl/evp.h>
+#include <openssl/crypto.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <array>
+#include <climits>
+#include <cstdlib>
+#include <cctype>
+#include "host/file.h"
 
 #include "fs_internal.h"
 #include "nsp.h"
@@ -25,6 +35,7 @@ namespace hwfs::nsp {
 namespace {
 
 // ---------------------------------------------------------------- AES (CNG, AES-NI backed)
+#ifdef _WIN32
 class Aes {
 public:
     Aes() = default;
@@ -65,16 +76,49 @@ public:
 private:
     BCRYPT_KEY_HANDLE key_ = nullptr;
 };
+#else
+// OpenSSL 3 AES-128 ECB primitive. Keep CTR/XTS counter and tweak conventions
+// below identical on both hosts; contexts are per-call for concurrent reads.
+class Aes {
+public:
+    Aes() = default;
+    Aes(const Aes&) = delete;
+    Aes& operator=(const Aes&) = delete;
+    Aes(Aes&& other) noexcept : key_(other.key_), initialized_(other.initialized_) { other.clear(); }
+    Aes& operator=(Aes&& other) noexcept {
+        if (this != &other) { clear();key_ = other.key_;initialized_ = other.initialized_;other.clear(); }
+        return *this;
+    }
+    ~Aes() { clear(); }
+    bool init(const u8 key[16]) { std::memcpy(key_.data(), key, 16);initialized_ = true;return true; }
+    bool encrypt(u8* data, size_t size) const { return crypt(data, size, true); }
+    bool decrypt(u8* data, size_t size) const { return crypt(data, size, false); }
+private:
+    void clear() { OPENSSL_cleanse(key_.data(), key_.size());initialized_ = false; }
+    bool crypt(u8* data, size_t size, bool encrypt) const {
+        if (!initialized_ || size > INT_MAX || size % 16) return false;
+        std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> context(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+        if (!context || EVP_CipherInit_ex(context.get(), EVP_aes_128_ecb(), nullptr, key_.data(), nullptr, encrypt ? 1 : 0) != 1 ||
+            EVP_CIPHER_CTX_set_padding(context.get(), 0) != 1) return false;
+        int written = 0, final = 0;
+        return EVP_CipherUpdate(context.get(), data, &written, data, int(size)) == 1 &&
+            EVP_CipherFinal_ex(context.get(), data + written, &final) == 1 && size_t(written + final) == size;
+    }
+    std::array<u8, 16> key_{};
+    bool initialized_ = false;
+};
+#endif
 
 // XTS sector decrypt (Nintendo tweak: sector number as a big-endian 128-bit value).
-void xts_decrypt_sector(const Aes& k1, const Aes& k2, u8* data, size_t n, u64 sector) {
+bool xts_decrypt_sector(const Aes& k1, const Aes& k2, u8* data, size_t n, u64 sector) {
+    if (n % 16) return false;
     u8 t[16] = {};
     for (int i = 0; i < 8; i++) t[15 - i] = (u8)(sector >> (8 * i));
-    k2.encrypt(t, 16);
+    if (!k2.encrypt(t, 16)) return false;
     for (size_t off = 0; off < n; off += 16) {
         u8* b = data + off;
         for (int i = 0; i < 16; i++) b[i] ^= t[i];
-        k1.decrypt(b, 16);
+        if (!k1.decrypt(b, 16)) return false;
         for (int i = 0; i < 16; i++) b[i] ^= t[i];
         // t *= alpha in GF(2^128), little-endian bit order
         u8 carry = 0;
@@ -85,6 +129,7 @@ void xts_decrypt_sector(const Aes& k1, const Aes& k2, u8* data, size_t n, u64 se
         }
         if (carry) t[0] ^= 0x87;
     }
+    return true;
 }
 
 // ---------------------------------------------------------------- keys
@@ -94,7 +139,7 @@ struct Keys {
     bool has(const std::string& k) const { return prod.count(k) != 0; }
     const u8* get(const std::string& k) const {
         auto it = prod.find(k);
-        return it == prod.end() ? nullptr : it->second.data();
+        return it == prod.end() || it->second.size() < 16 ? nullptr : it->second.data();
     }
 };
 
@@ -127,12 +172,16 @@ std::string to_hex(const u8* p, size_t n) {
 }
 
 bool file_exists(const std::string& p) {
-    DWORD a = GetFileAttributesW(utf8_to_wide(p).c_str());
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    std::error_code error;
+    return std::filesystem::is_regular_file(std::filesystem::u8path(p), error);
 }
 
 void load_key_file(const std::string& path, std::map<std::string, std::vector<u8>>& into, bool lower_names) {
+#ifdef _WIN32
     FILE* f = _wfopen(utf8_to_wide(path).c_str(), L"r");
+#else
+    FILE* f = fopen(path.c_str(), "r");
+#endif
     if (!f) return;
     char line[1024];
     while (fgets(line, sizeof(line), f)) {
@@ -151,8 +200,13 @@ void load_key_file(const std::string& path, std::map<std::string, std::vector<u8
 }
 
 std::string env_str(const char* name) {  // UTF-8 (read wide: ANSI cannot spell every path)
+#ifdef _WIN32
     const wchar_t* e = _wgetenv(utf8_to_wide(name).c_str());
     return e ? wide_to_utf8(e) : std::string();
+#else
+    const char* e = std::getenv(name);
+    return e ? e : "";
+#endif
 }
 
 std::string g_pick_nsp, g_pick_keys, g_pick_update;  // set_paths(), set_update()
@@ -163,13 +217,22 @@ std::vector<std::string> key_candidates(const std::string& exe_dir) {
     std::vector<std::string> c;
     if (std::string e = env_str("HWDER_KEYS"); !e.empty()) return {e};
     if (!g_pick_keys.empty()) return {g_pick_keys};
-    c.push_back(exe_dir + "\\prod.keys");
-    c.push_back(exe_dir + "\\keys\\prod.keys");
+    c.push_back(exe_dir + "/prod.keys");
+    c.push_back(exe_dir + "/keys/prod.keys");
+#ifdef _WIN32
     if (std::string h = env_str("USERPROFILE"); !h.empty()) c.push_back(h + "\\.switch\\prod.keys");
     if (std::string a = env_str("APPDATA"); !a.empty()) {
         c.push_back(a + "\\yuzu\\keys\\prod.keys");
         c.push_back(a + "\\Ryujinx\\system\\prod.keys");
     }
+#else
+    if (std::string home = env_str("HOME"); !home.empty()) {
+        c.push_back(home + "/.switch/prod.keys");
+        const auto data = env_str("XDG_DATA_HOME"), config = env_str("XDG_CONFIG_HOME");
+        c.push_back((data.empty() ? home + "/.local/share" : data) + "/yuzu/keys/prod.keys");
+        c.push_back((config.empty() ? home + "/.config" : config) + "/Ryujinx/system/prod.keys");
+    }
+#endif
     return c;
 }
 
@@ -177,27 +240,18 @@ std::vector<std::string> key_candidates(const std::string& exe_dir) {
 class File {
 public:
     ~File() {
-        if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
+        host::file_close(h_);
     }
     bool open(const std::string& path) {
-        std::wstring w = utf8_to_wide(path);
-        h_ = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h_ == INVALID_HANDLE_VALUE) return false;
-        LARGE_INTEGER sz;
-        GetFileSizeEx(h_, &sz);
-        size_ = (u64)sz.QuadPart;
-        return true;
+        host::file_close(h_);
+        h_ = host::file_open(std::filesystem::u8path(path), host::file_read);
+        return h_ != host::invalid_file && host::file_size(h_, size_);
     }
     u64 size() const { return size_; }
     bool read(u64 off, u8* dst, u64 size) const {
         while (size) {
-            DWORD chunk = (DWORD)std::min<u64>(size, 0x10000000ull);
-            OVERLAPPED ov{};
-            ov.Offset = (DWORD)off;
-            ov.OffsetHigh = (DWORD)(off >> 32);
-            DWORD got = 0;
-            if (!ReadFile(h_, dst, chunk, &got, &ov) || got == 0) return false;
+            const auto got = host::file_read_at(h_, dst, size_t(std::min<u64>(size, 0x10000000ull)), off);
+            if (got <= 0) return false;
             dst += got;
             off += got;
             size -= got;
@@ -206,7 +260,7 @@ public:
     }
 
 private:
-    HANDLE h_ = INVALID_HANDLE_VALUE;
+    host::FileHandle h_ = host::invalid_file;
     u64 size_ = 0;
 };
 
@@ -279,7 +333,8 @@ bool Nca::open(const File& f, u64 offset, u64 size, const Keys& keys, std::strin
     if (!k1.init(hk) || !k2.init(hk + 16)) return err = "AES provider unavailable", false;
     std::vector<u8> hdr(0xC00);
     if (!f.read(offset, hdr.data(), hdr.size())) return err = "cannot read NCA header", false;
-    for (u64 s = 0; s < 6; s++) xts_decrypt_sector(k1, k2, &hdr[s * 0x200], 0x200, s);
+    for (u64 s = 0; s < 6; s++)
+        if (!xts_decrypt_sector(k1, k2, &hdr[s * 0x200], 0x200, s)) return err = "AES header decryption failed", false;
     if (memcmp(&hdr[0x200], "NCA3", 4) != 0) return err = "not an NCA3 (wrong header_key?)", false;
     content_type_ = hdr[0x205];
     u8 kaek_idx = hdr[0x207];
@@ -302,7 +357,7 @@ bool Nca::open(const File& f, u64 offset, u64 size, const Keys& keys, std::strin
         Aes a;
         if (!a.init(kek)) return err = "AES provider unavailable", false;
         memcpy(ctr_key, it->second.data(), 16);
-        a.decrypt(ctr_key, 16);
+        if (!a.decrypt(ctr_key, 16)) return err = "AES title-key decryption failed", false;
     } else {
         static const char* names[] = {"key_area_key_application", "key_area_key_ocean", "key_area_key_system"};
         if (kaek_idx > 2) return err = "bad key area index", false;
@@ -313,7 +368,7 @@ bool Nca::open(const File& f, u64 offset, u64 size, const Keys& keys, std::strin
         if (!a.init(kak)) return err = "AES provider unavailable", false;
         u8 area[0x40];
         memcpy(area, &hdr[0x300], 0x40);
-        a.decrypt(area, 0x40);
+        if (!a.decrypt(area, 0x40)) return err = "AES key-area decryption failed", false;
         memcpy(ctr_key, area + 0x20, 16);
     }
     if (!ctr_.init(ctr_key)) return err = "AES provider unavailable", false;
@@ -495,20 +550,20 @@ bool find_nsp(const std::string& exe_dir, std::string& out) {
         out = g_pick_nsp;
         return true;
     }
-    for (const std::string& dir : {exe_dir, exe_dir + "\\game"}) {
-        WIN32_FIND_DATAW fd;
-        std::wstring pat = utf8_to_wide(dir + "\\*.nsp");
-        HANDLE h = FindFirstFileW(pat.c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
+    for (const std::string& dir : {exe_dir, exe_dir + "/game"}) {
+        std::error_code error;
         std::string best;
-        do {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            std::string name = wide_to_utf8(fd.cFileName);
+        for (std::filesystem::directory_iterator it(std::filesystem::u8path(dir), error), end;
+             !error && it != end; it.increment(error)) {
+            if (!it->is_regular_file(error)) continue;
+            std::string extension = path_utf8(it->path().extension());
+            for (char& ch : extension) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+            if (extension != ".nsp") continue;
+            std::string name = path_utf8(it->path().filename());
             if (best.empty() || name < best) best = name;
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+        }
         if (!best.empty()) {
-            out = dir + "\\" + best;
+            out = dir + "/" + best;
             return true;
         }
     }
@@ -601,7 +656,7 @@ bool init(const std::string& exe_dir, std::string& error) {
     inf.nsp_found = true;
     if (!inf.keys_found)
         return fail(Status::NoKeys, inf.keys_explicit ? "prod.keys not found: " + inf.keys_path
-                                                       : "prod.keys not found. Put your prod.keys next to hwder.exe (or in %USERPROFILE%\\.switch).");
+                                                       : "prod.keys not found. Select your prod.keys or place it beside the application.");
     if (inf.key_count == 0) return fail(Status::NoKeys, "no keys could be read from " + inf.keys_path);
     hw_log("nsp: %s", nsp.c_str());
     hw_log("nsp: keys from %s (%zu keys, %zu title keys)", inf.keys_path.c_str(), st->keys.prod.size(), st->keys.titles.size());

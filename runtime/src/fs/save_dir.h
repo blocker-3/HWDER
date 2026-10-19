@@ -2,6 +2,7 @@
 // the in-game menu (settings::launch().save_dir). Paths here are UTF-8 without the \\?\ prefix.
 #pragma once
 #include <string>
+#include <filesystem>
 
 namespace hwfs {
 
@@ -15,7 +16,7 @@ bool resolve_save_folder(const std::string& selected, std::string& root, std::st
 bool resolve_save_file(const std::string& file, std::string& root, std::string& import_from, std::string& report);
 // The folder the running game uses. Fixed the first time the game opens its save; until then it follows the setting.
 std::string active_save_dir();
-std::wstring active_save_root();  // the same, with the \\?\ prefix, for the host filesystem
+std::filesystem::path active_save_root();  // native host path (extended Windows form)
 bool same_dir(const std::string& a, const std::string& b);
 bool has_files(const std::string& dir);  // any file anywhere under dir
 

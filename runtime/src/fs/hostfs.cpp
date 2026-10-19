@@ -1,9 +1,14 @@
 // IFileSystem / IFile / IDirectory backed by a host directory (save data, SD card).
+#include "host/file.h"
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <memory>
 #include <vector>
+#include <cerrno>
+#include <limits>
 
 #include "fs_internal.h"
 
@@ -39,61 +44,62 @@ bool normalize(const std::string& in, std::string* out) {
     return true;
 }
 
-u64 filetime_to_posix(const FILETIME& ft) {
-    u64 t = ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    return t < 116444736000000000ull ? 0 : (t - 116444736000000000ull) / 10000000ull;
-}
-
-bool is_dir(const std::wstring& p) {
-    DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-bool exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
-
-void create_dirs(const std::wstring& p) {
-    if (p.empty() || is_dir(p)) return;
-    size_t s = p.find_last_of(L'\\');
-    if (s != std::wstring::npos && s > 0) create_dirs(p.substr(0, s));
-    CreateDirectoryW(p.c_str(), nullptr);
-}
+bool is_dir(const HostPath& p) { std::error_code error;return std::filesystem::is_directory(p, error); }
+bool path_exists(const HostPath& p) { std::error_code error;return std::filesystem::exists(p, error); }
+void create_dirs(const HostPath& p) { std::error_code error;std::filesystem::create_directories(p, error); }
 
 // Deletes everything below dir (not dir itself).
-bool clean_dir(const std::wstring& dir) {
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
-    if (h == INVALID_HANDLE_VALUE) return true;
+bool clean_dir(const HostPath& dir) {
+#ifdef _WIN32
+    WIN32_FIND_DATAW entry{};
+    HANDLE handle = FindFirstFileExW((dir / L"*").c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
+    if (handle == INVALID_HANDLE_VALUE) return true;
     bool ok = true;
     do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        std::wstring p = dir + L"\\" + fd.cFileName;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            ok &= clean_dir(p);
-            ok &= RemoveDirectoryW(p.c_str()) != 0;
+        if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) continue;
+        const auto path = dir / entry.cFileName;
+        if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            ok &= clean_dir(path);ok &= RemoveDirectoryW(path.c_str()) != 0;
         } else {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
-            ok &= DeleteFileW(p.c_str()) != 0;
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+            ok &= DeleteFileW(path.c_str()) != 0;
         }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    return ok;
+    } while (FindNextFileW(handle, &entry));
+    FindClose(handle);return ok;
+#else
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end; it.increment(error)) {
+        // remove_all removes a symlink itself and never follows its target.
+        std::filesystem::remove_all(it->path(), error);
+        if (error) return false;
+    }
+    return !error;
+#endif
 }
 
 // Shared per-filesystem state: the root, plus how the guest named it in logs.
 struct FsRoot {
-    std::wstring root;  // "\\?\C:\...\save\<title>\<user>" (no trailing slash)
+    HostPath root;  // native absolute path below the selected save/SD/RomFS root
     std::string label;
     bool read_only = false;
-    std::wstring host(const std::string& norm) const {
+    HostPath host(const std::string& norm) const {
         if (norm == "/") return root;
-        std::wstring w = utf8_to_wide(norm);
-        std::replace(w.begin(), w.end(), L'/', L'\\');
-        return root + w;
+        const auto candidate = (root / std::filesystem::u8path(norm.substr(1))).make_preferred();
+#ifndef _WIN32
+        // A host symlink must not let a normalized guest path escape its root.
+        std::error_code error;
+        const auto base = std::filesystem::weakly_canonical(root, error);if (error) return {};
+        const auto target = std::filesystem::weakly_canonical(candidate, error);if (error) return {};
+        const auto relative = target.lexically_relative(base);
+        if (relative.empty() || *relative.begin() == "..") return {};
+#endif
+        return candidate;
     }
 };
 
 class IFile : public FsService {
 public:
-    IFile(HANDLE h, u32 mode, std::string path) : FsService("IFile"), h_(h), mode_(mode), path_(std::move(path)) {
+    IFile(host::FileHandle h, u32 mode, std::string path) : FsService("IFile"), h_(h), mode_(mode), path_(std::move(path)) {
         reg(0, [this](Request& rq, Response& rs) {  // Read(u32 option, s64 offset, s64 size, B buffer) -> s64
             rq.pop<u32>();
             s64 off = rq.pop<s64>();
@@ -105,13 +111,9 @@ public:
             u64 want = std::min<u64>((u64)size, b.size), done = 0;
             u8* dst = (u8*)b.addr;
             while (done < want) {
-                OVERLAPPED ov{};
                 u64 o = (u64)off + done;
-                ov.Offset = (DWORD)o;
-                ov.OffsetHigh = (DWORD)(o >> 32);
-                DWORD got = 0;
-                DWORD chunk = (DWORD)std::min<u64>(want - done, 0x40000000ull);
-                if (!ReadFile(h_, dst + done, chunk, &got, &ov) || got == 0) break;
+                const auto got = host::file_read_at(h_, dst + done, size_t(std::min<u64>(want - done, 0x40000000ull)), o);
+                if (got <= 0) break;
                 done += got;
             }
             if (trace_enabled())
@@ -130,48 +132,41 @@ public:
             u64 want = std::min<u64>((u64)size, b.size), done = 0;
             const u8* src = (const u8*)b.addr;
             while (done < want) {
-                OVERLAPPED ov{};
                 u64 o = (u64)off + done;
-                ov.Offset = (DWORD)o;
-                ov.OffsetHigh = (DWORD)(o >> 32);
-                DWORD put = 0;
-                DWORD chunk = (DWORD)std::min<u64>(want - done, 0x40000000ull);
-                if (!WriteFile(h_, src + done, chunk, &put, &ov) || put == 0) {
-                    hw_log("fs: write to %s failed (error %lu)", path_.c_str(), GetLastError());
+                const auto put = host::file_write_at(h_, src + done, size_t(std::min<u64>(want - done, 0x40000000ull)), o);
+                if (put <= 0) {
+                    hw_log("fs: write to %s failed (error %lu)", path_.c_str(), host::file_error());
                     return void(rs.result = ResultUsableSpaceNotEnough);
                 }
                 done += put;
             }
-            if (option & 1) FlushFileBuffers(h_);
+            if (option & 1) host::file_flush(h_);
             if (trace_enabled())
                 hw_log("fs: file write %s 0x%llx+0x%llx", path_.c_str(), (unsigned long long)off, (unsigned long long)want);
         });
         reg(2, [this](Request&, Response&) {  // Flush
-            if (mode_ & kOpenWrite) FlushFileBuffers(h_);
+            if (mode_ & kOpenWrite) host::file_flush(h_);
         });
         reg(3, [this](Request& rq, Response& rs) {  // SetSize(s64)
             s64 size = rq.pop<s64>();
             if (size < 0) return void(rs.result = ResultInvalidSize);
             if (!(mode_ & kOpenWrite)) return void(rs.result = ResultWriteNotPermitted);
-            FILE_END_OF_FILE_INFO eof;
-            eof.EndOfFile.QuadPart = size;
-            if (!SetFileInformationByHandle(h_, FileEndOfFileInfo, &eof, sizeof(eof)))
+            if (!host::file_resize(h_, u64(size)))
                 rs.result = ResultUsableSpaceNotEnough;
         });
         reg(4, [this](Request&, Response& rs) {  // GetSize -> s64
-            LARGE_INTEGER sz{};
-            GetFileSizeEx(h_, &sz);
-            rs.push<s64>(sz.QuadPart);
+            u64 size = 0;host::file_size(h_, size);
+            rs.push<s64>(s64(size));
         });
         reg(5, [](Request&, Response& rs) {  // OperateRange -> QueryRangeInfo (0x40)
             u8 info[0x40] = {};
             rs.data.insert(rs.data.end(), info, info + sizeof(info));
         });
     }
-    ~IFile() override { CloseHandle(h_); }
+    ~IFile() override { host::file_close(h_); }
 
 private:
-    HANDLE h_;
+    host::FileHandle h_;
     u32 mode_;
     std::string path_;
 };
@@ -215,86 +210,90 @@ public:
             rq.pop<u32>();
             s64 size = rq.pop<s64>();
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
-            if (exists(h)) return fail(rs, ResultPathAlreadyExists, "CreateFile", p);
+            if (path_exists(h)) return fail(rs, ResultPathAlreadyExists, "CreateFile", p);
             if (!parent_is_dir(h)) return fail(rs, ResultPathNotFound, "CreateFile", p);
-            HANDLE f = CreateFileW(h.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                   nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (f == INVALID_HANDLE_VALUE) return fail(rs, ResultPathNotFound, "CreateFile", p);
+            const auto f = host::file_open(h, host::file_write | host::file_create_new);
+            if (f == host::invalid_file) return fail(rs, ResultPathNotFound, "CreateFile", p);
             if (size > 0) {
-                FILE_END_OF_FILE_INFO eof;
-                eof.EndOfFile.QuadPart = size;
-                if (!SetFileInformationByHandle(f, FileEndOfFileInfo, &eof, sizeof(eof)))
+                if (!host::file_resize(f, u64(size)))
                     rs.result = ResultUsableSpaceNotEnough;
             }
-            CloseHandle(f);
+            host::file_close(f);
             log_op("CreateFile", p, rs.result, size);
         });
         reg(1, [this](Request& rq, Response& rs) {  // DeleteFile(path)
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
-            DWORD a = GetFileAttributesW(h.c_str());
-            if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY))
+            if (!path_exists(h) || is_dir(h))
                 return fail(rs, ResultPathNotFound, "DeleteFile", p);
-            if (!DeleteFileW(h.c_str())) rs.result = ResultTargetLocked;
+            std::error_code error;
+            if (!std::filesystem::remove(h, error)) rs.result = ResultTargetLocked;
             log_op("DeleteFile", p, rs.result);
         });
         reg(2, [this](Request& rq, Response& rs) {  // CreateDirectory(path)
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
-            if (exists(h)) return fail(rs, ResultPathAlreadyExists, "CreateDirectory", p);
+            if (path_exists(h)) return fail(rs, ResultPathAlreadyExists, "CreateDirectory", p);
             if (!parent_is_dir(h)) return fail(rs, ResultPathNotFound, "CreateDirectory", p);
-            if (!CreateDirectoryW(h.c_str(), nullptr)) rs.result = ResultPathNotFound;
+            std::error_code error;
+            if (!std::filesystem::create_directory(h, error)) rs.result = ResultPathNotFound;
             log_op("CreateDirectory", p, rs.result);
         });
         reg(3, [this](Request& rq, Response& rs) {  // DeleteDirectory(path)
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
             if (!is_dir(h)) return fail(rs, ResultPathNotFound, "DeleteDirectory", p);
-            if (!RemoveDirectoryW(h.c_str()))
-                rs.result = GetLastError() == ERROR_DIR_NOT_EMPTY ? ResultDirectoryNotEmpty : ResultTargetLocked;
+            std::error_code error;
+            if (!std::filesystem::remove(h, error))
+                rs.result = error == std::errc::directory_not_empty ? ResultDirectoryNotEmpty : ResultTargetLocked;
             log_op("DeleteDirectory", p, rs.result);
         });
         reg(4, [this](Request& rq, Response& rs) {  // DeleteDirectoryRecursively(path)
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
             if (!is_dir(h)) return fail(rs, ResultPathNotFound, "DeleteDirectoryRecursively", p);
             if (p == "/") rs.result = clean_dir(h) ? 0 : ResultTargetLocked;
-            else if (!clean_dir(h) || !RemoveDirectoryW(h.c_str())) rs.result = ResultTargetLocked;
+            else {
+                std::error_code error;
+                if (!clean_dir(h) || !std::filesystem::remove(h, error)) rs.result = ResultTargetLocked;
+            }
             log_op("DeleteDirectoryRecursively", p, rs.result);
         });
         reg(5, [this](Request& rq, Response& rs) { rename(rq, rs, false); });  // RenameFile(old, new)
         reg(6, [this](Request& rq, Response& rs) { rename(rq, rs, true); });   // RenameDirectory(old, new)
         reg(7, [this](Request& rq, Response& rs) {  // GetEntryType(path) -> u32
             std::string p;
-            std::wstring h = path(rq, 0, &p);
-            DWORD a = GetFileAttributesW(h.c_str());
-            if (a == INVALID_FILE_ATTRIBUTES) {
+            HostPath h = path(rq, 0, &p);
+            if (!path_exists(h)) {
                 if (trace_enabled()) hw_log("fs: [%s] GetEntryType %s -> not found", fs_->label.c_str(), p.c_str());
                 return void(rs.result = ResultPathNotFound);
             }
-            rs.push<u32>((a & FILE_ATTRIBUTE_DIRECTORY) ? kEntryDir : kEntryFile);
+            rs.push<u32>(is_dir(h) ? kEntryDir : kEntryFile);
         });
         reg(8, [this](Request& rq, Response& rs) {  // OpenFile(u32 mode, path) -> IFile
             u32 mode = rq.pop<u32>();
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (fs_->read_only && (mode & (kOpenWrite | kOpenAppend))) return void(rs.result = ResultPermissionDenied);
-            DWORD access = 0;
-            if (mode & kOpenRead) access |= GENERIC_READ;
-            if (mode & (kOpenWrite | kOpenAppend)) access |= GENERIC_WRITE;
-            if (!access) access = GENERIC_READ;
+            unsigned access = 0;
+            if (mode & kOpenRead) access |= host::file_read;
+            if (mode & (kOpenWrite | kOpenAppend)) access |= host::file_write;
             if (is_dir(h)) return fail(rs, ResultPathNotFound, "OpenFile", p);
-            HANDLE f = CreateFileW(h.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (f == INVALID_HANDLE_VALUE) {
-                DWORD e = GetLastError();
-                return fail(rs, e == ERROR_SHARING_VIOLATION ? ResultTargetLocked : ResultPathNotFound, "OpenFile", p);
+            const auto f = host::file_open(h, access);
+            if (f == host::invalid_file) {
+                const auto error = host::file_error();
+#ifdef _WIN32
+                const bool locked = error == 32;  // ERROR_SHARING_VIOLATION
+#else
+                const bool locked = error == EBUSY || error == ETXTBSY;
+#endif
+                return fail(rs, locked ? ResultTargetLocked : ResultPathNotFound, "OpenFile", p);
             }
             log_op("OpenFile", p, 0, mode);
             rs.push_object(std::make_shared<IFile>(f, mode, fs_->label + ":" + p));
@@ -302,26 +301,24 @@ public:
         reg(9, [this](Request& rq, Response& rs) {  // OpenDirectory(u32 filter, path) -> IDirectory
             u32 filter = rq.pop<u32>();
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (!is_dir(h)) return fail(rs, ResultPathNotFound, "OpenDirectory", p);
             std::vector<DirectoryEntry> entries;
-            WIN32_FIND_DATAW fd;
-            HANDLE fh = FindFirstFileExW((h + L"\\*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
-            if (fh != INVALID_HANDLE_VALUE) {
-                do {
-                    if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-                    bool dir = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY;
-                    if (dir && !(filter & kDirFilterDirs)) continue;
-                    if (!dir && !(filter & kDirFilterFiles)) continue;
-                    DirectoryEntry e{};
-                    std::string n = wide_to_utf8(fd.cFileName);
-                    memcpy(e.name, n.data(), std::min<size_t>(n.size(), 0x300));
-                    e.type = dir ? kEntryDir : kEntryFile;
-                    if (!dir && !(filter & kDirNoFileSize))
-                        e.size = (s64)(((u64)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
-                    entries.push_back(e);
-                } while (FindNextFileW(fh, &fd));
-                FindClose(fh);
+            std::error_code error;
+            for (std::filesystem::directory_iterator it(h, error), end; !error && it != end; it.increment(error)) {
+                const bool dir = it->is_directory(error);
+                if (error) break;
+                if (dir && !(filter & kDirFilterDirs)) continue;
+                if (!dir && !(filter & kDirFilterFiles)) continue;
+                DirectoryEntry e{};
+                const auto name = path_utf8(it->path().filename());
+                memcpy(e.name, name.data(), std::min<size_t>(name.size(), 0x300));
+                e.type = dir ? kEntryDir : kEntryFile;
+                if (!dir && !(filter & kDirNoFileSize)) {
+                    e.size = s64(it->file_size(error));
+                    if (error) break;
+                }
+                entries.push_back(e);
             }
             log_op("OpenDirectory", p, 0, entries.size());
             rs.push_object(std::make_shared<IDirectory>(std::move(entries)));
@@ -331,7 +328,7 @@ public:
         reg(12, [this](Request&, Response& rs) { rs.push<s64>(total_space()); });      // GetTotalSpaceSize
         reg(13, [this](Request& rq, Response& rs) {  // CleanDirectoryRecursively(path)
             std::string p;
-            std::wstring h = path(rq, 0, &p);
+            HostPath h = path(rq, 0, &p);
             if (ro(rs)) return;
             if (!is_dir(h)) return fail(rs, ResultPathNotFound, "CleanDirectoryRecursively", p);
             if (!clean_dir(h)) rs.result = ResultTargetLocked;
@@ -339,19 +336,19 @@ public:
         });
         reg(14, [this](Request& rq, Response& rs) {  // GetFileTimeStampRaw(path) -> 0x20 bytes
             std::string p;
-            std::wstring h = path(rq, 0, &p);
-            WIN32_FILE_ATTRIBUTE_DATA d;
-            if (!GetFileAttributesExW(h.c_str(), GetFileExInfoStandard, &d)) return void(rs.result = ResultPathNotFound);
-            rs.push<u64>(filetime_to_posix(d.ftCreationTime));
-            rs.push<u64>(filetime_to_posix(d.ftLastAccessTime));
-            rs.push<u64>(filetime_to_posix(d.ftLastWriteTime));
+            HostPath h = path(rq, 0, &p);
+            host::FileTimes times;
+            if (!host::file_times(h, times)) return void(rs.result = ResultPathNotFound);
+            rs.push<u64>(times.created);
+            rs.push<u64>(times.accessed);
+            rs.push<u64>(times.modified);
             rs.push<u64>(1);  // is_valid
         });
         reg(15, [](Request&, Response&) {});  // QueryEntry: nothing to report
     }
 
 private:
-    std::wstring path(Request& rq, size_t i, std::string* norm) {
+    HostPath path(Request& rq, size_t i, std::string* norm) {
         normalize(rq.in_string(i), norm);
         return fs_->host(*norm);
     }
@@ -360,9 +357,8 @@ private:
         rs.result = ResultPermissionDenied;
         return true;
     }
-    static bool parent_is_dir(const std::wstring& h) {
-        size_t s = h.find_last_of(L'\\');
-        return s != std::wstring::npos && is_dir(h.substr(0, s));
+    static bool parent_is_dir(const HostPath& h) {
+        return !h.empty() && is_dir(h.parent_path());
     }
     void fail(Response& rs, Result r, const char* op, const std::string& p) {
         rs.result = r;
@@ -374,20 +370,19 @@ private:
     void rename(Request& rq, Response& rs, bool dir) {
         const char* op = dir ? "RenameDirectory" : "RenameFile";
         std::string a, b;
-        std::wstring ha = path(rq, 0, &a), hb = path(rq, 1, &b);
+        HostPath ha = path(rq, 0, &a), hb = path(rq, 1, &b);
         if (ro(rs)) return;
-        DWORD attr = GetFileAttributesW(ha.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES || (bool(attr & FILE_ATTRIBUTE_DIRECTORY) != dir))
+        if (!path_exists(ha) || is_dir(ha) != dir)
             return fail(rs, ResultPathNotFound, op, a);
-        if (exists(hb)) return fail(rs, ResultPathAlreadyExists, op, b);
+        if (path_exists(hb)) return fail(rs, ResultPathAlreadyExists, op, b);
         if (!parent_is_dir(hb)) return fail(rs, ResultPathNotFound, op, b);
-        if (!MoveFileExW(ha.c_str(), hb.c_str(), 0)) rs.result = ResultTargetLocked;
+        if (!host::file_rename_new(ha, hb)) rs.result = ResultTargetLocked;
         log_op(op, a + " -> " + b, rs.result);
     }
     s64 free_space() {
-        ULARGE_INTEGER avail{};
-        if (GetDiskFreeSpaceExW(fs_->root.c_str(), &avail, nullptr, nullptr))
-            return (s64)std::min<u64>(avail.QuadPart, 0x100000000ull);  // report at most 4 GiB
+        std::error_code error;
+        const auto space = std::filesystem::space(fs_->root, error);
+        if (!error) return s64(std::min<u64>(space.available, 0x100000000ull));  // report at most 4 GiB
         return 0x100000000ll;
     }
     s64 total_space() { return 0x100000000ll; }
@@ -397,10 +392,10 @@ private:
 
 }  // namespace
 
-ServicePtr make_host_filesystem(const std::wstring& root, bool read_only, const std::string& label) {
+ServicePtr make_host_filesystem(const HostPath& root, bool read_only, const std::string& label) {
     auto fs = std::make_shared<FsRoot>();
     fs->root = root;
-    while (!fs->root.empty() && (fs->root.back() == L'\\' || fs->root.back() == L'/')) fs->root.pop_back();
+    fs->root = root.lexically_normal();
     fs->read_only = read_only;
     fs->label = label;
     if (!read_only) create_dirs(fs->root);
