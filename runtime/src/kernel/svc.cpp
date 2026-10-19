@@ -1,6 +1,7 @@
 // Horizon supervisor calls. Called directly from recompiled code (`svc #imm` -> hw_svc).
 // Register conventions follow the HOS SVC ABI (arguments in x0-x7, results in w0 + x1..).
-#include <windows.h>
+#include "host/platform.h"
+#include <cstdlib>
 
 #include <algorithm>
 #include <cstring>
@@ -80,7 +81,7 @@ static Result get_info(u32 id0, Handle h, u64 id1, u64* out) {
     case 9: *out = 0; return 0;                                // ResourceLimit (no handle)
     case 10: *out = 0; return 0;                               // IdleTickCount
     case 11: {                                                 // RandomEntropy
-        static std::mt19937_64 rng(0x48574445 ^ GetTickCount64());
+        static std::mt19937_64 rng(0x48574445 ^ (host::monotonic_ns() / 1000000));
         *out = rng();
         return 0;
     }
@@ -147,7 +148,7 @@ void svc_dispatch(Ctx* c, u32 imm) {
         return;
     case 0x07:  // ExitProcess
         hw_log("guest called svcExitProcess");
-        ExitProcess(0);
+        std::exit(0);
     case 0x08: {  // CreateThread(entry, arg, stack_top, priority, core) -> handle
         s32 core = (s32)c->x[5];
         if (core == -2) core = g_process.main_thread_core;
@@ -166,14 +167,11 @@ void svc_dispatch(Ctx* c, u32 imm) {
         exit_current_thread();
     case 0x0B: {  // SleepThread(ns)
         s64 ns = (s64)c->x[0];
-        if (ns <= 0) SwitchToThread();
+        if (ns <= 0) host::thread_yield();
         else if (perf::enabled()) {
-            LARGE_INTEGER f, a, b;
-            QueryPerformanceFrequency(&f);
-            QueryPerformanceCounter(&a);
+            const u64 start = host::monotonic_ns();
             hw_sleep_ns(ns);
-            QueryPerformanceCounter(&b);
-            perf::note_sleep(ns, (b.QuadPart - a.QuadPart) * 1000000000 / f.QuadPart);
+            perf::note_sleep(ns, (s64)(host::monotonic_ns() - start));
         } else {
             hw_sleep_ns(ns);
         }

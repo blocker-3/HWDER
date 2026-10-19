@@ -47,9 +47,6 @@ if(HWDER_MANAGED_PROBE_ONLY)
 endif()
 
 if(HWDER_SYNTHETIC_TESTS_ONLY)
-    if(NOT WIN32)
-        message(FATAL_ERROR "Cache codec tests still require Windows IO/crypto; use HWDER_HOST_TESTS_ONLY on Linux")
-    endif()
     enable_testing()
     add_executable(save_folder_selection_test runtime/tests/save_folder_selection_test.cpp)
     target_include_directories(save_folder_selection_test PRIVATE runtime/src)
@@ -78,9 +75,6 @@ if(HWDER_SYNTHETIC_TESTS_ONLY)
     return()
 endif()
 if(HWDER_HOST_TESTS_ONLY)
-    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/tools/tests/host.cmake")
-        message(FATAL_ERROR "Host contract tests require the separate, unmerged Linux host-test candidate; use HWDER_SYNTHETIC_TESTS_ONLY on Windows")
-    endif()
     include(tools/tests/host.cmake)
     return()
 endif()
@@ -136,6 +130,8 @@ add_subdirectory(${TP}/SDL ${CMAKE_BINARY_DIR}/SDL EXCLUDE_FROM_ALL)
 # ---------------------------------------------------------------- runtime: HOS kernel, services, GPU
 # Explicit lists: the checkout path may contain [ ] which CMake globs treat as patterns.
 set(RUNTIME_SOURCES
+    runtime/src/host/platform.cpp
+    runtime/src/host/thread.cpp
     runtime/src/core.cpp
     runtime/src/debug_flags.cpp
     runtime/src/threads.cpp

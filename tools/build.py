@@ -74,8 +74,6 @@ def main():
         ap.error("--jobs must be at least 1")
     if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe or a.managed_runtime_link):
         ap.error("--only-file cannot be combined with a test/library mode")
-    if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
-        ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
     if a.managed_probe and not a.managed_toolchain:
         ap.error("--managed-probe requires a certified --managed-toolchain")
     if a.managed_runtime_link and (not a.managed_toolchain or not a.generated_dir):
@@ -130,7 +128,7 @@ def build(a):
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
-    target = a.target or ("managed_compatibility" if getattr(a, "managed_probe", False) else "hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
+    target = a.target or ("managed_compatibility" if getattr(a, "managed_probe", False) else "hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_tests" if a.host_tests else "hwder_game" if a.game_only else "hwder")
     return subprocess.run([ninja, "-C", bdir, "-j", str(a.jobs), target], env=env).returncode
 
 

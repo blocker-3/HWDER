@@ -1,7 +1,7 @@
 // Kernel core: lock, handle table, threads, and the waiting primitives used by SVCs.
 #include "kernel.h"
 
-#include <windows.h>
+#include "host/platform.h"
 
 #include <algorithm>
 #include <cstring>
@@ -21,7 +21,7 @@ ProcessInfo g_process;
 
 // ------------------------------------------------------------------ lock
 void KernelLock::lock() {
-    u32 self = GetCurrentThreadId();
+    u32 self = host::thread_id();
     if (owner_.load(std::memory_order_relaxed) == self) {
         depth_++;
         return;
@@ -45,7 +45,7 @@ int KernelLock::release_all() {
 }
 void KernelLock::reacquire(int depth) {
     m_.lock();
-    owner_.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    owner_.store(host::thread_id(), std::memory_order_relaxed);
     depth_ = depth;
 }
 
@@ -73,7 +73,7 @@ std::vector<std::shared_ptr<Thread>> all_threads() {
     return g_threads;
 }
 
-static DWORD WINAPI thread_main(void* p) {
+static void thread_main(void* p) {
     Thread* t = (Thread*)p;
     t_current = t;
     Ctx* c = t->ctx;
@@ -97,10 +97,11 @@ std::shared_ptr<Thread> create_thread(u64 entry, u64 arg, u64 stack_top, s32 pri
     t->tls = mem::alloc_tls_slot();
     t->ctx = hw_ctx_new(stack_top);
     t->ctx->tpidrro_el0 = t->tls;
-    t->wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    t->wake_event = host::event_create();
     // The host stack only holds host frames (recompiled functions keep guest state in Ctx and
     // use the guest stack for guest data), but deep guest call chains still nest host frames.
-    t->host_handle = CreateThread(nullptr, 8 << 20, thread_main, t.get(), CREATE_SUSPENDED, nullptr);
+    t->host_handle = host::thread_create(thread_main, t.get(), 8 << 20);
+    if (!t->wake_event || !t->host_handle) hw_fatal("host thread/event creation failed");
     {
         std::lock_guard<std::mutex> l(g_threads_lock);
         g_threads.push_back(t);
@@ -109,8 +110,8 @@ std::shared_ptr<Thread> create_thread(u64 entry, u64 arg, u64 stack_top, s32 pri
 }
 
 void start_thread(Thread* t) {
-    t->started = true;
-    ResumeThread(t->host_handle);
+    if (!t->started.exchange(true) && !host::thread_start(t->host_handle))
+        hw_fatal("host thread start failed");
 }
 
 void exit_current_thread() {
@@ -121,26 +122,24 @@ void exit_current_thread() {
         t->notify_waiters();
     }
     // Make sure no kernel lock depth leaks out of this thread.
-    ExitThread(0);
+    host::thread_exit();
 }
 
 bool park_current_thread(s64 timeout_ns) {
     Thread* t = current_thread();
     t->waiting = true;
     int depth = g_kernel_lock.release_all();
-    DWORD ms = INFINITE;
-    if (timeout_ns >= 0) ms = (DWORD)std::min<s64>((timeout_ns + 999999) / 1000000, 0x7FFFFFFF);
-    DWORD r;
+    bool signaled;
     {
         perf::WaitScope ws(perf::kWaitKernel);
-        r = WaitForSingleObject(t->wake_event, ms);
+        signaled = host::event_wait(t->wake_event, timeout_ns);
     }
     g_kernel_lock.reacquire(depth);
     t->waiting = false;
-    return r == WAIT_OBJECT_0;
+    return signaled;
 }
 
-void wake_thread(Thread* t) { SetEvent(t->wake_event); }
+void wake_thread(Thread* t) { host::event_signal(t->wake_event); }
 
 // ------------------------------------------------------------------ guest mutexes (ArbitrateLock)
 // The guest mutex word holds the owner's thread handle, with bit 30 set while there are waiters.
@@ -208,16 +207,12 @@ Result wait_process_wide_key(u64 mutex_addr, u64 key, Handle self, s64 timeout_n
         g_cv_waiters.erase(it);
         return ResultTimedOut;
     }
-    LARGE_INTEGER f, start;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&start);
+    const u64 start = host::monotonic_ns();
     for (;;) {
         if (w.mw.acquired) return ResultSuccess;
         s64 left = -1;
         if (timeout_ns > 0) {
-            LARGE_INTEGER now;
-            QueryPerformanceCounter(&now);
-            s64 elapsed = (s64)((now.QuadPart - start.QuadPart) * 1000000000.0 / f.QuadPart);
+            s64 elapsed = static_cast<s64>(host::monotonic_ns() - start);
             left = timeout_ns - elapsed;
             if (left <= 0) break;
         }
@@ -341,7 +336,9 @@ Result signal_to_address(u64 addr, u32 type, s32 value, s32 count) {
 std::shared_ptr<SharedMemory> create_shared_memory(u64 size) {
     auto s = std::make_shared<SharedMemory>();
     s->size = (size + 0xFFF) & ~0xFFFull;
-    s->backing = (u8*)VirtualAlloc(nullptr, s->size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    s->backing = static_cast<u8*>(host::memory_reserve(nullptr, s->size));
+    if (!s->backing || !host::memory_commit(s->backing, s->size))
+        hw_fatal("shared memory allocation failed");
     return s;
 }
 Result map_shared_memory(SharedMemory* s, u64 addr, u64 size, u32 perm) {
@@ -369,9 +366,7 @@ static Result wait_synchronization_impl(const Handle* handles, s32 count, s64 ti
         objs.push_back(o);
     }
     Thread* self = current_thread();
-    LARGE_INTEGER f, start;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&start);
+    const u64 start = host::monotonic_ns();
     for (;;) {
         for (s32 i = 0; i < count; i++) {
             if (objs[i]->is_signaled()) {
@@ -385,9 +380,7 @@ static Result wait_synchronization_impl(const Handle* handles, s32 count, s64 ti
         }
         s64 left = -1;
         if (timeout_ns >= 0) {
-            LARGE_INTEGER now;
-            QueryPerformanceCounter(&now);
-            s64 elapsed = (s64)((now.QuadPart - start.QuadPart) * 1000000000.0 / f.QuadPart);
+            s64 elapsed = static_cast<s64>(host::monotonic_ns() - start);
             left = timeout_ns - elapsed;
             if (left <= 0) return ResultTimedOut;
         }
@@ -402,12 +395,9 @@ static Result wait_synchronization_impl(const Handle* handles, s32 count, s64 ti
 
 // Wrapper logging waits that block a guest thread for a long time (stall diagnostics).
 Result wait_synchronization(const Handle* handles, s32 count, s64 timeout_ns, s32* out_index) {
-    LARGE_INTEGER f, a, b;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&a);
+    const u64 start = host::monotonic_ns();
     Result r = wait_synchronization_impl(handles, count, timeout_ns, out_index);
-    QueryPerformanceCounter(&b);
-    double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+    double ms = (host::monotonic_ns() - start) / 1000000.0;
     static const bool trace = debug::flag(debug::WaitTrace);
     if (trace && ms > 150.0) {
         ObjectPtr o = g_handles.get(handles[0]);

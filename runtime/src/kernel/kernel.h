@@ -2,7 +2,7 @@
 //
 // Every guest thread is a host thread running recompiled code; an `svc` instruction is a direct
 // call into svc_dispatch(). Kernel state is guarded by one recursive lock (g_kernel_lock); blocking
-// waits release it and park on a per-thread Win32 event.
+// waits release it and park on a per-thread auto-reset host event.
 #pragma once
 #include <atomic>
 #include <map>
@@ -76,7 +76,7 @@ struct Thread : Object {
     u64 core_mask = 1;
     u64 id = 0;
     void* host_handle = nullptr;
-    void* wake_event = nullptr;  // Win32 auto-reset event used to park the thread
+    void* wake_event = nullptr;  // host auto-reset event used to park the thread
     std::atomic<bool> started{false}, exited{false};
     // wait state
     Result wait_result = 0;

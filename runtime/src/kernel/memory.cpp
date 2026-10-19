@@ -1,7 +1,7 @@
 // Guest address space. Guest virtual addresses are identity mapped to host addresses: each
 // kernel region (heap, alias, stack, TLS, system) is a fixed host reservation, committed on map.
 // A region map tracks HOS memory state/permissions for svcQueryMemory.
-#include <windows.h>
+#include "host/platform.h"
 
 #include <functional>
 
@@ -14,11 +14,11 @@ static u64 g_heap_size = 0;
 static u64 g_tls_next = kTlsBase;
 static u64 g_system_next = kSystemBase;
 
-static void reserve(u64 addr, u64 size, const char* what, DWORD extra = 0) {
-    void* p = VirtualAlloc((void*)addr, size, MEM_RESERVE | extra, PAGE_NOACCESS);
+static void reserve(u64 addr, u64 size, const char* what, bool write_watch = false) {
+    void* p = host::memory_reserve((void*)addr, size, write_watch);
     if (p != (void*)addr) {
         hw_log("mem: cannot reserve %s at 0x%llx (+0x%llx): error %lu", what, (unsigned long long)addr,
-               (unsigned long long)size, GetLastError());
+               (unsigned long long)size, host::memory_error());
         hw_fatal("address space reservation");
     }
 }
@@ -26,19 +26,19 @@ static void reserve(u64 addr, u64 size, const char* what, DWORD extra = 0) {
 void init() {
     // Write-watched: the texture cache asks the OS which pages the game wrote (GetWriteWatch) instead
     // of re-hashing textures on a timer. Textures live in the heap and alias regions.
-    reserve(kHeapBase, kHeapMax, "heap region", MEM_WRITE_WATCH);
-    reserve(kAliasBase, kAliasSize, "alias region", MEM_WRITE_WATCH);
+    reserve(kHeapBase, kHeapMax, "heap region", true);
+    reserve(kAliasBase, kAliasSize, "alias region", true);
     reserve(kStackBase, kStackSize, "stack region");
     reserve(kTlsBase, kTlsSize, "tls region");
     reserve(kSystemBase, 0x100000000ull, "system region");
 }
 
 static void commit(u64 addr, u64 size) {
-    if (!VirtualAlloc((void*)addr, size, MEM_COMMIT, PAGE_READWRITE)) {
+    if (!host::memory_commit((void*)addr, size)) {
         // Outside our reservations (e.g. module images): reserve + commit in one go.
-        if (!VirtualAlloc((void*)addr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
+        if (!host::memory_reserve((void*)addr, size) || !host::memory_commit((void*)addr, size)) {
             hw_log("mem: commit failed at 0x%llx (+0x%llx): error %lu", (unsigned long long)addr,
-                   (unsigned long long)size, GetLastError());
+                   (unsigned long long)size, host::memory_error());
             hw_fatal("commit");
         }
     }
@@ -70,7 +70,7 @@ void map(u64 addr, u64 size, State state, u32 perm, bool do_commit) {
 void unmap(u64 addr, u64 size) {
     KGuard g(g_kernel_lock);
     carve(addr, size);
-    VirtualFree((void*)addr, size, MEM_DECOMMIT);
+    if (!host::memory_decommit((void*)addr, size)) hw_fatal("guest memory decommit");
 }
 
 static void modify(u64 addr, u64 size, const std::function<void(Region&)>& fn) {
