@@ -8,9 +8,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
-set(GEN_DIR ${CMAKE_SOURCE_DIR}/generated)
+set(GEN_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH "User-local recompiled game sources")
 set(TP ${CMAKE_SOURCE_DIR}/third_party)
-include(${GEN_DIR}/sources.cmake)
+include("${GEN_DIR}/sources.cmake")
 
 set(HW_ARCH_FLAGS /arch:AVX2 -mfma -mf16c -maes -mpclmul -msse4.2)
 

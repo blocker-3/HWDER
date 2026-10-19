@@ -1,0 +1,16 @@
+{
+  "profiles": [
+    {
+      "id": "hwde-0100ae00096ea000-tested-base",
+      "title_id": "0100ae00096ea000",
+      "note": "Exact five-module set used by tested main 1c8ee53; no display-version inference or asset-integrity claim.",
+      "modules_sha256": {
+        "main": "2bf9bd65f0c196a1217da0f91c7e6c11c866d1a45364f8adf5840abc2f5e029a",
+        "rtld": "3522d56dda056d4c7ba6f9508d6d1805d9a751b5a189a8700f9714ce06fb6c5a",
+        "sdk": "3997a78d8c907cab470bd7fd793d1d806c7fec44239b73a456e545597808b81e",
+        "subsdk0": "17a8bd4c66350ea483f93ca83ac4ad2c991f195de90b8904c1ffcc45f10f8715",
+        "subsdk1": "f9f05fa500561893e2133b9de8131776126f78e1d5c2c542e7d594046b844e3e"
+      }
+    }
+  ]
+}
