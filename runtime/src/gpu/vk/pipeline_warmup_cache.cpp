@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -360,10 +361,13 @@ Status merge(Cache& retained, const Cache& additional) {
     } catch (const std::exception&) { return Status::Invalid; }
 }
 
-Status save(const char* path, u64 compatibility_tag, const Cache& cache) {
+Status save(const char* path, u64 compatibility_tag, const Cache& cache, SaveTimings* timings) {
     if (!path || !*path) return Status::IoError;
     try {
+        using Clock = std::chrono::steady_clock;
+        auto begin = timings ? Clock::now() : Clock::time_point{};
         if (!valid_cache(cache)) return Status::Invalid;
+        if (timings) { auto now = Clock::now(); timings->validation_ms = std::chrono::duration<double, std::milli>(now-begin).count(); begin = now; }
         std::vector<u8> payload;
         Encoder body{&payload};
         body.word((u32)cache.programs.size()); body.word((u32)cache.pipelines.size());
@@ -383,8 +387,31 @@ Status save(const char* path, u64 compatibility_tag, const Cache& cache) {
         for (u8 v : payload) checksum.byte(v);
         header.wide(checksum.hash);
         file.insert(file.end(),payload.begin(),payload.end());
-        return write_atomic(path,file);
+        if (timings) { auto now = Clock::now(); timings->serialization_ms = std::chrono::duration<double, std::milli>(now-begin).count(); begin = now; }
+        const auto status = write_atomic(path,file);
+        if (timings) timings->disk_ms = std::chrono::duration<double, std::milli>(Clock::now()-begin).count();
+        return status;
     } catch (const std::exception&) { return Status::Invalid; }
+}
+
+bool SaveTask::start(std::string path, u64 compatibility_tag, Cache&& snapshot, bool profile) {
+    if (pending()) return false;
+    try {
+        result_ = std::async(std::launch::async,
+            [path = std::move(path), compatibility_tag, cache = std::move(snapshot), profile]() {
+                SaveResult result;
+                result.recipes = cache.pipelines.size();
+                result.status = save(path.c_str(), compatibility_tag, cache, profile ? &result.timings : nullptr);
+                return result;
+            });
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+bool SaveTask::poll(SaveResult& result) {
+    if (!pending() || result_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    result = result_.get();
+    return true;
 }
 
 Status load(const char* path, u64 compatibility_tag, Cache& out) {

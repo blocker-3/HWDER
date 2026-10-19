@@ -21,6 +21,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
+#include <chrono>
 #include <memory>
 #include <thread>
 
@@ -1033,6 +1034,7 @@ private:
     catalog::Catalog catalog_records_;
     bool catalog_dirty_ = false;
     warmup::Cache warmup_records_;  // retained historical successes plus observed new successes
+    warmup::SaveTask warmup_save_;
     bool warmup_records_loaded_ = false, warmup_dirty_ = false, warmup_first_draw_ = false;
     std::unordered_set<u32> invalid_warm_programs_;
     std::vector<std::unique_ptr<WarmProgram>> warm_programs_;
@@ -1128,6 +1130,7 @@ private:
     void save_pipeline_cache() {
         save_warmup_records();
         if (pipelines_.size() == pcache_saved_) return;
+        const auto begin = std::chrono::steady_clock::now();
         size_t n = 0;
         std::vector<u8> blob;
         bool complete = false;
@@ -1143,11 +1146,15 @@ private:
             break;
         }
         if (!complete) return;
+        const auto retrieved = std::chrono::steady_clock::now();
         if (FILE* f = fopen(kPipelineCacheFile, "wb")) {
             fwrite(blob.data(), 1, n, f);
             fclose(f);
             pcache_saved_ = pipelines_.size();
         }
+        if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: native retrieval %.3f ms, disk %.3f ms, %zu bytes",
+            std::chrono::duration<double, std::milli>(retrieved-begin).count(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-retrieved).count(), n);
     }
     std::unordered_map<u64, ShaderEntry*> shaders_;
     std::unordered_map<u64, GfxProgram*> programs_;
@@ -1906,7 +1913,18 @@ void VkRenderer::wait_catalog() {
 
 void VkRenderer::save_warmup_records() {
     save_catalog_records();
+    warmup::SaveResult completed;
+    if (warmup_save_.poll(completed)) {
+        // New records/mismatches since submission already set dirty again. A
+        // successful old snapshot must never clear those later changes.
+        if (completed.status != warmup::Status::Ok) warmup_dirty_ = true;
+        hw_log("vk: prewarm background save: %s, %zu recipes retained", warmup::name(completed.status), completed.recipes);
+        if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background validation %.3f ms, serialization %.3f ms, disk %.3f ms",
+            completed.timings.validation_ms, completed.timings.serialization_ms, completed.timings.disk_ms);
+    }
+    if (warmup_save_.pending()) return;
     if (!warmup_dirty_) return;
+    const auto begin = std::chrono::steady_clock::now();
     // Preserve historical successes across early quits. Only a freshly translated
     // mismatch invalidates a historical program group; unvisited battle recipes stay.
     warmup::Cache snapshot;
@@ -1921,10 +1939,24 @@ void VkRenderer::save_warmup_records() {
         snapshot.pipelines.push_back(record);
         snapshot.pipelines.back().program_index = remap[record.program_index];
     }
-    const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot);
+    const auto copied = std::chrono::steady_clock::now();
+    static const bool synchronous = getenv("HWDER_CACHE_SAVE_SYNC") && strcmp(getenv("HWDER_CACHE_SAVE_SYNC"), "1") == 0;
+    if (!synchronous) {
+        if (warmup_save_.start(kWarmupFile, warmup_compatibility(), std::move(snapshot), getenv("HWDER_CACHE_PROFILE") != nullptr)) {
+            warmup_dirty_ = false;
+            if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background snapshot %.3f ms, submit %.3f ms",
+                std::chrono::duration<double, std::milli>(copied-begin).count(),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-copied).count());
+        } else hw_log("vk: prewarm background save unavailable; retaining dirty history for retry");
+        return;
+    }
+    warmup::SaveTimings timings;
+    const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot, getenv("HWDER_CACHE_PROFILE") ? &timings : nullptr);
     if (status == warmup::Status::Ok) warmup_dirty_ = false;
     hw_log("vk: prewarm save: %s, %zu recipes retained, %llu newly recorded this run",
            warmup::name(status), snapshot.pipelines.size(), (unsigned long long)warmup_recorded_);
+    if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: snapshot %.3f ms, validation %.3f ms, serialization %.3f ms, disk %.3f ms",
+        std::chrono::duration<double, std::milli>(copied-begin).count(), timings.validation_ms, timings.serialization_ms, timings.disk_ms);
 }
 
 void VkRenderer::log_warmup(const char* phase) {

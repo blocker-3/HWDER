@@ -9,6 +9,15 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk/catalog_game_sources.cpp
 )
 
+# Optional private-input probe; never part of the game or synthetic test aggregate.
+if(WIN32)
+    add_executable(pipeline_cache_persistence_bench EXCLUDE_FROM_ALL
+        runtime/tests/pipeline_cache_persistence_bench.cpp runtime/src/gpu/vk/pipeline_warmup_cache.cpp)
+    target_include_directories(pipeline_cache_persistence_bench PRIVATE runtime/src runtime/include ${TP}/vulkan-headers/include)
+    target_compile_definitions(pipeline_cache_persistence_bench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(pipeline_cache_persistence_bench PRIVATE /EHsc /O2)
+endif()
+
 # Standalone codec tests: no Vulkan device, generated game, SDL or guest data required.
 add_executable(pipeline_warmup_cache_test EXCLUDE_FROM_ALL
     runtime/tests/pipeline_warmup_cache_test.cpp

@@ -48,6 +48,11 @@ def vs_env():
             if "=" in line:
                 k, v = line.split("=", 1)
                 env[k] = v
+        # Windows environment names are case-insensitive; cmd may emit "Path".
+        # Consumers use PATH consistently, including subprocess tool discovery.
+        for key in list(env):
+            if key.upper() == "PATH" and key != "PATH":
+                env["PATH"] = env.pop(key)
         if "INCLUDE" not in env:
             raise RuntimeError("failed to load Visual Studio environment")
         _env_cache = env
