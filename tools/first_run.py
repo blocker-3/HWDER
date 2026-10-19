@@ -180,6 +180,11 @@ def check_prerequisites(root):
     if not match or tuple(map(int, match.groups())) < (3, 24):
         raise ValueError("CMake 3.24+ required")
     versions.update({k: env.get(k) for k in ("VCToolsVersion", "WindowsSDKVersion", "WindowsSdkDir")})
+    # Compiler/linker overrides and search paths affect output even when versions match.
+    # Retain only their digest, never arbitrary environment variable contents.
+    versions["compiler_environment_sha256"] = digest({
+        k: env.get(k) for k in ("INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "LINK", "_LINK_",
+                              "CFLAGS", "CXXFLAGS", "LDFLAGS")})
     versions["python"] = sys.version
     log("prerequisites verified: clang-cl, MSVC x64 libraries, Windows SDK, CMake, Ninja, cryptography, lz4")
     return versions
@@ -197,6 +202,7 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         raise ValueError("Supply an existing .nsp and your own prod.keys via --nsp/--keys or HWDER_NSP/HWDER_KEYS")
     generation_inputs, build_inputs = source_fingerprints(root)
     before = (nsp.stat().st_size, nsp.stat().st_mtime_ns)
+    keys_before = (keys.stat().st_size, keys.stat().st_mtime_ns)
     log("validating NSP, own keys, title, module set and supported-version SHA-256")
     modules = (read_modules or read_program)(nsp, keys)
     profile = supported_profile(modules, root / "tools" / "supported_games.json")
@@ -235,8 +241,13 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
             or marker.get("exe_sha256") != file_hash(exe)):
         log("build: compiling complete native program via tools/build.py (shared machine build lock)")
         (bdir / "complete.json").unlink(missing_ok=True)
+        # Ninja can consider a newer damaged/stale executable up to date. Force its relink
+        # whenever the output lacks a valid completion certificate; preserve partial objects.
+        exe.unlink(missing_ok=True)
         run([sys.executable, root / "tools" / "build.py", "--jobs", str(jobs),
              "--build-dir", bdir, "--generated-dir", generated], root)
+        if not exe.is_file():
+            raise ValueError("Build succeeded without a Windows executable")
         with exe.open("rb") as f:
             magic = f.read(2)
         if magic != b"MZ":
@@ -252,8 +263,9 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         log("build: verified complete cached executable")
     if source_fingerprints(root) != (generation_inputs, build_inputs):
         raise ValueError("Source inputs changed during setup; rerun")
-    if before != (nsp.stat().st_size, nsp.stat().st_mtime_ns):
-        raise ValueError("Game input changed during setup; rerun")
+    if (before != (nsp.stat().st_size, nsp.stat().st_mtime_ns)
+            or keys_before != (keys.stat().st_size, keys.stat().st_mtime_ns)):
+        raise ValueError("Game or keys input changed during setup; rerun")
     # Stable play directory retains user settings, saves and private caches across source updates.
     play = cache / "play"
     play.mkdir(parents=True, exist_ok=True)

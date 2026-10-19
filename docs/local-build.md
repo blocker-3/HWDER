@@ -58,10 +58,12 @@ coordinators sharing one cache and release automatically when a process dies.
   hooks, tracked entries, optional private `data/extra_entries.txt`, Python version and lz4.
 - Native build identity includes generation identity, actual runtime/tools/CMake/third-party
   file contents (including uncommitted changes), source location and discovered toolchain
-  versions/paths, including SDK/MSVC versions. Normal source updates get separate build output.
+  versions/paths, including SDK/MSVC versions and a digest of compiler/linker overrides and
+  include/library search paths. Normal source updates get separate build output.
 - Completed extraction/generation require matching manifests and exact output file hashes.
   Native output requires a successful full build and matching executable SHA-256. A stale
-  executable left by a failed compile is never accepted without rerunning the build.
+  executable left by a failed compile is never accepted without rerunning the build. Uncertified
+  executables are removed to force Ninja to relink, while partial compiler objects remain reusable.
 - Changes to build inputs during setup cause a failure instead of publishing a mixed version.
 
 After success, setup atomically replaces `play/hwder.exe`; that stable folder retains settings,

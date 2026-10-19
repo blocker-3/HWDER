@@ -67,6 +67,9 @@ class Fixture(unittest.TestCase):
             (out / "partial.obj").write_text("compiler progress")
             if self.fail == "build":
                 raise subprocess.CalledProcessError(8, ["synthetic-build"])
+            if self.fail == "noop-build":
+                self.assertFalse((out / "hwder.exe").exists(), "uncertified exe must force Ninja relink")
+                return
             (out / "hwder.exe").write_bytes(b"MZsynthetic-program-" + str(len(self.calls)).encode())
 
     def prepare(self):
@@ -164,6 +167,18 @@ class Fixture(unittest.TestCase):
         self.prepare()
         self.assertEqual(self.calls, ["generate", "build", "build", "build"])
 
+    def test_noop_build_cannot_recertify_damaged_executable(self):
+        exe = self.prepare()
+        previous = exe.read_bytes()
+        cached = next((self.cache / "builds").glob("*/hwder.exe"))
+        cached.write_bytes(b"MZdamaged-newer-file")
+        self.fail = "noop-build"
+        with self.assertRaisesRegex(ValueError, "without a Windows executable"):
+            self.prepare()
+        self.assertEqual(exe.read_bytes(), previous)
+        self.assertFalse(cached.exists())
+        self.assertFalse((cached.parent / "complete.json").exists())
+
     def test_unsupported_version_rejected_before_stages(self):
         self.modules["main"] += b"different version"
         with self.assertRaisesRegex(ValueError, "Unsupported game version"):
@@ -205,6 +220,47 @@ class Fixture(unittest.TestCase):
         self.assertEqual((self.cache / "last-success.json").read_bytes(), pointer)
         self.prepare()
         self.assertEqual(self.calls, ["generate", "build", "build"])
+
+    def test_keys_changed_during_build_prevents_publication(self):
+        runner = self.run_stage
+        def mutate(args, cwd):
+            runner(args, cwd)
+            if "--build-dir" in args:
+                self.keys.write_text("changed key file during compilation")
+        with self.assertRaisesRegex(ValueError, "Game or keys input changed"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          mutate, lambda n, k: self.modules)
+        self.assertFalse((self.cache / "last-success.json").exists())
+        self.assertFalse((self.cache / "play/hwder.exe").exists())
+
+    def test_cache_lock_serializes_processes_and_releases_after_error(self):
+        marker = self.cache / "child-entered.txt"
+        script = (f"import sys; sys.path.insert(0, {str(Path(setup.__file__).parent)!r}); "
+                  "from first_run import setup_lock; from pathlib import Path\n"
+                  f"with setup_lock(Path({str(self.cache)!r})):\n"
+                  f"    Path({str(marker)!r}).write_text('entered')\n")
+        with setup.setup_lock(self.cache):
+            child = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL)
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    child.wait(timeout=0.25)
+                self.assertFalse(marker.exists())
+            except BaseException:
+                child.terminate()
+                child.wait(timeout=5)
+                raise
+        try:
+            self.assertEqual(child.wait(timeout=10), 0)
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+        self.assertTrue(marker.is_file())
+        with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+            with setup.setup_lock(self.cache):
+                raise RuntimeError("synthetic failure")
+        with setup.setup_lock(self.cache):
+            pass
 
 
 class Parsers(unittest.TestCase):

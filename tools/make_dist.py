@@ -12,10 +12,11 @@ import json
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
+import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat"}
+TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat", "third_party/README.md"}
 SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
 SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
 THIRD_PARTY_SOURCE_SUFFIXES = SOURCE_SUFFIXES | {".in", ".def", ".rc", ".s", ".asm", ".m", ".mm",
@@ -87,7 +88,7 @@ def package(root, out, name, list_tracked=tracked):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     target = out / (name + ".zip")
-    tmp = target.with_suffix(".zip.partial")
+    tmp = target.with_suffix(".zip.partial-" + uuid.uuid4().hex[:8])
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
             for relative, source in sorted(files.items()):

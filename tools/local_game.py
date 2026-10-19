@@ -88,11 +88,13 @@ def read_program(nsp, keys_path):
                 raise ValueError("Truncated NCA header")
             try:
                 nca = Nca(f, off, size, keys, title_keys)
-            except KeyError as e:
+            except KeyError:
                 # Key names are public identifiers; never interpolate input key values.
                 raise ValueError("Required decryption key is missing; supply a complete own prod.keys and ticket") from None
             except ValueError:
                 raise ValueError("Cannot decrypt NCA header; check your own dump and keys") from None
+            except (IndexError, struct.error):
+                raise ValueError("Malformed or unsupported NCA metadata") from None
             if nca.content_type == 0:
                 if any(s.start < 0xC00 or s.end > size or s.end <= s.start for s in nca.sections):
                     raise ValueError("NCA section outside container")
