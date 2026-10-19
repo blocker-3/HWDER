@@ -113,4 +113,13 @@ bool GameSources::read(const Locator& locator,std::vector<u8>& out)const {
     }
     return false;
 }
+bool GameSources::verify()const {
+    for(const auto& l:shaders_) {
+        std::vector<u8> bytes;u32 size=0;Digest hash{};
+        if(!read(l,bytes) || bytes.size()<4)return false;
+        u32 header;std::memcpy(&header,bytes.data(),4);
+        if(!source_identity(bytes.data(),bytes.size(),(header>>10)&15,size,hash) || size!=l.size || hash!=l.sha256)return false;
+    }
+    return !shaders_.empty();
+}
 } // namespace gpu::catalog

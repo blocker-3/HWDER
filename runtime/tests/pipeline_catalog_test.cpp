@@ -1,12 +1,21 @@
 #include "gpu/vk/pipeline_catalog.h"
+#include "gpu/vk/catalog_game_sources.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <stdexcept>
 #include <windows.h>
 extern "C" void hw_log(const char*,...) {}
 extern "C" void hw_fatal(const char*) {std::abort();}
+static std::string test_root;
+const std::string& hw_romfs_path(){return test_root;}
+namespace hwfs::nsp {
+bool active(){return false;}
+uint64_t romfs_size(){return 0;}
+bool romfs_read(uint64_t,uint8_t*,uint64_t){return false;}
+}
 using namespace gpu;
 static unsigned checks=0;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}}while(0)
@@ -74,6 +83,7 @@ int main() {
     CHECK(warmup::equal(prepared.programs[0],translated));
     auto unresolved=catalog::prepare(cat,[](const catalog::Locator&,std::vector<u8>&){return false;},[&](auto p){progress=p;});
     CHECK(unresolved.programs.empty() && unresolved.pipelines.empty());CHECK(progress.unresolved==1);
+    CHECK(catalog::prepare(cat,[](const catalog::Locator&,std::vector<u8>&)->bool {throw std::runtime_error("unavailable source");},{}).pipelines.empty());
     auto changed=catalog::prepare(cat,[](const catalog::Locator& l,std::vector<u8>& b){b=source(l.offset==128?1:5);b[4]^=1;return true;},{});
     CHECK(changed.programs.empty());
     invalid=cat;invalid.programs[0].expected_translation^=1;CHECK(catalog::prepare(invalid,read,{}).pipelines.empty());
@@ -91,7 +101,21 @@ int main() {
     CHECK(catalog::save(path.c_str(),replacement)==catalog::Status::IoError);CloseHandle(locked);
     CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok && round.scope==cat.scope);
     invalid=cat;invalid.scope="";CHECK(catalog::save(path.c_str(),invalid)==catalog::Status::Invalid);CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok);
-    std::filesystem::remove(directory/"catalog.bin");std::filesystem::remove(directory);
+    std::filesystem::remove(directory/"catalog.bin");
     CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::NotFound);
+    // Extracted-resource adapter uses the same raw NVN locator path as the NSP.
+    test_root=directory.string();auto resource=directory/"data/stage/common/StageShader.bin.gz";
+    std::filesystem::create_directories(resource.parent_path());
+    std::vector<u8> container(0x30);u32 nvn=0x12345678;std::memcpy(container.data(),&nvn,4);
+    container.insert(container.end(),good.begin(),good.end());
+    FILE* f=_wfopen(resource.c_str(),L"wb");CHECK(f!=nullptr);CHECK(fwrite(container.data(),1,container.size(),f)==container.size());fclose(f);
+    catalog::GameSources sources;CHECK(sources.index());CHECK(sources.count()==1);CHECK(sources.verify());
+    catalog::Locator locator;CHECK(sources.locate(good.data(),good.size(),1,locator));CHECK(locator.offset==0x30);
+    std::vector<u8> reread;CHECK(sources.read(locator,reread));CHECK(reread==good);
+    auto escape=locator;escape.resource="../outside";CHECK(!sources.read(escape,reread));
+    auto oversized=locator;oversized.offset=~0ull;CHECK(!sources.read(oversized,reread));
+    f=_wfopen(resource.c_str(),L"wb");CHECK(f!=nullptr);fputc(0,f);fclose(f);CHECK(!sources.read(locator,reread));
+    std::filesystem::remove(resource);
+    std::filesystem::remove(directory/"data/stage/common");std::filesystem::remove(directory/"data/stage");std::filesystem::remove(directory/"data");std::filesystem::remove(directory);
     std::printf("pipeline catalog: %u checks passed; synthetic metadata only\n",checks);return 0;
 }

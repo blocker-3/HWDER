@@ -22,8 +22,8 @@ int main(int argc,char** argv) {
     if(argc!=4 && argc!=7){fprintf(stderr,"usage: pipeline_catalog_tool game.nsp prod.keys exe-directory [catalog.bin build-tag game-version]\n");return 2;}
     hw_config_load(argv[3]);hwfs::nsp::set_paths(argv[1],argv[2]);std::string error;
     if(!hwfs::nsp::init(argv[3],error)){fprintf(stderr,"%s\n",error.c_str());return 1;}
-    gpu::catalog::GameSources sources;if(!sources.index())return 1;
-    printf("Verified %zu local raw-NVN identities; no game or shader bytes written.\n",sources.count());
+    gpu::catalog::GameSources sources;if(!sources.index() || !sources.verify())return 1;
+    printf("Verified %zu local raw-NVN identities by fresh resource/offset reread; no game or shader bytes written.\n",sources.count());
     if(argc==7) {
         gpu::catalog::Catalog cat;
         auto status=gpu::catalog::load(argv[4],strtoull(argv[5],nullptr,0),strtoul(argv[6],nullptr,0),cat);

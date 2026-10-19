@@ -8,6 +8,7 @@ public:
     bool index();
     bool locate(const u8* bytes, size_t available, u32 stage, Locator& out) const;
     bool read(const Locator&, std::vector<u8>&) const;
+    bool verify() const;  // read-only source-locator roundtrip, writes no code
     size_t count() const { return shaders_.size(); }
 private:
     struct Resource { std::string name; u64 offset, size; };

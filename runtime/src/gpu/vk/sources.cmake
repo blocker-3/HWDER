@@ -24,6 +24,7 @@ set(CATALOG_TRANSLATOR_SOURCES
     runtime/src/shader/emit_alu.cpp runtime/src/shader/emit_mem.cpp)
 add_executable(pipeline_catalog_test EXCLUDE_FROM_ALL
     runtime/tests/pipeline_catalog_test.cpp
+    runtime/src/gpu/vk/catalog_game_sources.cpp
     runtime/src/gpu/vk/pipeline_catalog.cpp
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp ${CATALOG_TRANSLATOR_SOURCES})
 add_executable(pipeline_catalog_tool EXCLUDE_FROM_ALL

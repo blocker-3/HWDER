@@ -160,6 +160,7 @@ warmup::Cache prepare(const Catalog& cat,const ReadSource& read,const std::funct
     std::vector<u32> remap(cat.programs.size(),~0u);
     for(u32 i=0;i<cat.programs.size();i++) {
         const auto& p=cat.programs[i];warmup::ProgramRecord record;record.key=p.key;bool ok=true;
+        try {
         for(u32 j=0;j<5 && ok;j++)if(p.stages[j].present) {
             const auto& s=p.stages[j];std::vector<u8> bytes;
             u32 length=0;Digest hash{};
@@ -169,6 +170,7 @@ warmup::Cache prepare(const Catalog& cat,const ReadSource& read,const std::funct
             record.stages[j].program=shader::translate(env,shader::Stage(j+1),s.options);
             if(!env.safe || record.stages[j].program.spirv.empty())ok=false;
         }
+        } catch(const std::exception&) { ok=false; }
         record.fingerprint=warmup::fingerprint(record);
         if(ok && record.fingerprint==p.expected_translation){remap[i]=u32(cache.programs.size());cache.programs.push_back(std::move(record));++progress.resolved;}
         else ++progress.unresolved;
