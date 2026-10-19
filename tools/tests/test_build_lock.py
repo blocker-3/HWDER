@@ -1,5 +1,6 @@
 """Public process/host-path regressions; never acquire the real build lock."""
 from contextlib import contextmanager
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -90,6 +91,34 @@ class BuildLock(unittest.TestCase):
                 # A different process must reacquire after the exception.
                 subprocess.run([sys.executable, "-c", script], timeout=10, check=True,
                                stdout=subprocess.DEVNULL)
+
+
+class BuildModes(unittest.TestCase):
+    def test_default_synthetic_build_includes_excluded_codec_suites(self):
+        # The codec executables are EXCLUDE_FROM_ALL: Ninja's `all` target is
+        # insufficient even though configure and an A64-only build can succeed.
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ["build.py", "--synthetic-tests", "--build-dir", directory]
+            with patch.object(build, "build_lock"), \
+                 patch.object(build, "toolchain", return_value=({}, "cmake", "ninja", "clang", "clang++")), \
+                 patch.object(build.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 patch.object(sys, "argv", argv):
+                self.assertEqual(build.main(), 0)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "synthetic_tests")
+
+    def test_absent_host_candidate_fails_before_lock_or_toolchain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(build, "ROOT", directory), \
+                 patch.object(build, "build_lock") as lock, \
+                 patch.object(build, "toolchain") as toolchain, \
+                 patch.object(sys, "argv", ["build.py", "--host-tests"]), \
+                 patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                with self.assertRaises(SystemExit) as error:
+                    build.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn("separate, unmerged Linux host-test candidate", stderr.getvalue())
+                lock.assert_not_called()
+                toolchain.assert_not_called()
 
 
 if __name__ == "__main__":

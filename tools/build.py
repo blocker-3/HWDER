@@ -57,6 +57,8 @@ def main():
         ap.error("--jobs must be at least 1")
     if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only):
         ap.error("--only-file cannot be combined with a test/library mode")
+    if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
+        ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
     # Single-file probes and complete builds share the same host reservation.
     with build_lock():
         return build(a)
@@ -90,7 +92,7 @@ def build(a):
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
-    target = a.target or ("all" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
+    target = a.target or ("synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
     return subprocess.run([ninja, "-C", bdir, "-j", str(a.jobs), target], env=env).returncode
 
 
