@@ -26,9 +26,8 @@ def build_lock():
     path = lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
-        if stream.seek(0, os.SEEK_END) == 0:
-            stream.write(b"\0")
-            stream.flush()
+        # msvcrt can lock past EOF. Do not seed a byte: an older build.py may
+        # already own byte zero of an empty file, making that write fail.
         waited = False
         while True:
             try:
