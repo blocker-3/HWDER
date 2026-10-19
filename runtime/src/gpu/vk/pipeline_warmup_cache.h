@@ -63,7 +63,8 @@ const char* name(Status status);
 // On failure load leaves out unchanged. Save validates before creating a unique
 // sibling temporary file, flushes it, then atomically replaces path on Windows.
 Status load(const char* path, u64 compatibility_tag, Cache& out);
-Status save(const char* path, u64 compatibility_tag, const Cache& cache);
+struct SaveTimings { double validation_ms = 0, serialization_ms = 0, disk_ms = 0; };
+Status save(const char* path, u64 compatibility_tag, const Cache& cache, SaveTimings* timings = nullptr);
 
 // Union compatible private history with newly prepared catalog recipes. Exact
 // program/key duplicates are reused; distinct same-key shader variants survive.
