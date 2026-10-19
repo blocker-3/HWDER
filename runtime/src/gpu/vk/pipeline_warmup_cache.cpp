@@ -8,6 +8,7 @@
 #include <iterator>
 #include <memory>
 #include <tuple>
+#include <unordered_map>
 #include <windows.h>
 
 namespace gpu::warmup {
@@ -302,6 +303,61 @@ bool equal(const ProgramRecord& a, const ProgramRecord& b) {
     for (u32 i = 0; i < 5; ++i)
         if (a.stages[i].present != b.stages[i].present || (a.stages[i].present && !equal(a.stages[i].program,b.stages[i].program))) return false;
     return true;
+}
+
+Status merge(Cache& retained, const Cache& additional) {
+    try {
+        if (!valid_cache(retained) || !valid_cache(additional)) return Status::Invalid;
+        Cache combined = retained;
+        std::vector<u32> remap(additional.programs.size());
+        for (u32 i = 0; i < additional.programs.size(); ++i) {
+            const auto& program = additional.programs[i];
+            auto found = std::find_if(combined.programs.begin(), combined.programs.end(), [&](const auto& existing) {
+                return existing.fingerprint == program.fingerprint && equal(existing, program);
+            });
+            if (found != combined.programs.end()) {
+                remap[i] = (u32)(found - combined.programs.begin());
+            } else {
+                if (combined.programs.size() == kMaxPrograms) return Status::Invalid;
+                remap[i] = (u32)combined.programs.size();
+                combined.programs.push_back(program);
+            }
+        }
+        auto key_hash = [](const PipelineKey& key) { Encoder encoded; write_key(encoded, key); return encoded.hash; };
+        std::unordered_multimap<u64, u32> recipes;
+        for (u32 i = 0; i < combined.pipelines.size(); ++i) recipes.emplace(key_hash(combined.pipelines[i].key), i);
+        for (const auto& source : additional.pipelines) {
+            PipelineRecord record = source;
+            record.program_index = remap[source.program_index];
+            const u64 hash = key_hash(record.key);
+            const auto words = key_words(record.key);
+            bool duplicate = false;
+            auto [first, last] = recipes.equal_range(hash);
+            for (; first != last; ++first) {
+                const auto& existing = combined.pipelines[first->second];
+                if (existing.program_index == record.program_index && key_words(existing.key) == words) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            if (combined.pipelines.size() == kMaxPipelines) return Status::Invalid;
+            recipes.emplace(hash, (u32)combined.pipelines.size());
+            combined.pipelines.push_back(record);
+        }
+        // Enforce the actual encoded limit before accepting an in-memory union.
+        Encoder encoded;
+        encoded.word((u32)combined.programs.size()); encoded.word((u32)combined.pipelines.size());
+        for (const auto& program : combined.programs) {
+            encoded.wide(program.fingerprint); write_record_content(encoded, program);
+        }
+        for (const auto& record : combined.pipelines) {
+            encoded.word(record.program_index); encoded.wide(record.program_fingerprint); write_key(encoded, record.key);
+        }
+        if (!encoded.ok || encoded.size > kMaxFileBytes - kHeaderBytes) return Status::Invalid;
+        retained = std::move(combined);
+        return Status::Ok;
+    } catch (const std::exception&) { return Status::Invalid; }
 }
 
 Status save(const char* path, u64 compatibility_tag, const Cache& cache) {

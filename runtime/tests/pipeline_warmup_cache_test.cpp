@@ -106,6 +106,60 @@ int main() {
     }
     check(save(second.c_str(),kTag,loaded)==Status::Ok && read(path)==read(second),"deterministic canonical encoding");
     auto good=read(path);
+    // A partial catalog must not replace private successes it did not observe.
+    Cache partial=original; partial.pipelines.resize(1);
+    Cache retained=original;
+    check(merge(retained,partial)==Status::Ok && retained.pipelines.size()==2 && retained.programs.size()==1,
+          "partial catalog retains unvisited private recipes and deduplicates overlap");
+    Cache additional=partial;
+    additional.programs[0].key^=0x8000000000000000ull;
+    additional.programs[0].fingerprint=fingerprint(additional.programs[0]);
+    additional.pipelines[0].key.program=additional.programs[0].key;
+    additional.pipelines[0].program_fingerprint=additional.programs[0].fingerprint;
+    check(merge(retained,additional)==Status::Ok && retained.programs.size()==2 && retained.pipelines.size()==3,
+          "private history survives when only another catalog program resolves");
+    check(retained.pipelines[2].program_index==1 && retained.pipelines[2].program_fingerprint==retained.programs[1].fingerprint,
+          "merged recipe references are remapped to full program identity");
+    check(equal(retained.programs[0],original.programs[0]) && retained.pipelines[1].key.topology==original.pipelines[1].key.topology,
+          "unvisited private shader and static state remain unchanged");
+    auto duplicate=additional;
+    duplicate.programs.push_back(duplicate.programs[0]);
+    duplicate.pipelines.push_back(duplicate.pipelines[0]); duplicate.pipelines.back().program_index=1;
+    check(merge(retained,duplicate)==Status::Ok && retained.programs.size()==2 && retained.pipelines.size()==3,
+          "duplicate catalog groups and repeated imports do not grow private history");
+    if constexpr(sizeof(PipelineKey)>916) {
+        std::memset(reinterpret_cast<u8*>(&duplicate.pipelines[0].key)+916,0xa5,sizeof(PipelineKey)-916);
+        check(merge(retained,duplicate)==Status::Ok && retained.pipelines.size()==3,"key deduplication ignores object padding");
+    }
+    auto variant=partial;
+    variant.programs[0].stages[0].program.resources.textures[0].count=2;
+    variant.programs[0].fingerprint=fingerprint(variant.programs[0]);
+    variant.pipelines[0].program_fingerprint=variant.programs[0].fingerprint;
+    check(merge(retained,variant)==Status::Ok && retained.programs.size()==3 && retained.pipelines.size()==4,
+          "same-key shader variants retain distinct recipes despite identical static keys");
+    auto live=original.pipelines[0]; live.key.topology=4; retained.pipelines.push_back(live);
+    check(save(second.c_str(),kTag,retained)==Status::Ok,"merged history persists after observing another live pipeline");
+    Cache persisted;
+    check(load(second.c_str(),kTag,persisted)==Status::Ok && persisted.programs.size()==3 && persisted.pipelines.size()==5 &&
+          equal(persisted.programs[0],original.programs[0]) && persisted.pipelines[1].key.topology==3,
+          "save and reload preserve historical recipes not visited after catalog preparation");
+    auto invalid_additional=additional; invalid_additional.pipelines[0].program_index=99;
+    check(merge(retained,invalid_additional)==Status::Invalid && retained.programs.size()==3 && retained.pipelines.size()==5,
+          "invalid catalog merge leaves private history unchanged");
+    Cache program_limit=original;
+    for(u32 i=1;i<kMaxPrograms;++i) {
+        auto record=original.programs[0]; record.key+=i; record.fingerprint=fingerprint(record);
+        program_limit.programs.push_back(std::move(record));
+    }
+    check(merge(program_limit,additional)==Status::Invalid && program_limit.programs.size()==kMaxPrograms && program_limit.pipelines.size()==2,
+          "program limit rejects union without discarding private records");
+    Cache pipeline_limit=original;
+    pipeline_limit.pipelines.resize(kMaxPipelines,original.pipelines[0]);
+    check(merge(pipeline_limit,additional)==Status::Invalid && pipeline_limit.programs.size()==1 && pipeline_limit.pipelines.size()==kMaxPipelines,
+          "pipeline limit rolls back appended programs and retains prior fallback");
+    Cache fresh;
+    check(merge(fresh,additional)==Status::Ok && fresh.programs.size()==1 && fresh.pipelines.size()==1 &&
+          equal(fresh.programs[0],additional.programs[0]),"absent private cache still accepts catalog-only startup");
     unchanged_on_failure(path,kTag+1,Status::Incompatible);
     // Each changed semantic field must defeat exact equality, even a forged matching fingerprint.
     auto different=[&](auto change) {

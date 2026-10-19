@@ -65,6 +65,11 @@ const char* name(Status status);
 Status load(const char* path, u64 compatibility_tag, Cache& out);
 Status save(const char* path, u64 compatibility_tag, const Cache& cache);
 
+// Union compatible private history with newly prepared catalog recipes. Exact
+// program/key duplicates are reused; distinct same-key shader variants survive.
+// Invalid/oversized input or allocation failure leaves retained unchanged.
+Status merge(Cache& retained, const Cache& additional);
+
 // Fingerprints are only a lookup filter, not proof of equality. They include the
 // key and all present stages' fields; stored fingerprint and absent payloads are ignored.
 u64 fingerprint(const ProgramRecord& program);

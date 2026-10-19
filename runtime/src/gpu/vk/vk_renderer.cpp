@@ -4541,6 +4541,19 @@ void prepare_pipeline_catalog() {
                 if(p.done==p.total)hw_log("catalog: local translation: %u resolved, %u unresolved of %u",p.resolved,p.unresolved,p.total);
             });
             if(!cache.pipelines.empty()) {
+                // A catalog is partial. Preserve compatible private successes,
+                // including programs whose catalog source could not be resolved.
+                warmup::Cache retained;
+                const auto private_status = warmup::load(kWarmupFile, warmup_compatibility(), retained);
+                if (private_status == warmup::Status::Ok) {
+                    const size_t historical = retained.pipelines.size();
+                    const auto merged = warmup::merge(retained, cache);
+                    hw_log("catalog: private history %zu recipes, union %s (%zu recipes); keeping private records on failure",
+                           historical, warmup::name(merged), retained.pipelines.size());
+                    cache = std::move(retained);
+                } else {
+                    hw_log("catalog: private history %s; preparing resolved catalog recipes", warmup::name(private_status));
+                }
                 auto* target=static_cast<VkRenderer*>(renderer());target->start_prewarm(std::move(cache),0);target->wait_catalog();
                 prelaunch::preparation_frame(nullptr);return;
             }
