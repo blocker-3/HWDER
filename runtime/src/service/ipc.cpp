@@ -4,6 +4,7 @@
 #include "ipc.h"
 
 #include <cstring>
+extern "C" void hw_gi_note_ipc(const char* service, u32 command);  // interp/interp_draw.cpp
 
 extern "C" void hw_log_backtrace(const char* tag);
 
@@ -287,6 +288,7 @@ Result send_sync_request(Handle h, u8* msg) {
         // A service call that takes long blocks the guest thread that issued it: report it.
         LARGE_INTEGER d0, d1, df;
         QueryPerformanceCounter(&d0);
+        hw_gi_note_ipc(target->name().c_str(), rq.command);
         target->dispatch(rq, rs);
         QueryPerformanceCounter(&d1);
         QueryPerformanceFrequency(&df);

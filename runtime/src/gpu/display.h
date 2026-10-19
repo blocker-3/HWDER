@@ -32,8 +32,10 @@ HWND window();
 
 // Present a guest frame (an image in GENERAL layout). Paced to the guest swap interval.
 // wait_sem/wait_value: timeline semaphore the presentation blit waits on (the renderer's last submit).
+// release_hz: per-queued-frame GI pacing (60 or 120), overriding experiment environment/output Hz.
+// Zero preserves native/legacy behavior. 120 ignores guest swap interval; 60 honors native intervals.
 void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSemaphore wait_sem = VK_NULL_HANDLE,
-                   u64 wait_value = 0);
+                   u64 wait_value = 0, u32 release_hz = 0);
 
 // Completion ticket of the last present_image's blit (0 if it submitted none). wait_present_done blocks until
 // that blit has finished reading its source image (false on timeout).

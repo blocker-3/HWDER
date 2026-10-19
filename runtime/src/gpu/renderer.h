@@ -43,6 +43,9 @@ struct FramebufferInfo {
     // crop rectangle (0,0,0,0 = whole surface)
     s32 crop_left = 0, crop_top = 0, crop_right = 0, crop_bottom = 0;
     u32 swap_interval = 1;
+    // Captured by QueueBuffer on the guest thread: 0 normal presenter semantics, 60 native GI
+    // screen/unpaired tick, 120 a game-drawn extra or its paired real frame.
+    u32 release_hz = 0;
 };
 
 class Renderer {

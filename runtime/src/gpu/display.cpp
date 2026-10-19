@@ -15,7 +15,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 namespace display {
 void validation_report();  // HWDER_VALIDATION message counts (below)
 
@@ -408,7 +407,7 @@ double monitor_hz() {
     if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) return (double)dm.dmDisplayFrequency;
     return 60.0;
 }
-static void frame_limit(u32 interval) {
+static void frame_limit(u32 interval, u32 release_hz) {
     static LARGE_INTEGER freq, next;
     static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
@@ -418,16 +417,18 @@ static void frame_limit(u32 interval) {
     // limiter to 30 fps (the title screen alternates 1/2 every second, which made that stutter).
     // The game is frame-locked (its logic advances per released frame), so the release grid stays at
     // 60 Hz whatever the display runs at; HWDER_FPS exists only for experiments.
-    double fps = env ? atof(env) : (g_output_hz > 0 ? g_output_hz : 60.0);
+    // GI rate is attached to the queued frame, not inferred from the producer's current state: the
+    // compositor can lag across battle/menu transitions. Native experiments keep their old semantics.
+    double fps = release_hz ? (double)release_hz : (env ? atof(env) : (g_output_hz > 0 ? g_output_hz : 60.0));
     static u32 last_interval = 0;
     if (interval != last_interval) {
         last_interval = interval;
         hw_log("display: swap interval %u", interval);
     }
-    u32 slots = g_output_hz > 0 ? 1 : std::max(1u, std::min(interval, 4u));
+    u32 slots = (release_hz == 120 || (!release_hz && g_output_hz > 0)) ? 1 : std::max(1u, std::min(interval, 4u));
     // Experiment: release every frame at the 60 Hz grid even when the game asks for interval 2.
     static const bool force1 = getenv("HWDER_FORCE_INTERVAL1") != nullptr;
-    if (force1) slots = 1;
+    if (force1 && !release_hz) slots = 1;
     if (fps <= 0) return;
     // The compositor's timer wake-ups must not be delayed by other busy threads (a late wake-up shows
     // up directly as a late frame followed by a short one).
@@ -647,10 +648,16 @@ bool wait_present_done(u64 ticket, u64 timeout_ns) {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &g_present_timeline;
     wi.pValues = &ticket;
-    return vkWaitSemaphores(g_dev.dev, &wi, timeout_ns) == VK_SUCCESS;
+    VkResult result = vkWaitSemaphores(g_dev.dev, &wi, timeout_ns);
+    if (result != VK_SUCCESS && result != VK_TIMEOUT) {
+        hw_log("display: presentation timeline wait failed (%d)", (int)result);
+        hw_fatal("Vulkan presentation wait failed");
+    }
+    return result == VK_SUCCESS;
 }
 
-void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSemaphore wait_sem, u64 wait_value) {
+void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSemaphore wait_sem, u64 wait_value,
+                   u32 release_hz) {
     {
         // Frame pacing statistics: interval between guest presents, logged every 300 frames.
         static LARGE_INTEGER freq, last;
@@ -682,7 +689,7 @@ void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSe
     QueryPerformanceCounter(&t0);
     // Wait for the slot first, then present: the caller's work for the next output (frame
     // interpolation replays) overlaps the wait instead of delaying the present.
-    frame_limit(swap_interval);
+    frame_limit(swap_interval, release_hz);
     QueryPerformanceCounter(&t1);
     g_last_image_ticket = present(image, width, height, black, wait_sem, wait_value);
     update_title(true);

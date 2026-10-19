@@ -8,6 +8,9 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
+extern "C" u32 hw_game_interp_release_hz();  // interp/interp_draw.cpp, called on the guest thread
+
+extern "C" void hw_frame_probe_mark(const char* what);  // interp/frame_probe.cpp
 
 namespace ipc {
 namespace {
@@ -159,7 +162,20 @@ struct Slot {
 struct Queued {
     int slot;
     QueueBufferInput in;
+    u32 release_hz = 0;  // immutable pacing metadata captured before compositor execution
 };
+
+// A timeout is diagnostic, never proof that the guest may overwrite a pending display-blit source.
+// Device loss is handled by display::wait_present_done's fatal path; a genuine stall stays acquired
+// until completion or process shutdown (the window close handler terminates detached workers).
+void wait_screen_read(u64 ticket, int slot) {
+    u64 waited = 0;
+    while (!display::wait_present_done(ticket, 1000000000ull)) {
+        if (++waited == 1 || waited % 10 == 0)
+            hw_log("vi: screen blit of slot %d not finished after %llu s - still waiting", slot,
+                   (unsigned long long)waited);
+    }
+}
 
 class BufferQueue {
 public:
@@ -187,6 +203,7 @@ public:
             break;
         }
         case 3: {  // DequeueBuffer(async, w, h, format, usage)
+            hw_frame_probe_mark("dequeue");
             in.read<u32>();
             u32 w = in.read<u32>(), h = in.read<u32>();
             (void)w, (void)h;
@@ -204,13 +221,14 @@ public:
             break;
         }
         case 7: {  // QueueBuffer(slot, QueueBufferInput)
+            hw_frame_probe_mark("queue");
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
             {
                 std::lock_guard<std::mutex> l(m_);
                 if (slot >= 0 && slot < kSlots) {
                     slots_[slot].state = SlotState::Queued;
-                    queue_.push_back({slot, qbi});
+                    queue_.push_back({slot, qbi, hw_game_interp_release_hz()});
                 }
             }
             cv_.notify_all();
@@ -359,7 +377,6 @@ private:
                     if (++waited == 1 || waited % 10 == 0)
                         hw_log("vi: frame fence %u:%u not reached after %d s (value %u) - still waiting", q.in.fence.fences[i].id,
                                q.in.fence.fences[i].value, waited, nv::syncpoint_read(q.in.fence.fences[i].id));
-                    if (waited >= 30) break;  // escape hatch for a wedged GPU thread
                 }
             }
             gpu::FramebufferInfo fb;
@@ -378,8 +395,31 @@ private:
             fb.crop_right = q.in.crop_right;
             fb.crop_bottom = q.in.crop_bottom;
             fb.swap_interval = q.in.swap_interval ? q.in.swap_interval : 1;
+            fb.release_hz = q.release_hz;
             if (fb.address) gpu::renderer()->present(fb);
             u64 ticket = fb.address ? display::last_present_ticket() : 0;
+            // Stage b (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
+            // instead of when the next frame arrives. The game can then queue two frames ahead (triple
+            // buffering), which absorbs a slow game tick at 120 Hz; the release grid still paces it.
+            if (fb.release_hz && ticket) {
+                wait_screen_read(ticket, q.slot);
+                {
+                    std::lock_guard<std::mutex> l(m_);
+                    if (presented >= 0 && presented != q.slot && slots_[presented].state == SlotState::Acquired)
+                        slots_[presented].state = SlotState::Free;
+                    slots_[q.slot].present_ticket = ticket;
+                    slots_[q.slot].frame = ++frame;
+                    slots_[q.slot].state = SlotState::Free;
+                    presented = -1;
+                }
+                cv_.notify_all();
+                buffer_event->signal();
+                if (frame == 1) {
+                    hw_log("vi: first frame presented (%ux%u)", fb.width, fb.height);
+                    display::set_status("game running");
+                }
+                continue;
+            }
             // The previous buffer goes back to the guest below. Its screen blit runs on the present queue, which
             // nothing orders against the renderer's later writes, so wait until it has read the buffer: otherwise
             // the guest can draw a later frame into it before it reaches the screen.
@@ -389,8 +429,7 @@ private:
                     std::lock_guard<std::mutex> l(m_);
                     prev_ticket = slots_[presented].present_ticket;
                 }
-                if (!display::wait_present_done(prev_ticket, 1000000000ull))
-                    hw_log("vi: screen blit of slot %d not finished after 1 s - releasing it anyway", presented);
+                wait_screen_read(prev_ticket, presented);
             }
             {
                 std::lock_guard<std::mutex> l(m_);
