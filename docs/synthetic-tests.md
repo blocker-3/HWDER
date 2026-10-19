@@ -40,8 +40,8 @@ Coverage:
   integer model checks results, NZCV preservation/changes and source-register
   preservation over 8,896 edge/random execution cases. Fixtures are public ISA
   values rather than instructions sampled from a game dump.
-- When the separately reviewed first-run candidate is integrated, its tracked
-  `test_first_run.py` suite runs automatically. The reviewed candidate has 33 synthetic tests,
+- The integrated first-run `test_first_run.py` suite runs automatically with
+  37 synthetic tests,
   including cache invalidation/recovery, coordinator locking, bounded container
   parsing and source-package exclusions with per-file hashes. Its absence is
   reported as an explicit skip and workflow warning; partial integration fails.
@@ -53,5 +53,5 @@ Coverage:
 
 Full game-derived differential tests (`tools/recomp/difftest.py`), runtime/GPU
 behavior, whole-source kit production, private generation/build recovery with
-real input, and Linux cache/catalog IO are outside these CI claims. In particular,
-the legacy packager on main is never invoked or treated as a validated source kit.
+real input, and Linux cache/catalog IO are outside these CI claims. The synthetic runner does not invoke the source/setup packager or certify a complete
+kit; local integration validation records that separate check.

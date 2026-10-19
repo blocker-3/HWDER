@@ -19,7 +19,7 @@ def main():
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tools/tests"), pattern="test_build_lock.py")
     if not suite.countTestCases():
         raise RuntimeError("Build-lock suite discovered zero tests")
-    # This suite belongs to the separate, unmerged first-run candidate. Never
+    # The integrated first-run suite is optional for older source checkouts. Never
     # silently pass an empty discovery or fetch another branch's implementation.
     feature = [ROOT / "tools" / p for p in
                ("first_run.py", "local_game.py", "tests/test_first_run.py")]
