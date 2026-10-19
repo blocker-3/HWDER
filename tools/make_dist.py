@@ -16,7 +16,8 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat", "third_party/README.md"}
+TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat", "third_party/README.md",
+             "third_party/renderdoc/renderdoc_app.h"}
 SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
 SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
 THIRD_PARTY_SOURCE_SUFFIXES = SOURCE_SUFFIXES | {".in", ".def", ".rc", ".s", ".asm", ".m", ".mm",
