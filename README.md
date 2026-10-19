@@ -247,6 +247,14 @@ then Start Battle; `HWDER_AUTOPLAY_CAM=1` turns the camera; `HWDER_AUTOPLAY_IDLE
 battle). `HWDER_FILMSTRIP=<dir>` saves every presented frame (`HWDER_FILMSTRIP_W=<width>`; window:
 `HWDER_FILMSTRIP_BATTLE=<s after the battle starts>` or `_AFTER=<s>`, and `_FOR=<s>`).
 
+## Public synthetic tests
+
+`python tools/tests/run_synthetic.py --jobs 2` runs the cache/catalog codecs and
+compiled A64 arithmetic regressions without a game dump, generated game code,
+keys, saves, Vulkan device or private cache. See [test setup and coverage](docs/synthetic-tests.md).
+Source-package exclusion tests run automatically when the separate first-run
+candidate is integrated; their current absence is reported explicitly.
+
 ## Status
 
 Boots, menus, movies, Adventure/Legend mode battles, saves and audio work; gameplay runs at the
