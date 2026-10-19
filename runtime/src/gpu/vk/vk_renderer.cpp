@@ -955,7 +955,7 @@ private:
     void obj_frame_begin(u64 tag);
     void obj_transforms(u32 index, u8* data, u64 bytes);
     bool obj_candidate(u32 index, u64 bytes) const {
-        return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && interp::game_interp() && gpu::exec_gi_tag();
+        return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && gpu::exec_gi_tag();
     }
     u64 cur_draw_key_ = 0;             // program + vertex/index addresses + counts of the draw being bound
     u32 dump_draw_ = 0;                // draws so far in the dumped frame
@@ -2329,7 +2329,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         }
     } timer(obj_st_.ms);
     static const bool off = getenv("HWDER_GI_NO_OBJECTS") != nullptr;
-    if (!interp::game_interp() || off) return;
+    if (off) return;
     u64 tag = gpu::exec_gi_tag();
     if (!tag) return;
     obj_frame_begin(tag);
@@ -5104,7 +5104,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     if (env_interp) out_hz = atoi(env_interp);
     if (out_hz < 0) out_hz = (int)display::monitor_hz();
     // Game interpolation already queues its own extra frames and owns their pacing.
-    if (interp::game_interp()) {
+    if (fb.release_hz || interp::game_interp()) {
         static bool reported = false;
         if (out_hz && !reported) {
             hw_log("vk: legacy replay override ignored while game-drawn interpolation is enabled");

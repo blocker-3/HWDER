@@ -7,7 +7,9 @@ Native 60 remains the default. The measured loop and research history are in `do
 
 ## Configuration and pacing
 
-Enable game-drawn interpolation with `HWDER_GAME_INTERP=1`. No `HWDER_FPS` setting is required.
+Enable "120 fps (experimental)" in Settings > Display > Frame rate; it defaults off and is saved as
+`fps120=`. The test override `HWDER_GAME_INTERP=0/1` takes precedence over that setting.
+No `HWDER_FPS` setting is required.
 QueueBuffer captures the calling thread's frame classification and carries it to the compositor:
 
 | Queued frame | Release grid |
@@ -16,8 +18,10 @@ QueueBuffer captures the calling thread's frame classification and carries it to
 | Battle tick whose extra was skipped/rejected | Native 60 Hz, honoring guest swap interval |
 | Menus, pause, loading and other single-present screens | Native 60 Hz, honoring guest swap interval |
 
-Every non-extra BeginFrame clears the previous pair; actually queueing an extra establishes the new
-pair. Classification belongs to the queued frame, so compositor lag does not carry battle pacing
+The UI publishes an atomic request. Every non-extra BeginFrame latches that request for its tick and
+clears the previous pair; actually queueing an extra establishes the new pair. Toggling the option
+mid-tick finishes that tick's pair at its captured rate; subsequent ticks use the new request.
+Classification belongs to the queued frame, so compositor lag does not carry battle pacing
 into a menu. There is no 100 ms freshness grace. `HWDER_FPS` and `HWDER_FORCE_INTERVAL1` are ignored
 while this mode controls presentation. With it off, existing native defaults and diagnostic
 environment overrides retain their previous behavior.
@@ -34,7 +38,8 @@ eye/target/up/roll, then rebuilt with the game's Camera::Update so derived view/
 the same camera. Camera cuts, projection changes, stale snapshots and mismatched live camera bytes
 reject the extra pass. Its original 0x170-byte camera is restored before the real draw.
 
-GPU submissions carry the tick and extra-frame tag. The renderer records owned copies of each real
+GPU submissions carry the tick and extra-frame tag; subsequent native frames clear that tag, while
+already-queued GPU work retains its classification after a UI toggle. The renderer records owned copies of each real
 draw's vertex-stage c3 transform data and blends matching world/bone matrices in the extra draw's GPU
 copy. Matching uses model draw keys, draw order and nearby positions. This is approximate linear
 matrix interpolation, not rotation slerp or persistent object identity; quick turns, nearby identical

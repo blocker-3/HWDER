@@ -1,6 +1,7 @@
 // User-facing settings (edited in the in-game menu, persisted in hwder_settings.ini next to the exe).
 #pragma once
 
+#include <atomic>
 #include <set>
 #include <string>
 
@@ -18,6 +19,7 @@ struct Video {
                                 // (true 21:9) instead of pillarboxing; the HUD stays a centred 16:9
     bool show_fps = false;      // small frame-time readout in the corner
     int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
+    std::atomic<bool> fps120{false};  // UI request, sampled at BeginFrame; read by guest/GPU threads
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)
     int menu_scale = 100;       // in-game menu text size, percent
     int contrast = 100;         // picture contrast in the game's final tonemap pass, percent (100 = unchanged)

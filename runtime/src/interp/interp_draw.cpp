@@ -15,7 +15,8 @@
 // f_10001df624) are not repeated. Each queued extra/paired-real frame carries a fixed 120 Hz release
 // rate, while unpaired frames and menus carry native 60 Hz pacing. HWDER_FPS is ignored in this mode.
 //
-// HWDER_GAME_INTERP=1 turns it on. HWDER_GI_LOG=1 logs a summary every 5 s.
+// Settings > Display enables it; HWDER_GAME_INTERP=0/1 overrides that request for tests.
+// HWDER_GI_LOG=1 logs a summary every 5 s.
 #include <windows.h>
 
 #include <cmath>
@@ -28,6 +29,7 @@
 #include <map>
 
 #include "hwder/runtime.h"
+#include "gpu/settings.h"
 #include "interp/camera.h"
 
 #pragma clang fp contract(off)
@@ -47,16 +49,16 @@ extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last p
 
 namespace interp {
 
+// Settings > Display > "120 fps" (settings::video().fps120, switchable while playing); HWDER_GAME_INTERP=0/1
+// overrides it for tests.
 bool game_interp() {
-    static const bool on = [] {
-        const char* e = getenv("HWDER_GAME_INTERP");
-        const bool enabled = e && atoi(e) != 0;
-        if (enabled)
-            hw_log("gi: game-drawn frames enabled: paired battle frames release at 120 Hz, unpaired screens at native "
-                   "60 Hz; HWDER_FPS and HWDER_FORCE_INTERVAL1 overrides ignored");
-        return enabled;
-    }();
-    return on;
+    static const int env = getenv("HWDER_GAME_INTERP") ? (atoi(getenv("HWDER_GAME_INTERP")) != 0) : -1;
+    const bool enabled = env >= 0 ? env != 0 : settings::video().fps120.load(std::memory_order_relaxed);
+    static std::atomic<bool> announced{false};
+    if (enabled && !announced.exchange(true, std::memory_order_relaxed))
+        hw_log("gi: game-drawn frames enabled: paired battle frames release at 120 Hz, unpaired screens at native "
+               "60 Hz; HWDER_FPS and HWDER_FORCE_INTERVAL1 overrides ignored");
+    return enabled;
 }
 
 }  // namespace interp
@@ -67,6 +69,8 @@ constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;  // return address of the BeginF
 
 thread_local bool g_in_extra = false;  // recursion guard and same-thread IPC diagnostic scope
 thread_local bool g_paired_real = false;  // this tick actually queued an extra present
+thread_local bool g_frame_gi = false;     // UI request latched at this thread's non-extra BeginFrame
+thread_local bool g_frame_started = false;
 u64 g_tick = 0;           // newest published tick when the current frame began
 
 struct Stats {
@@ -264,18 +268,26 @@ extern "C" void hw_gi_note_ipc(const char* service, u32 command) {
 // uses 120 only when its tick actually presented an extra; rejected/skipped extras and menus stay at
 // their native rate immediately. With GI off, preserve the normal presenter's environment semantics.
 extern "C" u32 hw_game_interp_release_hz() {
-    if (!interp::game_interp()) return 0;
     // Reaching a valid QueueBuffer is the evidence that this extra actually presents. Present's
     // successful return alone is not enough: the guest can finish it without queuing a buffer.
     if (g_in_extra) g_paired_real = true;
-    return g_in_extra || g_paired_real ? 120 : 60;
+    if (g_in_extra || g_paired_real) return 120;
+    const bool enabled = g_frame_started ? g_frame_gi : interp::game_interp();
+    return enabled ? 60 : 0;
 }
 
 // Hook (tools/recomp/hooks.txt): BeginFrame. Only the battle tick's call (from f_10002acb54) gets
 // the extra frame; menus and loading screens draw through other paths and stay at one frame per tick.
 extern "C" void f_100051e9c4(Ctx* c) {
-    if (!g_in_extra) g_paired_real = false;
-    if (interp::game_interp() && !g_in_extra && c->x[30] == kBeginFrameRet) {
+    if (!g_in_extra) {
+        g_paired_real = false;
+        g_frame_gi = interp::game_interp();
+        g_frame_started = true;
+        // Already queued submissions retain their own tag. Later native/menu work must not inherit
+        // the last enabled tick's object-interpolation history after a live UI toggle.
+        hw_gi_submit_tag = 0;
+    }
+    if (g_frame_gi && !g_in_extra && c->x[30] == kBeginFrameRet) {
         // Game speed first: the game is frame-locked, so when ticks fall behind 60 per second the extra
         // frames are what slow it down. Track how far behind the 16.67 ms grid the ticks are (with triple
         // buffering single ticks jitter without the game being late) and skip an extra frame while behind.
