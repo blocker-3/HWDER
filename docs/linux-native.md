@@ -4,7 +4,7 @@ Status: implemented source candidate; native compilation and gameplay validation
 
 ## Source and dependencies
 
-Use this candidate branch locally; initialize its pinned public dependencies with git submodule update --init --recursive. No linked game executable, generated C, game data, key file or private shader cache belongs in a source package. SDL/ImGui/header licenses remain with the pinned sources. See [dependency notices](../third_party/README.md).
+For a Git checkout, initialize pinned public dependencies with git submodule update --init --recursive. The source/setup ZIP already contains those dependency sources and needs no Git/submodule operation. No linked game executable, generated C, game data, key file or private shader cache belongs in a source package. SDL/ImGui/header licenses remain with the pinned sources. See [dependency notices](../third_party/README.md).
 
 In an existing native Linux development environment, provide Python3.10+ x64 (3.11+ for public synthetic tests), Clang/Clang++, CMake3.24+, Ninja, pkg-config, OpenSSL3 development files, shared FFmpeg libavcodec/libavutil development files with its native H.264 decoder, and SDL's Linux window/audio dependencies. SDL is built from pinned sources; video, audio, gamepads and dialogs are enabled. A usable Wayland or X11 backend and Vulkan loader/driver are required. Dependencies are not downloaded or installed by setup. This work does not install WSL or configure SSH/remote build services.
 
@@ -52,6 +52,9 @@ ctest --test-dir build/host --output-on-failure
 python3 tools/build.py --synthetic-tests --jobs 4
 ctest --test-dir build/synthetic --output-on-failure
 python3 -m unittest discover -s tools/tests -p 'test_*.py'
+python3 tools/tests/ffmpeg_decode_probe.py \
+  --avcodec "$(pkg-config --variable=libdir libavcodec)/libavcodec.so" \
+  --avutil "$(pkg-config --variable=libdir libavutil)/libavutil.so"
 ~~~
 
 Host tests cover fixed guest-memory collision/commit/decommit/zero-recommit, events, dormant threads, guest TLS and kernel-lock release/restoration. Synthetic tests cover cache/catalog IO and recompiled A64 execution. POSIX fixtures cover private permissions, atomic replacement and partial-write preservation. Directory fsync failure after rename reports uncertain durability; replacement may already be visible. Windows execution does not exercise POSIX branches.
