@@ -40,6 +40,10 @@ extern "C" void f_100052f6bc(Ctx* c);
 extern "C" void f_100051ea20(Ctx* c);      // EndFrame
 extern "C" void f_100051e67c(Ctx* c);      // Present
 
+// Tag of the GPU work being submitted: (tick << 1) | 1 during an extra frame (nvdrv copies it into each
+// submission; the renderer reads it back while executing).
+extern "C" std::atomic<unsigned long long> hw_gi_submit_tag{0};
+
 namespace interp {
 
 bool game_interp() {
@@ -54,6 +58,7 @@ namespace {
 constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;  // return address of the BeginFrame call in f_10002acb54
 
 bool g_in_extra = false;  // MainThread only
+u64 g_tick = 0;           // newest published tick when the current frame began
 DWORD g_extra_tid = 0;    // the thread running the extra frame
 std::atomic<u64> g_last_extra_ms{0};  // GetTickCount64 of the last extra frame
 
@@ -171,6 +176,7 @@ void extra_frame(const Ctx* c) {
     call(&u, f_100057cb78, 0);
 
     g_extra_tid = GetCurrentThreadId();
+    hw_gi_submit_tag = (b.tick << 1) | 1;  // the renderer blends this frame's object transforms (stage c)
     g_in_extra = true;
     Ctx e = *c;
     const u64 scene = c->x[19], state = c->x[20], dev = c->x[21];
@@ -214,6 +220,7 @@ void extra_frame(const Ctx* c) {
         }
     }
     g_in_extra = false;
+    hw_gi_submit_tag = b.tick << 1;
     g_xpresent = now_ms();
 
     memcpy(cam, saved, sizeof saved);
@@ -278,6 +285,10 @@ extern "C" void f_100051e9c4(Ctx* c) {
         skipped_last = behind;
         g_begin = now_ms();
         g_xdraw = g_xpresent = g_begin;
+        {
+            interp::CamSnap n[1];
+            if (interp::snapshots(n, 1) == 1) hw_gi_submit_tag = n[0].tick << 1;
+        }
         if (behind) {
             g_st.late++;
         } else {

@@ -193,3 +193,34 @@ one 8.3 ms slot, and every update spike missed it.
   constant data per draw (key: program + vertex/index buffers + counts), and blend the 3x4 world
   matrices in the extra frame's copy. `HWDER_CBUF_DUMP=<present number>` dumps every draw's constant
   buffers (camera positions, 3x4 transforms) to learn the bone-matrix layout first.
+
+## Stage c: characters and objects blended (2026-10-19)
+
+From a per-draw constant buffer dump (`HWDER_CBUF_DUMP`): every draw's vertex-stage c3 holds its
+transforms. Static/simple objects: 128 bytes, the camera's viewProj at +16 and the object's 3x4 world
+matrix at +80. Skinned characters: 1792-2048 bytes, a camera-derived header then 29-35 bone matrices
+(3x4, 48 bytes each, world-space translations).
+
+Implementation (`vk_renderer.cpp`, `obj_transforms`), on with `HWDER_GAME_INTERP` (off with
+`HWDER_GI_NO_OBJECTS=1`):
+
+* GPU submissions carry a tag, `(tick << 1) | extra`, set by `interp_draw.cpp` (`hw_gi_submit_tag`)
+  and copied into each nvdrv submission; the GPU thread exposes it (`gpu::exec_gi_tag()`).
+* Real frames: each draw's c3 block that holds a world transform is kept (one arena per frame, no
+  allocation per draw), keyed by program + vertex/index buffers + counts.
+* In-between frame of tick n: each c3 block is paired with real frame n-1's block of the same key
+  (same draw order first, else the nearest unused one by first transform); every 3x4 world transform
+  is blended halfway (same slot first - bone palettes keep their order - else the nearest transform),
+  only in the GPU's copy. Transforms that moved more than 80 units are left at tick n (teleports,
+  respawns, other objects).
+* The block is built in cached memory and written to the staging buffer once: reading the staging
+  buffer back (write-combined memory) had made this cost 3-15 ms per tick; now 0.1 ms.
+* Autoplay battle: ~180-250 c3 blocks per in-between frame, ~100 paired and blended (~2,200 matrices),
+  ~80 transforms per frame left unblended for moving too far.
+
+## Ultrawide side bands flashing (Max, 2026-10-19)
+
+Since triple buffering, the side bands of "Fill ultrawide" were blacked out on frames whose full-width
+pass had run before the previous present (the check compared frame numbers). Now each image remembers
+whether a full-width pass wrote it since it was last presented; the log line "ultrawide side bands
+blacked out on N of 600 presents" stays at 0 in battle.

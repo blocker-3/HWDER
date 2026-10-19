@@ -10,6 +10,8 @@
 #include "service/common.h"
 
 extern "C" void hw_frame_probe_mark(const char* what);  // interp/frame_probe.cpp
+#include <atomic>
+extern "C" std::atomic<unsigned long long> hw_gi_submit_tag;  // interp/interp_draw.cpp
 
 extern "C" u64 hw_cntvct();
 
@@ -719,6 +721,7 @@ private:
         s.entries.resize(n);
         memcpy(s.entries.data(), entries, (size_t)n * 8);
         s.syncpoint = syncpt_;
+        s.gi_tag = hw_gi_submit_tag.load();
         if (flags & 1) {  // FENCE_WAIT
             s.wait = true;
             s.wait_fence = {fence[0], fence[1]};

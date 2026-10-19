@@ -873,8 +873,11 @@ static void execute(Channel* ch, Submission& s) {
     if (ms > 100.0)
         hw_log("gpu: submission on syncpt %u took %.0f ms (%zu entries)", s.syncpoint, ms, s.entries.size());
 }
+static u64 g_exec_gi_tag = 0;
+u64 exec_gi_tag() { return g_exec_gi_tag; }
 static void execute_inner(Channel* ch, Submission& s) {
     ch->syncpt = s.syncpoint;
+    g_exec_gi_tag = s.gi_tag;
     static const char* tr = getenv("HWDER_GPU_TRACE");
     if (tr && tr[0] == '3')
         hw_log("gpu[sp%u]: --- submission: %zu entries, wait %d, increment %d x%u", ch->syncpt, s.entries.size(), (int)s.wait,

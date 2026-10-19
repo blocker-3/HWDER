@@ -15,6 +15,8 @@
 #include <deque>
 #include <windows.h>
 
+#include <array>
+
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -851,6 +853,33 @@ private:
     CamFrame cam_frame_;
     bool cam_replay_ = false;          // replay_draw substitutes cam_words_ at the CamHits
     int cur_stage_ = 0;                // stage being bound (cbuf dump)
+    // ---- stage c (HWDER_GAME_INTERP): the game draws an in-between frame per tick (interp_draw.cpp)
+    // with a blended camera; here every draw's vertex-stage transforms (c3: world matrix, bone palette)
+    // are blended halfway between the previous real frame's copy of the same draw and this one.
+    struct ObjEntry {
+        u32 off, size;  // in the frame's arena
+        float pos[3];   // first world translation
+        bool has_pos;
+    };
+    struct ObjFrame {
+        u64 tag = 0;  // (tick << 1) | extra
+        std::vector<u8> arena;                                    // reused: no allocation per draw
+        std::unordered_map<u64, std::vector<ObjEntry>> idx;       // draw key -> occurrences (vectors kept, cleared)
+        void reset() {
+            arena.clear();  // capacity kept
+            idx.clear();    // keys come and go (addresses are part of them): never let the map grow
+        }
+    };
+    ObjFrame obj_cur_, obj_prev_;
+    std::unordered_map<u64, std::vector<bool>> obj_used_;  // in-between frame: previous blocks already paired
+    std::unordered_map<u64, u32> obj_occ_;                  // in-between frame: blocks of each key so far
+    u64 obj_tag_ = 0;
+    struct ObjStats { u64 draws = 0, matched = 0, blended = 0, mats = 0, jumps = 0, ticks = 0; double ms = 0; } obj_st_;
+    void obj_frame_begin(u64 tag);
+    void obj_transforms(u32 index, u8* data, u64 bytes);
+    bool obj_candidate(u32 index, u64 bytes) const {
+        return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && interp::game_interp() && gpu::exec_gi_tag();
+    }
     u64 cur_draw_key_ = 0;             // program + vertex/index addresses + counts of the draw being bound
     u32 dump_draw_ = 0;                // draws so far in the dumped frame
     u32 cam_words_[kCamMats][kCamLayouts][16];
@@ -1643,6 +1672,158 @@ bool VkRenderer::read_tic(u64 pool_va, u32 limit, u32 index, u32* out) {
 }
 
 
+
+// Farthest an object or bone may move in one tick and still be blended (world units; a running
+// character moves about 10 per tick). Larger moves are teleports, respawns or a different object.
+constexpr float kObjMaxMove = 80.0f;
+
+// A 3x4 world transform (rows: rotation/scale, translation in the 4th column) in world space.
+static bool is_world_3x4(const float* m) {
+    // Cheapest tests first (most constant data fails on the translation column).
+    float t0 = std::fabs(m[3]), t1 = std::fabs(m[7]), t2 = std::fabs(m[11]);
+    if (!(t0 >= 1.0f && t0 < 1e6f && t1 >= 1.0f && t1 < 1e6f && t2 >= 1.0f && t2 < 1e6f)) return false;
+    for (int r = 0; r < 3; r++) {
+        float n2 = m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2];
+        if (!(n2 > 0.0025f && n2 < 100.0f)) return false;
+    }
+    return true;
+}
+
+static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
+    for (u64 i = 0; i + 12 <= nf; i += 4)
+        if (is_world_3x4(m + i)) {
+            out[0] = m[i + 3], out[1] = m[i + 7], out[2] = m[i + 11];
+            return true;
+        }
+    return false;
+}
+
+void VkRenderer::obj_frame_begin(u64 tag) {
+    if (tag == obj_tag_) return;
+    // A real frame ended: it becomes the reference for the next in-between frame.
+    if (obj_tag_ && !(obj_tag_ & 1)) {
+        std::swap(obj_prev_, obj_cur_);
+        obj_prev_.tag = obj_tag_;
+    }
+    obj_cur_.reset();
+    obj_used_.clear();
+    obj_occ_.clear();
+    obj_tag_ = tag;
+    if (!(tag & 1)) obj_st_.ticks++;
+    static u64 frames = 0;
+    if ((tag & 1) && ++frames % 600 == 0) {
+        hw_log("gi: stage c over 600 extra frames: %llu c3 blocks, %llu matched the previous frame, %llu blended "
+               "(%llu matrices), %llu matrices jumped too far; cost %.2f ms per tick", (unsigned long long)obj_st_.draws,
+               (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended, (unsigned long long)obj_st_.mats,
+               (unsigned long long)obj_st_.jumps, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
+        obj_st_ = ObjStats{};
+    }
+}
+
+void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
+    if (cur_stage_ != 0 || index != 3 || bytes < 64 || bytes > 4096) return;  // world matrix / bone palette sizes
+    struct Timer {
+        double& acc;
+        LARGE_INTEGER t0;
+        explicit Timer(double& a) : acc(a) { QueryPerformanceCounter(&t0); }
+        ~Timer() {
+            static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
+            LARGE_INTEGER t1;
+            QueryPerformanceCounter(&t1);
+            acc += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+        }
+    } timer(obj_st_.ms);
+    static const bool off = getenv("HWDER_GI_NO_OBJECTS") != nullptr;
+    if (!interp::game_interp() || off) return;
+    u64 tag = gpu::exec_gi_tag();
+    if (!tag) return;
+    obj_frame_begin(tag);
+    const u64 nf = bytes / 4;
+    float pb[3];
+    const bool has = obj_first_pos((const float*)data, nf, pb);
+    if (!(tag & 1)) {  // real frame: remember this draw's transforms
+        if (!has) return;  // nothing to blend in it
+        ObjEntry e{(u32)obj_cur_.arena.size(), (u32)bytes, {pb[0], pb[1], pb[2]}, true};
+        obj_cur_.arena.insert(obj_cur_.arena.end(), data, data + bytes);
+        obj_cur_.idx[cur_draw_key_].push_back(e);
+        return;
+    }
+    // In-between frame of tick n: blend against real frame n-1. Many objects share a model (the same
+    // draw key), and their order changes between frames: pair each block with the previous frame's
+    // block of the same key whose first world transform is nearest (each used once).
+    obj_st_.draws++;
+    if (!has || obj_prev_.tag != ((tag >> 1) - 1) << 1) return;
+    auto it = obj_prev_.idx.find(cur_draw_key_);
+    if (it == obj_prev_.idx.end() || it->second.empty()) return;
+    auto& used = obj_used_[cur_draw_key_];
+    if (used.size() < it->second.size()) used.resize(it->second.size(), false);  // cleared per frame, capacity kept
+    // Same draw order first (the common case), else the nearest unused block among nearby occurrences.
+    const u32 occ = obj_occ_[cur_draw_key_]++;
+    const auto& prevs = it->second;
+    auto dist = [&](size_t k) {
+        const ObjEntry& e = prevs[k];
+        return (e.pos[0] - pb[0]) * (e.pos[0] - pb[0]) + (e.pos[1] - pb[1]) * (e.pos[1] - pb[1]) + (e.pos[2] - pb[2]) * (e.pos[2] - pb[2]);
+    };
+    int best = -1;
+    float bd = kObjMaxMove * kObjMaxMove;
+    if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= bd * 0.0625f) {
+        best = (int)occ;  // within a quarter of the limit at the same position in the order
+    } else {
+        size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
+        if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+        for (size_t k = lo; k < hi; k++) {
+            if (used[k] || prevs[k].size != bytes) continue;
+            float d = dist(k);
+            if (d < bd) bd = d, best = (int)k;
+            if (d == 0.0f) break;
+        }
+    }
+    if (best < 0) return;
+    used[best] = true;
+    obj_st_.matched++;
+    const float* a = (const float*)(obj_prev_.arena.data() + it->second[best].off);
+    float* b = (float*)data;
+    auto d2 = [](const float* x, const float* y) {
+        float dx = x[3] - y[3], dy = x[7] - y[7], dz = x[11] - y[11];
+        return dx * dx + dy * dy + dz * dz;
+    };
+    // The previous block's transforms, listed once (offset in floats); the fallback search only walks these.
+    u32 prev_list[1024];
+    u32 nprev = 0;
+    bool listed = false;  // built on the first fallback only
+    bool any = false;
+    for (u64 i = 0; i + 12 <= nf; i += 4) {
+        if (!is_world_3x4(b + i)) continue;
+        // The same slot first (a bone palette keeps its order); else the nearest transform in the
+        // previous block (blocks of instances may reorder them).
+        const float* src = nullptr;
+        if (is_world_3x4(a + i) && d2(a + i, b + i) <= kObjMaxMove * kObjMaxMove) {
+            src = a + i;
+        } else {
+            if (!listed) {
+                listed = true;
+                for (u64 j = 0; j + 12 <= nf && nprev < 1024; j += 4)
+                    if (is_world_3x4(a + j)) prev_list[nprev++] = (u32)j, j += 8;
+            }
+            float bd2 = kObjMaxMove * kObjMaxMove;
+            for (u32 k = 0; k < nprev; k++) {
+                float d = d2(a + prev_list[k], b + i);
+                if (d < bd2) bd2 = d, src = a + prev_list[k];
+            }
+        }
+        if (!src) {  // nothing near enough: a teleport, a respawn or a new instance - keep tick n
+            obj_st_.jumps++;
+            i += 8;
+            continue;
+        }
+        for (int k = 0; k < 12; k++) b[i + k] = src[k] + (b[i + k] - src[k]) * 0.5f;
+        obj_st_.mats++;
+        any = true;
+        i += 8;  // the rest of this matrix
+    }
+    if (any) obj_st_.blended++;
+}
+
 // HWDER_CBUF_DUMP=<present number> (stage c research): for every draw of that frame, log each bound
 // constant buffer: size, where the newest tick's camera viewProj/view sit (4 layouts), and the offsets
 // of 3x4 affine transforms (three rows of rotation/scale with a translation in the 4th column).
@@ -1686,6 +1867,22 @@ void VkRenderer::cbuf_dump(u32 index, u64 va, const u8* data, u64 bytes) {
            camhits.empty() ? " -" : camhits.c_str(), naff, aff.c_str(), naff > 8 ? " ..." : "");
     lines++;
     (void)last_pc;
+    // Raw floats of the first few vertex-stage c3 blocks of each size (object / bone transforms).
+    static std::map<u64, int> shown;
+    if (cur_stage_ == 0 && index == 3 && shown[bytes]++ < 3) {
+        std::string row;
+        for (u64 i = 0; i < std::min<u64>(nf, 40); i++) {
+            char b[32];
+            snprintf(b, sizeof b, "%s%g", (i % 4) ? " " : " | ", f[i]);
+            row += b;
+        }
+        hw_log("cbufdump:   floats%s", row.c_str());
+        if (cam) {
+            const float* v = cs[0].viewproj;
+            hw_log("cbufdump:   camera viewProj rows: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", v[0], v[1], v[2], v[3],
+                   v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+        }
+    }
 }
 
 // Fill descriptor set `set` for a program's resources. cbuf(index, offset) reads bound cbuf words;
@@ -1728,7 +1925,17 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
         if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
         Slice s = g_rec.stage(bytes, props.minUniformBufferOffsetAlignment);
-        if (bound) {
+        // Stage c: vertex-stage c3 holds the object/bone transforms; build it in cached memory (the staging
+        // slice is write-combined: reading it back is very slow), blend, then write it out once.
+        const bool obj = bound && obj_candidate(c.index, bytes);
+        alignas(16) static thread_local u8 obj_buf[4096];
+        if (obj) {
+            u64 n = std::min<u64>(bytes, size);
+            mm_->read(va, obj_buf, n);
+            if (n < bytes) memset(obj_buf + n, 0, bytes - n);
+            obj_transforms(c.index, obj_buf, bytes);
+            memcpy(s.ptr, obj_buf, bytes);
+        } else if (bound) {
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);
@@ -2766,7 +2973,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             pc.viewport_scale[0] = 1.0f;
             if (draw_samples_rt_)  // full-screen passes keep the whole width: the side bands get drawn
                 for (u32 i = 0; i < fb.num_colors; i++)
-                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count;
+                    if (fb.color[i]) fb.color[i]->full_width_frame = g_s.present_count, fb.color[i]->full_width_since_present = true;
         }
     }
     pc.base_vertex = p.base_vertex;
@@ -2886,8 +3093,10 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         r.rect = {{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}};
     }
     if (!r.rect.extent.width || !r.rect.extent.height) return;
-    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width)
+    if (color && rt < fb.num_colors && fb.color[rt] && r.rect.offset.x == 0 && r.rect.extent.width == fb.width) {
         fb.color[rt]->full_width_frame = g_s.present_count;
+        fb.color[rt]->full_width_since_present = true;
+    }
     if (recording_) {
         rec_cur_.emplace_back();
         OpRec& o = rec_cur_.back();
@@ -3986,8 +4195,25 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         // Fill ultrawide: the orthographic HUD (and movies, which the game draws as a 2D quad) stays in
         // the centred 16:9; when nothing full-width (a 3D frame's post passes, a full clear) wrote this
         // frame, the side bands hold stale memory. Clear them to black before presenting.
+        // "Since it was last presented", not "during this present's frame number": with frames queued ahead
+        // (stage b's triple buffering) the GPU thread draws the next frame before this one is presented,
+        // and a frame-number check blacked out side bands that were in fact drawn (flashing bars).
+        const bool full_width = img->full_width_since_present;
+        img->full_width_since_present = false;
+        {
+            // Every 600 presents: how many had their side bands blacked out (should be ~0 in 3D scenes).
+            static u32 n = 0, cleared = 0;
+            if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y) {
+                n++;
+                if (!full_width) cleared++;
+                if (n == 600) {
+                    hw_log("vk: ultrawide side bands blacked out on %u of %u presents", cleared, n);
+                    n = cleared = 0;
+                }
+            }
+        }
         if (settings::video().unlocked_res && settings::video().ultrawide && img->scale > img->scale_y &&
-            img->full_width_frame != g_s.present_count && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+            !full_width && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
             u32 iw = img->level_width(0), ih = img->level_height(0);
             u32 center = std::min(iw, (u32)(iw * (img->scale_y / img->scale) + 0.5f));
             u32 band = (iw - center) / 2;
