@@ -10,6 +10,7 @@
 #include "interp/camera.h"
 
 #include "host/timing.h"
+#include "host/ascii.h"
 
 #include <cstring>
 #include <mutex>

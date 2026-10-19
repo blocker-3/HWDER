@@ -112,7 +112,7 @@ public:
     ISelfController() : SimpleService("ISelfController") {
         reg(0, [](Request&, Response&) {
             hw_log("am: application requested exit");
-            ExitProcess(0);
+            hw_exit_process(0);
         });
         nop({1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 42, 44, 45, 46, 50, 51, 61, 62, 64, 65, 68, 72,
              100, 110, 120});

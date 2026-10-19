@@ -1,5 +1,6 @@
 // Small system services: lm, apm, acc, set, time, pctl, prepo, friend, nifm, aoc, ns, ...
 #include <ctime>
+#include "host/calendar.h"
 
 #include "common.h"
 
@@ -221,10 +222,11 @@ public:
 
 // nn::time::CalendarTime (8 bytes) + CalendarAdditionalInfo (0x18 bytes)
 void push_calendar(Response& rs, s64 t, bool local) {
-    time_t tt = (time_t)t;
-    struct tm tmv;
-    if (local) localtime_s(&tmv, &tt);
-    else gmtime_s(&tmv, &tt);
+    std::tm tmv{};
+    if (!host::calendar_breakdown((time_t)t, local, tmv) || !host::calendar_year_fits_guest(tmv)) {
+        rs.result = kern::ResultInvalidState;
+        return;
+    }
     rs.push<u16>((u16)(tmv.tm_year + 1900));
     rs.push<u8>((u8)(tmv.tm_mon + 1));
     rs.push<u8>((u8)tmv.tm_mday);
@@ -237,9 +239,7 @@ void push_calendar(Response& rs, s64 t, bool local) {
     char tz[8] = "UTC";
     rs.data.insert(rs.data.end(), tz, tz + 8);
     rs.push<u32>(tmv.tm_isdst > 0);
-    long off = 0;
-    if (local) _get_timezone(&off);
-    rs.push<s32>(local ? (s32)-off : 0);
+    rs.push<s32>(local ? (s32)host::standard_utc_offset() : 0);
 }
 s64 from_calendar(Request& rq) {
     struct tm tmv = {};
@@ -249,7 +249,7 @@ s64 from_calendar(Request& rq) {
     tmv.tm_hour = rq.pop<u8>();
     tmv.tm_min = rq.pop<u8>();
     tmv.tm_sec = rq.pop<u8>();
-    return (s64)_mkgmtime(&tmv);
+    return (s64)host::calendar_as_utc(tmv);
 }
 
 class ITimeZoneService : public SimpleService {

@@ -1,6 +1,6 @@
 # Experimental native Linux x86-64 source port
 
-Status: implemented source candidate; native compilation and gameplay validation pending. Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan1.3 graphics. A Windows regression build does not validate Linux. Do not describe this candidate as playable until the native checks and on-device tests below succeed.
+Status: implemented source candidate; native public tests partly passed on Bazzite, with observed compile blockers fixed in the retest overlay. Native aggregate compilation, full runtime build and gameplay validation remain pending. Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan1.3 graphics. A Windows regression build does not validate Linux. Do not describe this candidate as playable until the native checks and on-device tests below succeed.
 
 ## Source and dependencies
 
@@ -47,15 +47,19 @@ Keep personal game/key paths private. Logs, shader recipes, generated source and
 ## Public native checks (no game data or keys)
 
 ~~~sh
-python3 tools/build.py --host-tests --jobs 4
-ctest --test-dir build/host --output-on-failure
-python3 tools/build.py --synthetic-tests --jobs 4
-ctest --test-dir build/synthetic --output-on-failure
+python3 tools/build.py --host-tests --jobs 4 --build-dir build/host-linux
+ctest --test-dir build/host-linux --output-on-failure
+python3 tools/build.py --synthetic-tests --jobs 4 --build-dir build/synthetic-linux
+ctest --test-dir build/synthetic-linux --output-on-failure
 python3 -m unittest discover -s tools/tests -p 'test_*.py'
 python3 tools/tests/ffmpeg_decode_probe.py \
   --avcodec "$(pkg-config --variable=libdir libavcodec)/libavcodec.so" \
   --avutil "$(pkg-config --variable=libdir libavutil)/libavutil.so"
 ~~~
+
+Use the explicit Linux directories above when an existing folder contains Windows builds. Preserve copied caches and the `.git` file; a source ZIP needs no Git repair. If `build/host-linux` or `build/synthetic-linux` itself belongs to another source location or platform, choose another new directory and use that same path for its CTest command. Do not remove old caches to work around CMake path mismatches. The full `host_tests` aggregate must succeed before CTest; passing executable tests alone does not establish compile-only coverage.
+
+Host tests also compile the actual applet/time service and interpolation/SVC integration files. Option/calendar tests cover every camera case variant, UTC leap/nonleap/post-2038 fixtures, three host time zones and calendar bounds.
 
 Host tests cover fixed guest-memory collision/commit/decommit/zero-recommit, events, dormant threads, guest TLS and kernel-lock release/restoration. Synthetic tests cover cache/catalog IO and recompiled A64 execution. POSIX fixtures cover private permissions, atomic replacement and partial-write preservation. Directory fsync failure after rename reports uncertain durability; replacement may already be visible. Windows execution does not exercise POSIX branches.
 
@@ -76,4 +80,4 @@ Begin at native60/default settings. Check startup/controller/menu navigation, ga
 
 Controlled normal exits restore exclusive fullscreen modes before terminating. Fatal exits may remain abrupt. Linux crash signals leave an async-safe stderr message and defer to the system's local core-dump policy. Windows minidumps/register suspension, draw-write page census and suspended-thread matrix diagnostics are unavailable. Regular gameplay/full-object interpolation remains implemented. Textures use the existing hash fallback because Linux lacks Windows GetWriteWatch.
 
-The exact Linux decoder class passed a public Windows FFmpeg probe (51 I/P/B pictures, 23,040 NV12 pixel checks), including prediction, reset, resolution changes and reused tags. This does not validate the Linux library/platform. No native Linux compiler, controller/GPU/media playback or real-save validation was available on the Windows development host. Successful native compilation, synthetic checks and Max's Ally playtest remain required before this milestone is complete.
+Submitted Bazzite/Ubuntu 24.04.5 native evidence passed the FFmpeg 6.1.1 probe (51 I/P/B pictures, 23,040 NV12 pixel checks), all three synthetic tests and 45 Python tests (4 Windows skips). The three host executables passed separately, but aggregate compile coverage failed at camera comparison; a later private full build failed at applet exit and time-service CRT calls. The retest overlay fixes those observed blockers; this Windows development host cannot confirm the Linux rebuild. No gameplay, controller/GPU/media playback or real-save acceptance is established. Successful native aggregate and full runtime compilation plus Max's Ally playtest remain required.
