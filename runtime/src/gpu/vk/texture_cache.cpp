@@ -4,6 +4,7 @@
 #include "gpu/settings.h"
 #include <algorithm>
 #include <map>
+#include <filesystem>
 
 #include <unordered_set>
 
@@ -622,7 +623,14 @@ Image* TextureCache::create(u64 addr, const ImageInfo& info) {
             const char* ey = debug::str(debug::ResScaleY);
             g_res_scale = g_res_scale_y = e ? (float)atof(e) : settings::video().res_scale;
             if (!e && settings::video().unlocked_res) {
+#ifdef _WIN32
                 float sx = GetSystemMetrics(SM_CXSCREEN) / 1920.0f, sy = GetSystemMetrics(SM_CYSCREEN) / 1080.0f;
+#else
+                unsigned width = 0, height = 0;
+                display::client_size(&width, &height);
+                if (!width || !height) { width = 1920; height = 1080; }
+                float sx = width / 1920.0f, sy = height / 1080.0f;
+#endif
                 if (settings::video().ultrawide && sx > sy) g_res_scale = sx, g_res_scale_y = sy;  // the screen's aspect
                 else g_res_scale = g_res_scale_y = std::min(sx, sy);  // largest 16:9 that fits (pillarboxed on ultrawide)
             }
@@ -777,11 +785,14 @@ void TextureCache::upload(Image* img) {
             if (info.fmt.astc) {
                 out_size = (u64)p.w * p.h * p.d * 4;
                 // Decoded textures are cached on disk by content hash: the CPU decode is paid once per machine.
-                static bool cache_ok = CreateDirectoryA("cache", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
-                static bool cache_dir = cache_ok && (CreateDirectoryA("cache\\astc", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS);
+                static bool cache_dir = [] {
+                    std::error_code error;
+                    std::filesystem::create_directories("cache/astc", error);
+                    return !error;
+                }();
                 char path[128];
                 u64 h = hash_bytes(lin, lin_size, ((u64)p.w << 40) ^ ((u64)p.h << 20) ^ p.d ^ ((u64)info.fmt.bw << 56) ^ ((u64)info.fmt.bh << 60));
-                snprintf(path, sizeof(path), "cache\\astc\\%016llx.rgba", (unsigned long long)h);
+                snprintf(path, sizeof(path), "cache/astc/%016llx.rgba", (unsigned long long)h);
                 bool loaded = false;
                 if (cache_dir) {
                     if (FILE* f = fopen(path, "rb")) {
