@@ -559,9 +559,7 @@ static void tab_graphics(bool& changed) {
             changed = true;
         }
     }
-    if (ImGui::SliderInt("Field of view", &v.fov, 70, 150, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
-    help("How much of the scene the camera shows, relative to the game's own (100% = unchanged). Higher\n"
-         "shows more around your warrior. Applies immediately.");
+    ImGui::TextWrapped("Using the game's default field of view: wider FOV can misalign officer nameplates.");
     if (ImGui::Checkbox("Anti-aliasing (FXAA)", &v.fxaa)) changed = true;
     help("Smooths jagged edges on the 3D picture (the game has no anti-aliasing of its own). The HUD is not\n"
          "affected. Small GPU cost.");

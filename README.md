@@ -261,6 +261,8 @@ the property of Nintendo and Koei Tecmo; you need your own copy of the game.
 
 ### Metadata pipeline catalog prototype
 
+Custom field-of-view adjustment is temporarily hidden because wider FOV can misplace officer nameplates. The game uses its default FOV (100%); older saved `fov=` overrides are ignored. This does not disable the separate ultrawide aspect-ratio option.
+
 `pipeline_catalog.bin` is a separate metadata-only format for collecting the pipelines observed on a named stage/route. Set `HWDER_PIPELINE_CATALOG_RECORD=sealed-grounds` for a collection run. Successful requested graphics pipelines periodically export their shader resource locators, SHA256 identities, translation settings and complete static pipeline state. The scope name describes the run; it does not promise complete stage or game coverage. No game shader code, SPIR-V, native pipeline cache or key material is exported. Keep `pipeline_warmup.bin` private: it contains compiled shader code and is **not** this catalog.
 
 With a compatible catalog beside the executable, startup first lets you select your game, then resolves the original programs from **your selected local NSP or extracted RomFS**, verifies their contents and translates/compiles locally. The graphics preparation screen reports progress and waits for known jobs before guest boot. Every warmed result still requires the existing fresh full live-program/static-state verification before use. Missing, incompatible, changed or unsupported sources retain normal private-cache/lazy compilation. `HWDER_PIPELINE_CATALOG=0` disables catalog import; `HWDER_PIPELINE_PREWARM=0` disables startup prebuilding while recording remains available.

@@ -103,7 +103,9 @@ void load() {
         else if (k == "menu_scale") g_video.menu_scale = std::clamp(atoi(v), 50, 300);
         else if (k == "contrast") g_video.contrast = std::clamp(atoi(v), 50, 150);
         else if (k == "bloom") g_video.bloom = std::clamp(atoi(v), 0, 200);
-        else if (k == "fov") g_video.fov = std::clamp(atoi(v), 70, 150);
+        // Custom FOV is hidden until officer nameplates use the same projection.
+        // Ignore old overrides so a hidden setting cannot leave labels misplaced.
+        else if (k == "fov") g_video.fov = 100;
         else if (k == "fxaa") g_video.fxaa = atoi(v) != 0;
         else if (k == "sharpen") g_video.sharpen = std::clamp(atoi(v), 0, 100);
         else if (k == "async_shaders") g_debug.async_shaders = atoi(v) != 0;

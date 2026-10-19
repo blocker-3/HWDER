@@ -22,7 +22,7 @@ struct Video {
     int menu_scale = 100;       // in-game menu text size, percent
     int contrast = 100;         // picture contrast in the game's final tonemap pass, percent (100 = unchanged)
     int bloom = 100;            // bloom strength, percent of the game's own (0 = off)
-    int fov = 100;              // field of view, percent of the game's visible extent (runtime/src/game/widescreen.cpp)
+    int fov = 100;              // held at the game's default while officer-nameplate alignment is unresolved
     bool fxaa = false;          // FXAA on the 3D picture before the HUD
     int sharpen = 0;            // contrast-adaptive sharpening of the 3D picture, percent (0 = off)
 };
