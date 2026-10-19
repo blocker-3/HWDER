@@ -628,6 +628,7 @@ int main(int argc, char** argv) {
         }
         hw_log("boot: game data from %s", hwfs::nsp::path().c_str());
     }
+    gpu::prepare_pipeline_catalog();
     display::start();
     ipc::register_all_services();
     load_npdm(exefs);

@@ -71,4 +71,9 @@ u64 fingerprint(const ProgramRecord& program);
 bool equal(const shader::Program& a, const shader::Program& b);
 bool equal(const ProgramRecord& a, const ProgramRecord& b);
 
+// Metadata codecs shared with the distributable catalog. Never includes shader data.
+std::vector<u32> key_words(const PipelineKey& key);
+bool key_from_words(const std::vector<u32>& words, PipelineKey& key);
+Status save_metadata_atomic(const char* path, const std::vector<u8>& bytes);
+
 }  // namespace gpu::warmup

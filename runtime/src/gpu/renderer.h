@@ -86,5 +86,7 @@ Renderer* create_renderer(MemoryManager* mm);
 // Start compatible cached pipeline builds after display initialization, before guest startup.
 // The implementation leaves renderer creation lazy when prewarming is disabled or unavailable.
 void start_pipeline_prewarm();
+// After game selection, before guest boot: locally resolve catalog inputs and wait.
+void prepare_pipeline_catalog();
 
 }  // namespace gpu

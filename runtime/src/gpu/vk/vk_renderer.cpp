@@ -24,6 +24,9 @@
 #include "gpu/gpu.h"
 #include "gpu/graphics_audit.h"
 #include "gpu/vk/pipeline_warmup_cache.h"
+#include "gpu/vk/catalog_game_sources.h"
+#include "gpu/prelaunch.h"
+#include "fs/nsp.h"
 #include "hwder_version.h"
 #include "vk_common.h"
 #include "post_spv.h"
@@ -495,17 +498,21 @@ public:
     u32 smem = 0;
     u64 attr_types = 0;  // 2 bits per attribute (shader::AttributeType)
     u32 rt_types = 0;    // 2 bits per render target
+    bool catalog_safe = true;
+    u32 catalog_max_read = 0;
 
     u64 read_instruction(u32 address) override {
+        catalog_max_read = std::max(catalog_max_read, address);
         u64 off = (graphics ? 0x50 : 0) + (u64)address;
-        if (off + 8 > code_avail) return 0;
+        if (off + 8 > code_avail) { catalog_safe = false; return 0; }
         u64 v;
         memcpy(&v, code + off, 8);
         return v;
     }
     const u8* sph() override { return graphics ? code : nullptr; }
-    u32 read_cbuf(u32 index, u32 offset) override { return cbuf ? cbuf(index, offset) : 0; }
+    u32 read_cbuf(u32 index, u32 offset) override { catalog_safe = false; return cbuf ? cbuf(index, offset) : 0; }
     shader::TextureType texture_type(u32 handle) override {
+        catalog_safe = false;
         return tex_type ? tex_type(handle) : shader::TextureType::Tex2D;
     }
     u32 texture_bound_buffer() override { return bound_buffer; }
@@ -547,6 +554,7 @@ struct ShaderEntry {
     VkShaderModule module = VK_NULL_HANDLE;
     bool ok = false;
     u64 key = 0;  // HWDER_DUMP_SHADERS file name
+    catalog::Stage catalog_stage;
 };
 
 // The game's final tonemap pass, by fragment shader key: exposure x scene -> filmic curve, then
@@ -626,6 +634,21 @@ extern "C" std::atomic<u32> hw_last_frame_draws{0};
 
 static const char* kPipelineCacheFile = "pipeline_cache.bin";
 static const char* kWarmupFile = "pipeline_warmup.bin";
+static const char* kCatalogFile = "pipeline_catalog.bin";
+static catalog::GameSources catalog_sources;
+static bool catalog_recording = false, catalog_deferred = false;
+static bool catalog_enabled() {
+    const char* value = getenv("HWDER_PIPELINE_CATALOG");
+    return !value || strcmp(value,"0") != 0;
+}
+static u64 catalog_build() {
+    constexpr char epoch[] = "HWDER metadata pipeline catalog ABI 1";
+    u64 tag = hash_bytes(epoch,sizeof(epoch));
+    return hash_bytes(HWDER_COMMIT,sizeof(HWDER_COMMIT),tag);
+}
+static u32 catalog_game_version() { return hwfs::nsp::active() && hwfs::nsp::info().has_version ? hwfs::nsp::info().version : 0; }
+static bool catalog_debug_translation() { return getenv("HWDER_SHADER_NO_KIL") || getenv("HWDER_SHADER_FALLBACK"); }
+
 static bool prewarm_enabled() {
     const char* value = getenv("HWDER_PIPELINE_PREWARM");
     return !value || strcmp(value, "0") != 0;
@@ -692,6 +715,7 @@ public:
     }
 
     void start_prewarm(warmup::Cache&& cache, u64 load_ms);
+    void wait_catalog();
 
     // -------------------------------------------------------------- Renderer interface
     void bind_const_buffer(u32 stage, u32 slot, u64 va, u32 size, bool valid) override {
@@ -912,6 +936,8 @@ private:
     void record_pipeline(GfxProgram* prog, const PipelineKey& key);
     void ensure_warmup_records();
     void save_warmup_records();
+    void record_catalog_pipeline(GfxProgram*, const PipelineKey&);
+    void save_catalog_records();
     void log_warmup(const char* phase);
     void cancel_warm_program(WarmProgram* prog);  // pipe_m_ held
     struct PipeJob {
@@ -939,6 +965,8 @@ private:
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
+    catalog::Catalog catalog_records_;
+    bool catalog_dirty_ = false;
     warmup::Cache warmup_records_;  // retained historical successes plus observed new successes
     bool warmup_records_loaded_ = false, warmup_dirty_ = false, warmup_first_draw_ = false;
     std::unordered_set<u32> invalid_warm_programs_;
@@ -1319,6 +1347,15 @@ ShaderEntry* VkRenderer::get_shader(GuestEnv& env, shader::Stage stage, const sh
     {
         SlowTimer timer("shader translation", 30.0);
         e->prog = shader::translate(env, stage, topt, va);
+    }
+    if (catalog_recording && !va && env.catalog_safe && !catalog_debug_translation()) {
+        auto& captured = e->catalog_stage;
+        if (catalog_sources.locate(env.code, env.code_avail, (u32)stage, captured.source) &&
+            0x50ull + env.catalog_max_read + 8 <= captured.source.size) {
+            captured.present = true; captured.attributes = env.attr_types;
+            captured.render_targets = env.rt_types; captured.bound_buffer = env.bound_buffer;
+            captured.options = topt;
+        } else hw_log("catalog: stage %016llx unresolved in supported local resources; normal recording retained", (unsigned long long)key);
     }
     if (e->prog.spirv.empty()) {
         hw_log("vk: shader %016llx (stage %u) translated to empty SPIR-V", (unsigned long long)key, (u32)stage);
@@ -1727,6 +1764,7 @@ void VkRenderer::prepare_program(GfxProgram* prog, u64 key) {
 }
 
 void VkRenderer::record_pipeline(GfxProgram* prog, const PipelineKey& key) {
+    record_catalog_pipeline(prog,key);
     ++warmup_observed_;
     if (!prog->recipe) return;
     if (warmup_records_.pipelines.size() >= warmup::kMaxPipelines) return;
@@ -1757,7 +1795,50 @@ void VkRenderer::record_pipeline(GfxProgram* prog, const PipelineKey& key) {
     warmup_dirty_ = true;
 }
 
+void VkRenderer::record_catalog_pipeline(GfxProgram* prog, const PipelineKey& key) {
+    if (!catalog_recording || !prog->recipe || catalog_records_.pipelines.size() >= warmup::kMaxPipelines) return;
+    catalog::Program record; record.key = key.program; record.expected_translation = prog->recipe->fingerprint;
+    for (u32 i=0;i<5;i++) if (prog->stages[i]) {
+        if (!prog->stages[i]->catalog_stage.present) return;
+        record.stages[i] = prog->stages[i]->catalog_stage;
+    }
+    u32 index = ~0u;
+    for (u32 i=0;i<catalog_records_.programs.size();i++) {
+        const auto& p = catalog_records_.programs[i];
+        if (p.key==record.key && p.expected_translation==record.expected_translation) { index=i; break; }
+    }
+    if (index==~0u) {
+        if (catalog_records_.programs.size()>=warmup::kMaxPrograms) return;
+        index=(u32)catalog_records_.programs.size(); catalog_records_.programs.push_back(std::move(record));
+    }
+    auto words=warmup::key_words(key);
+    for (const auto& p:catalog_records_.pipelines) if(p.program==index && warmup::key_words(p.key)==words)return;
+    catalog_records_.build=catalog_build(); catalog_records_.game_version=catalog_game_version();
+    const char* scope=getenv("HWDER_PIPELINE_CATALOG_RECORD");
+    catalog_records_.scope=scope ? scope : "unspecified";
+    catalog_records_.pipelines.push_back({index,key}); catalog_dirty_=true;
+}
+void VkRenderer::save_catalog_records() {
+    if (!catalog_dirty_) return;
+    auto status=catalog::save(kCatalogFile,catalog_records_);
+    if (status==catalog::Status::Ok) catalog_dirty_=false;
+    hw_log("catalog: metadata export %s: %zu programs / %zu successful pipeline recipes, scope=%s; contains no shader code",
+           warmup::name(status),catalog_records_.programs.size(),catalog_records_.pipelines.size(),catalog_records_.scope.c_str());
+}
+void VkRenderer::wait_catalog() {
+    const u64 start=GetTickCount64();
+    for (;;) {
+        u64 done,total,success;
+        {std::lock_guard<std::mutex> lock(pipe_m_);done=warmup_finished_;total=warmup_queued_;success=warmup_succeeded_;}
+        prelaunch::preparation_frame("Compiling known graphics pipelines from your game...",(u32)done,(u32)total);
+        if(done>=total){hw_log("catalog: preparation complete: %llu / %llu compiled successfully before guest boot",(unsigned long long)success,(unsigned long long)total);break;}
+        if(GetTickCount64()-start>120000){hw_log("catalog: preparation wait expired; remaining work uses normal demand fallback");break;}
+        Sleep(15);
+    }
+}
+
 void VkRenderer::save_warmup_records() {
+    save_catalog_records();
     if (!warmup_dirty_) return;
     // Preserve historical successes across early quits. Only a freshly translated
     // mismatch invalidates a historical program group; unvisited battle recipes stay.
@@ -4421,27 +4502,52 @@ void retire_resource(std::function<void()> fn) { retire(std::move(fn)); }
 namespace gpu {
 Renderer* create_renderer(MemoryManager* mm) { return new VkRenderer(mm); }
 
+static void start_private_pipeline_prewarm() {
+    if (!prewarm_enabled()) {
+        hw_log("vk: prewarm disabled; live recipe recording remains enabled");return;
+    }
+    const u64 start=GetTickCount64();warmup::Cache cache;
+    const auto status=warmup::load(kWarmupFile,warmup_compatibility(),cache);
+    const u64 loaded=GetTickCount64();
+    if(status!=warmup::Status::Ok || cache.pipelines.empty()) {
+        hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy",warmup::name(status),cache.pipelines.size(),(unsigned long long)(loaded-start));return;
+    }
+    auto* target=static_cast<VkRenderer*>(renderer());
+    hw_log("vk: prewarm early renderer allocation: %llu ms",(unsigned long long)(GetTickCount64()-loaded));
+    target->start_prewarm(std::move(cache),loaded-start);
+}
 void start_pipeline_prewarm() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        if (!prewarm_enabled()) {
-            hw_log("vk: prewarm disabled; live recipe recording remains enabled");
-            return;
-        }
-        const u64 start = GetTickCount64();
-        warmup::Cache cache;
-        const auto status = warmup::load(kWarmupFile, warmup_compatibility(), cache);
-        const u64 loaded = GetTickCount64();
-        if (status != warmup::Status::Ok || cache.pipelines.empty()) {
-            hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy",
-                   warmup::name(status), cache.pipelines.size(), (unsigned long long)(loaded - start));
-            return;
-        }
-        // The optional artifact has been bounded, decoded and compatibility-checked
-        // before allocating the renderer's ring or submitting any dummy uploads.
-        auto* target = static_cast<VkRenderer*>(renderer());
-        hw_log("vk: prewarm early renderer allocation: %llu ms", (unsigned long long)(GetTickCount64() - loaded));
-        target->start_prewarm(std::move(cache), loaded - start);
-    });
+    // Catalog preparation must use the game selected on the startup screen.
+    // Defer only if a catalog exists; missing catalogs retain existing behavior.
+    if(catalog_enabled() && prewarm_enabled() && GetFileAttributesA(kCatalogFile)!=INVALID_FILE_ATTRIBUTES) {
+        catalog_deferred=true;hw_log("catalog: preparation deferred until game selection");return;
+    }
+    start_private_pipeline_prewarm();
+}
+void prepare_pipeline_catalog() {
+    const char* record=getenv("HWDER_PIPELINE_CATALOG_RECORD");
+    catalog_recording=record && *record && strlen(record)<=128 && !catalog_debug_translation();
+    if(!catalog_recording && !catalog_deferred)return;
+    prelaunch::preparation_frame("Finding graphics programs in your local game...");
+    catalog_sources.index();
+    if(catalog_deferred) {
+        catalog::Catalog cat;
+        auto status=catalog::load(kCatalogFile,catalog_build(),catalog_game_version(),cat);
+        if(status==catalog::Status::Ok && hwfs::nsp::active() && hwfs::nsp::info().title_id!=catalog::kTitleId)status=catalog::Status::Incompatible;
+        if(status==catalog::Status::Ok && !catalog_debug_translation()) {
+            hw_log("catalog: imported metadata scope=%s, %zu programs / %zu recipes; resolving fresh selected-game bytes",cat.scope.c_str(),cat.programs.size(),cat.pipelines.size());
+            auto cache=catalog::prepare(cat,[](const catalog::Locator& l,std::vector<u8>& bytes){return catalog_sources.read(l,bytes);},[](const catalog::Progress& p){
+                prelaunch::preparation_frame("Preparing graphics programs from your game...",p.done,p.total);
+                if(p.done==p.total)hw_log("catalog: local translation: %u resolved, %u unresolved of %u",p.resolved,p.unresolved,p.total);
+            });
+            if(!cache.pipelines.empty()) {
+                auto* target=static_cast<VkRenderer*>(renderer());target->start_prewarm(std::move(cache),0);target->wait_catalog();
+                prelaunch::preparation_frame(nullptr);return;
+            }
+            hw_log("catalog: no resolvable recipes; normal private-cache/lazy fallback");
+        } else hw_log("catalog: import %s (or debug translation active); normal private-cache/lazy fallback",warmup::name(status));
+        start_private_pipeline_prewarm();
+    }
+    prelaunch::preparation_frame(nullptr);
 }
 }  // namespace gpu

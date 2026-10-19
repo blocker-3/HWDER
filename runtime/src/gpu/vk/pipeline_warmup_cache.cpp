@@ -249,6 +249,25 @@ Status write_atomic(const char* path, const std::vector<u8>& bytes) {
 }
 }  // namespace
 
+std::vector<u32> key_words(const PipelineKey& original) {
+    PipelineKey key = original;
+    std::vector<u32> words{u32(key.program), u32(key.program >> 32)};
+    key_fields(key, [&](u32 v) { words.push_back(v); });
+    return words;
+}
+bool key_from_words(const std::vector<u32>& words, PipelineKey& key) {
+    if (words.size() != 229) return false;
+    std::memset(&key, 0, sizeof(key));
+    key.program = u64(words[0]) | (u64(words[1]) << 32);
+    size_t i = 2;
+    key_fields(key, [&](u32& v) { v = words[i++]; });
+    return valid_key(key);
+}
+Status save_metadata_atomic(const char* path, const std::vector<u8>& bytes) {
+    if (!path || !*path || bytes.size() > kMaxFileBytes) return Status::Invalid;
+    return write_atomic(path, bytes);
+}
+
 const char* name(Status status) {
     switch (status) {
     case Status::Ok: return "ok";

@@ -34,3 +34,8 @@ legacy/
 shots/
 
 # third-party trees are git submodules (see third_party/README.md)
+
+# private compiled shader recipes and local metadata collection/evidence
+pipeline_warmup.bin
+pipeline_catalog.bin
+runs/

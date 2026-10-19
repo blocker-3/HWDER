@@ -263,6 +263,27 @@ void draw(VkExtent2D extent) {
 
 }  // namespace
 
+namespace {
+std::string preparation_message;
+unsigned preparation_done = 0, preparation_total = 0;
+void draw_preparation(VkExtent2D extent) {
+    ImGui::SetNextWindowPos(ImVec2(extent.width*0.5f,extent.height*0.5f),ImGuiCond_Always,ImVec2(0.5f,0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(float(extent.width)*0.9f,640.0f*overlay::ui_scale()),0));
+    ImGui::Begin("Preparing graphics",nullptr,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextWrapped("%s",preparation_message.c_str());
+    if(preparation_total) {
+        char label[64];snprintf(label,sizeof(label),"%u / %u",preparation_done,preparation_total);
+        ImGui::ProgressBar(float(preparation_done)/preparation_total,ImVec2(-1,0),label);
+    }
+    ImGui::End();
+}
+}
+void preparation_frame(const char* message,unsigned done,unsigned total) {
+    if(!message){overlay::set_screen(nullptr);return;}
+    preparation_message=message;preparation_done=done;preparation_total=total;
+    display::set_status("preparing graphics");overlay::set_screen(draw_preparation);display::present_overlay_frame();
+}
+
 bool run(const std::string& exe_dir) {
     g_dir = exe_dir;
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

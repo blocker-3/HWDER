@@ -5,6 +5,8 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk/formats.cpp
     runtime/src/gpu/vk/astc.cpp
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp
+    runtime/src/gpu/vk/pipeline_catalog.cpp
+    runtime/src/gpu/vk/catalog_game_sources.cpp
 )
 
 # Standalone codec tests: no Vulkan device, generated game, SDL or guest data required.
@@ -15,3 +17,22 @@ add_executable(pipeline_warmup_cache_test EXCLUDE_FROM_ALL
 target_include_directories(pipeline_warmup_cache_test PRIVATE runtime/src runtime/include)
 target_compile_definitions(pipeline_warmup_cache_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(pipeline_warmup_cache_test PRIVATE /EHsc /O2)
+
+set(CATALOG_TRANSLATOR_SOURCES
+    runtime/src/shader/decode.cpp runtime/src/shader/fallback.cpp
+    runtime/src/shader/translate.cpp runtime/src/shader/program.cpp
+    runtime/src/shader/emit_alu.cpp runtime/src/shader/emit_mem.cpp)
+add_executable(pipeline_catalog_test EXCLUDE_FROM_ALL
+    runtime/tests/pipeline_catalog_test.cpp
+    runtime/src/gpu/vk/pipeline_catalog.cpp
+    runtime/src/gpu/vk/pipeline_warmup_cache.cpp ${CATALOG_TRANSLATOR_SOURCES})
+add_executable(pipeline_catalog_tool EXCLUDE_FROM_ALL
+    tools/pipeline_catalog/main.cpp runtime/src/config.cpp runtime/src/fs/nsp.cpp
+    runtime/src/gpu/vk/catalog_game_sources.cpp runtime/src/gpu/vk/pipeline_catalog.cpp
+    runtime/src/gpu/vk/pipeline_warmup_cache.cpp ${CATALOG_TRANSLATOR_SOURCES})
+foreach(target pipeline_catalog_test pipeline_catalog_tool)
+    target_include_directories(${target} PRIVATE runtime/src runtime/include ${TP}/spirv-headers/include ${TP}/vulkan-headers/include)
+    target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(${target} PRIVATE /EHsc /O2)
+    target_link_libraries(${target} PRIVATE bcrypt)
+endforeach()
