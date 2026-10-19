@@ -86,6 +86,12 @@ void unchanged_on_failure(const std::string& path, u64 tag, Status expected) {
     check(load(path.c_str(),tag,sentinel)==expected,"expected load rejection");
     check(sentinel.programs.size()==1 && sentinel.programs[0].key==55 && sentinel.pipelines.size()==2,"rejected load leaves caller unchanged");
 }
+SaveResult finish(SaveTask& task) {
+    SaveResult result;
+    const u64 deadline=GetTickCount64()+10000;
+    while (!task.poll(result)) { if (GetTickCount64()>=deadline) check(false,"background save timeout"); Sleep(1); }
+    return result;
+}
 }  // namespace
 
 int main() {
@@ -106,6 +112,25 @@ int main() {
     }
     check(save(second.c_str(),kTag,loaded)==Status::Ok && read(path)==read(second),"deterministic canonical encoding");
     auto good=read(path);
+    {
+        SaveTask task;
+        Cache snapshot=original;
+        check(task.start(second,kTag,std::move(snapshot),true),"background snapshot starts");
+        Cache later=original;
+        check(!task.start(second,kTag,std::move(later)) && later.programs.size()==original.programs.size(),"in-flight snapshot cannot be replaced or consume later history");
+        auto result=finish(task);
+        check(result.status==Status::Ok && result.recipes==original.pipelines.size() && !task.pending(),"background completion reports retained recipes");
+        check(read(second)==good,"background persistence has identical encoding");
+        HANDLE locked=CreateFileA(second.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        check(locked!=INVALID_HANDLE_VALUE,"lock background output against replacement");
+        Cache empty;
+        check(task.start(second,kTag,std::move(empty)),"background replacement starts");
+        check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
+        CloseHandle(locked);
+        snapshot=original;
+        check(task.start(second,kTag,std::move(snapshot)),"failed background save can be retried");
+        check(finish(task).status==Status::Ok && read(second)==good,"background retry preserves complete snapshot");
+    }
     // A partial catalog must not replace private successes it did not observe.
     Cache partial=original; partial.pipelines.resize(1);
     Cache retained=original;

@@ -1034,6 +1034,7 @@ private:
     catalog::Catalog catalog_records_;
     bool catalog_dirty_ = false;
     warmup::Cache warmup_records_;  // retained historical successes plus observed new successes
+    warmup::SaveTask warmup_save_;
     bool warmup_records_loaded_ = false, warmup_dirty_ = false, warmup_first_draw_ = false;
     std::unordered_set<u32> invalid_warm_programs_;
     std::vector<std::unique_ptr<WarmProgram>> warm_programs_;
@@ -1912,6 +1913,16 @@ void VkRenderer::wait_catalog() {
 
 void VkRenderer::save_warmup_records() {
     save_catalog_records();
+    warmup::SaveResult completed;
+    if (warmup_save_.poll(completed)) {
+        // New records/mismatches since submission already set dirty again. A
+        // successful old snapshot must never clear those later changes.
+        if (completed.status != warmup::Status::Ok) warmup_dirty_ = true;
+        hw_log("vk: prewarm background save: %s, %zu recipes retained", warmup::name(completed.status), completed.recipes);
+        if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background validation %.3f ms, serialization %.3f ms, disk %.3f ms",
+            completed.timings.validation_ms, completed.timings.serialization_ms, completed.timings.disk_ms);
+    }
+    if (warmup_save_.pending()) return;
     if (!warmup_dirty_) return;
     const auto begin = std::chrono::steady_clock::now();
     // Preserve historical successes across early quits. Only a freshly translated
@@ -1929,6 +1940,16 @@ void VkRenderer::save_warmup_records() {
         snapshot.pipelines.back().program_index = remap[record.program_index];
     }
     const auto copied = std::chrono::steady_clock::now();
+    static const bool synchronous = getenv("HWDER_CACHE_SAVE_SYNC") && strcmp(getenv("HWDER_CACHE_SAVE_SYNC"), "1") == 0;
+    if (!synchronous) {
+        if (warmup_save_.start(kWarmupFile, warmup_compatibility(), std::move(snapshot), getenv("HWDER_CACHE_PROFILE") != nullptr)) {
+            warmup_dirty_ = false;
+            if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background snapshot %.3f ms, submit %.3f ms",
+                std::chrono::duration<double, std::milli>(copied-begin).count(),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-copied).count());
+        } else hw_log("vk: prewarm background save unavailable; retaining dirty history for retry");
+        return;
+    }
     warmup::SaveTimings timings;
     const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot, getenv("HWDER_CACHE_PROFILE") ? &timings : nullptr);
     if (status == warmup::Status::Ok) warmup_dirty_ = false;

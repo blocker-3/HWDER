@@ -394,6 +394,26 @@ Status save(const char* path, u64 compatibility_tag, const Cache& cache, SaveTim
     } catch (const std::exception&) { return Status::Invalid; }
 }
 
+bool SaveTask::start(std::string path, u64 compatibility_tag, Cache&& snapshot, bool profile) {
+    if (pending()) return false;
+    try {
+        result_ = std::async(std::launch::async,
+            [path = std::move(path), compatibility_tag, cache = std::move(snapshot), profile]() {
+                SaveResult result;
+                result.recipes = cache.pipelines.size();
+                result.status = save(path.c_str(), compatibility_tag, cache, profile ? &result.timings : nullptr);
+                return result;
+            });
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+bool SaveTask::poll(SaveResult& result) {
+    if (!pending() || result_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    result = result_.get();
+    return true;
+}
+
 Status load(const char* path, u64 compatibility_tag, Cache& out) {
     if (!path || !*path) return Status::IoError;
     try {

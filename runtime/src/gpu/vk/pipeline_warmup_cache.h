@@ -3,6 +3,8 @@
 
 #include <array>
 #include <cstddef>
+#include <future>
+#include <string>
 #include <vector>
 
 #include "shader/shader.h"
@@ -65,6 +67,20 @@ const char* name(Status status);
 Status load(const char* path, u64 compatibility_tag, Cache& out);
 struct SaveTimings { double validation_ms = 0, serialization_ms = 0, disk_ms = 0; };
 Status save(const char* path, u64 compatibility_tag, const Cache& cache, SaveTimings* timings = nullptr);
+
+struct SaveResult { Status status = Status::IoError; SaveTimings timings; size_t recipes = 0; };
+// One immutable snapshot in flight. The caller retains live history and retries
+// failures; a completed task must be polled before another snapshot can start.
+// Destruction waits for the owned task; atomic replacement protects an older file
+// if the process is terminated without running destructors.
+class SaveTask {
+public:
+    bool pending() const { return result_.valid(); }
+    bool start(std::string path, u64 compatibility_tag, Cache&& snapshot, bool profile = false);
+    bool poll(SaveResult& result);
+private:
+    std::future<SaveResult> result_;
+};
 
 // Union compatible private history with newly prepared catalog recipes. Exact
 // program/key duplicates are reused; distinct same-key shader variants survive.

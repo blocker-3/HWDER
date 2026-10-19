@@ -60,10 +60,21 @@ int main(int argc, char** argv) {
         begin=Clock::now(); size_t n=0;
         require(vkGetPipelineCacheData(device,driver,&n,nullptr)==VK_SUCCESS && n,"native size"); std::vector<u8> blob(n);
         require(vkGetPipelineCacheData(device,driver,&n,blob.data())==VK_SUCCESS,"native bytes"); double native_ms=ms(begin);
-        begin=Clock::now(); FILE* f=std::fopen(native_out.c_str(),"wb"); require(f!=nullptr,"native open");
+        begin=Clock::now(); FILE* f=nullptr; fopen_s(&f,native_out.c_str(),"wb"); require(f!=nullptr,"native open");
         bool wrote=std::fwrite(blob.data(),1,n,f)==n; int closed=std::fclose(f); require(wrote && !closed,"native write");
         std::printf("sample=%d snapshot=%.3f validation=%.3f serialization=%.3f recipe_disk=%.3f native_retrieval=%.3f native_disk=%.3f ms\n",i,snapshot_ms,t.validation_ms,t.serialization_ms,t.disk_ms,native_ms,ms(begin));
     }
     require(read(recipe_out.c_str())==bytes,"identical recipe encoding");
+    SaveTask task;
+    for (int i=0;i<7;++i) {
+        auto begin=Clock::now(); Cache snapshot=cache; double snapshot_ms=ms(begin);
+        begin=Clock::now(); require(task.start(recipe_out,tag,std::move(snapshot),true),"queue immutable recipes"); double submit_ms=ms(begin);
+        SaveResult result; const auto deadline=Clock::now()+std::chrono::seconds(10);
+        while (!task.poll(result)) { require(Clock::now()<deadline,"background timeout"); Sleep(1); }
+        require(result.status==Status::Ok,"background output");
+        std::printf("background=%d snapshot=%.3f submit=%.3f validation=%.3f serialization=%.3f recipe_disk=%.3f ms\n",
+            i,snapshot_ms,submit_ms,result.timings.validation_ms,result.timings.serialization_ms,result.timings.disk_ms);
+    }
+    require(read(recipe_out.c_str())==bytes,"identical background encoding");
     vkDestroyPipelineCache(device,driver,nullptr); vkDestroyDevice(device,nullptr); vkDestroyInstance(instance,nullptr); FreeLibrary(loader);
 }
