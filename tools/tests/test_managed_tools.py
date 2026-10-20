@@ -156,6 +156,26 @@ class Managed(unittest.TestCase):
         with self.assertRaises(ValueError):
             tools.inspect_zip(file, item)
 
+    def test_windows_long_paths_without_global_policy_changes(self):
+        value, _ = self.fixture()
+        relative = "/".join(["nested-" + str(i) + "-" + "a"*30 for i in range(7)]) + "/notice.txt"
+        file = self.root / "long.zip"
+        file.write_bytes(archive([(relative, b"retained long-path notice")]))
+        item = copy.deepcopy(value["artifacts"][0])
+        item["required"] = [relative]
+        destination = self.root / "long-output/output"
+        tools.unpack(file, destination, item)
+        self.addCleanup(lambda:shutil.rmtree(tools.filesystem_path(tools.owned_path(destination, self.root))))
+        self.assertGreater(len(str(destination / relative)), 300)
+        self.assertEqual(tools.filesystem_path(destination / relative).read_bytes(), b"retained long-path notice")
+        self.assertIn(relative, tools.tool_hashes(destination))
+        self.assertEqual(tools.owned_path(tools.filesystem_path(destination), self.root), destination)
+        tools.first_run.atomic_json(destination.parent / "complete.json",
+            {"owner":tools.OWNER,"key":"long-fixture","files":tools.tool_hashes(destination)})
+        self.assertTrue(tools.complete(destination.parent, "long-fixture"))
+        with self.assertRaises(ValueError):
+            tools.owned_path(tools.filesystem_path(self.root / "../outside"), self.root)
+
     def test_url_and_environment_do_not_inherit_sdk(self):
         for url in ("http://www.python.org/a", "https://evil.invalid/a", "https://user@github.com/a",
                     "https://github.com:444/a"):

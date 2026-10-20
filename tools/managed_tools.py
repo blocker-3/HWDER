@@ -28,6 +28,20 @@ NETWORK_HOSTS = {"github.com", "release-assets.githubusercontent.com",
                  "objects.githubusercontent.com", "www.python.org", "files.pythonhosted.org"}
 RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
 
+def filesystem_path(path):
+    """Use Win32 extended paths locally; never change the host long-path policy."""
+    path = Path(path).absolute()
+    if os.name == "nt" and not str(path).startswith("\\\\?\\"):
+        return Path("\\\\?\\" + str(path))
+    return path
+
+
+def plain_path(path):
+    text = str(path)
+    if os.name == "nt" and text.startswith("\\\\?\\"):
+        text = text[4:]
+    return Path(os.path.abspath(text))
+
 
 def manifest(path=MANIFEST):
     value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -73,14 +87,15 @@ def safe_name(name):
 
 def owned_path(path, root):
     """Reject redirects, including existing junctions anywhere below the owned root."""
-    root, path = Path(root).absolute(), Path(path).absolute()
+    root, path = plain_path(root), plain_path(path)
     if path != root and root not in path.parents:
         raise ValueError("Tool output escaped its private root")
     # Include ancestors of root too: a user-selected redirected data root must
     # be rejected rather than silently installing somewhere else.
     for part in [path, *path.parents]:
-        if part.exists():
-            info = part.lstat()
+        native = filesystem_path(part)
+        if native.exists():
+            info = native.lstat()
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 raise ValueError("Redirected tool output is unsupported")
     return path
@@ -156,12 +171,13 @@ def unpack(archive, destination, item, cancelled=lambda: False):
     """Preflight all names/budgets before creating any extracted member."""
     entries = inspect_zip(archive, item)
     destination = Path(destination)
-    destination.mkdir(parents=True, exist_ok=False)
+    filesystem_path(destination).mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(archive) as z:
         for info, relative in entries:
             if cancelled():
                 raise InterruptedError("Private tool extraction cancelled")
             target = owned_path(destination.joinpath(*relative.parts), destination)
+            target = filesystem_path(target)
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
@@ -179,7 +195,7 @@ def unpack(archive, destination, item, cancelled=lambda: False):
                     raise ValueError("Tool ZIP entry was truncated")
     base = destination / item["archive_root"]
     for relative in item["required"]:
-        if not (base / relative).is_file():
+        if not filesystem_path(base / relative).is_file():
             raise ValueError("Tool archive omitted " + relative)
     return base
 
@@ -199,9 +215,9 @@ def complete(directory, key):
 
 
 def tool_hashes(root):
-    for entry in Path(root).rglob("*"):
+    for entry in filesystem_path(root).rglob("*"):
         owned_path(entry, root)
-    return first_run.tree_hashes(root)
+    return first_run.tree_hashes(filesystem_path(root))
 
 
 def probe_imports(output):
