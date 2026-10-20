@@ -67,6 +67,9 @@ def _components_locked(data, create, run):
 
 
 def stage_log(message):
+    if message.startswith("private-tools: "):
+        emit("stage",message.removeprefix("private-tools: "),stage="tools")
+        return
     mapping = (("validating", "Checking your game"), ("hashing", "Checking your game"),
                ("exefs:", "Preparing game files"), ("generated:", "Preparing game code"),
                ("build:", "Building the game"), ("ready:", "Finishing setup"),

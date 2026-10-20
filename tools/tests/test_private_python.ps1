@@ -9,6 +9,18 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Require($Value, [string]$Message) { if (-not $Value) { throw $Message } }
+$Nonce='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+$stage=Write-ToolsStage 'Synthetic progress phase'
+Require ($stage.StartsWith('HWDER_UI:'+$Nonce+':')) 'Stage lost the session nonce.'
+$event=$stage.Substring(('HWDER_UI:'+$Nonce+':').Length) | ConvertFrom-Json
+Require ($event.type -eq 'stage' -and $event.message -eq 'Synthetic progress phase') 'Bad stage event.'
+$Nonce=''
+$script:stageMessages=New-Object 'Collections.Generic.List[string]'
+$script:originalToolsStage=${function:Write-ToolsStage}
+function Write-ToolsStage([string]$Message) {
+    $script:stageMessages.Add($Message)
+    & $script:originalToolsStage $Message
+}
 function Make-Zip([string]$Name, $Entries) {
     $path = Join-Path $case $Name
     $stream = [IO.File]::Open($path,[IO.FileMode]::CreateNew)
@@ -33,7 +45,13 @@ $spec = [pscustomobject]@{sha256=(Get-PrivateSHA256 $payload); max_download_byte
 $fetch = { param($item,$destination) [IO.File]::Copy($payload,$destination,$false) }
 $data = Join-Path $case 'data'
 $installed = Install-PrivatePython $data $spec $fetch
+Require ($installed -is [string]) 'Progress contaminated the installed interpreter path.'
 Require ([IO.File]::Exists($installed)) 'Synthetic bootstrap did not publish.'
+$hashes=Get-TreeCertificate ([IO.Path]::GetDirectoryName($installed))
+Require ($hashes -is [hashtable] -and $hashes.Count -eq 2) 'Progress contaminated the file certificate.'
+Require ($script:stageMessages.Contains('Extracting private Python')) 'Missing extraction phase.'
+Require ($script:stageMessages.Contains('Checked private Python file hashes: 2 (scan complete)')) 'Missing actual final hash count.'
+Require ($script:stageMessages.Contains('Finalizing the verified private Python interpreter')) 'Missing finalization phase.'
 Require ([IO.File]::ReadAllText((Join-Path ([IO.Path]::GetDirectoryName($installed)) 'LICENSE.txt')) -eq 'fixture notice') 'Notice was lost.'
 $reused = Install-PrivatePython $data $spec {throw 'Must not fetch a verified interpreter again.'}
 Require ($installed -eq $reused) 'Verified bootstrap reuse failed.'

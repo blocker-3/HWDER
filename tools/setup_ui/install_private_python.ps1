@@ -92,6 +92,7 @@ function Expand-CheckedZip([string]$Archive, [string]$Destination, $Spec) {
             }
         }
         [IO.Directory]::CreateDirectory($Destination) | Out-Null
+        Write-ToolsStage 'Extracting private Python' | Out-Host
         foreach ($item in $entries) {
             $target = Assert-OwnedPath (Join-Path $Destination $item.Relative) $Destination
             if ($item.Directory) { [IO.Directory]::CreateDirectory($target) | Out-Null; continue }
@@ -112,6 +113,7 @@ function Get-TreeCertificate([string]$Root) {
     Assert-OwnedPath $Root $Root | Out-Null
     $queue=New-Object 'Collections.Generic.Queue[string]'
     $queue.Enqueue($Root)
+    $clock=[Diagnostics.Stopwatch]::StartNew();[long]$last=-500
     while ($queue.Count) {
         $directory=$queue.Dequeue()
         foreach ($entry in Get-ChildItem -Force -LiteralPath $directory) {
@@ -119,8 +121,13 @@ function Get-TreeCertificate([string]$Root) {
             if ($entry.PSIsContainer) { $queue.Enqueue($entry.FullName);continue }
             $relative = $entry.FullName.Substring($Root.TrimEnd('\').Length+1).Replace('\','/')
             $result[$relative] = Get-PrivateSHA256 $entry.FullName
+            if ($result.Count -eq 1 -or $clock.ElapsedMilliseconds-$last -ge 500) {
+                Write-ToolsStage ('Checking private Python: '+$result.Count+' files hashed') | Out-Host
+                $last=$clock.ElapsedMilliseconds
+            }
         }
     }
+    Write-ToolsStage ('Checked private Python file hashes: '+$result.Count+' (scan complete)') | Out-Host
     return $result
 }
 
@@ -142,18 +149,23 @@ function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch, [bool]
         $final = Assert-OwnedPath (Join-Path $root $leaf) $data
         $certificate = Join-Path $final 'complete.json'
         if ([IO.File]::Exists($certificate)) {
+            Write-ToolsStage 'Checking the installed private Python interpreter' | Out-Host
             $old = Get-Content -Raw -LiteralPath $certificate | ConvertFrom-Json
             $files = Get-TreeCertificate (Join-Path $final 'output')
             $oldNames = @($old.files.PSObject.Properties.Name)
             $equal = $old.owner -eq 'hwder-private-python-v1' -and $old.sha256 -eq $Spec.sha256 -and $oldNames.Count -eq $files.Count
             foreach ($name in $oldNames) { if ($old.files.$name -ne $files[$name]) { $equal=$false } }
-            if ($equal -and [IO.File]::Exists((Join-Path $final 'output/python.exe'))) { return (Join-Path $final 'output/python.exe') }
+            if ($equal -and [IO.File]::Exists((Join-Path $final 'output/python.exe'))) {
+                Write-ToolsStage 'Private Python interpreter verified' | Out-Host
+                return (Join-Path $final 'output/python.exe')
+            }
         }
         if (-not $AllowDownload) { throw 'Private tools are not ready. Choose Install private tools, then recheck.' }
         $attempt = Join-Path $root ($leaf + '.partial-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
         [IO.Directory]::CreateDirectory($attempt) | Out-Null
         $archive = Join-Path $attempt 'python.zip'
         & $Fetch $Spec $archive
+        Write-ToolsStage 'Checking the private Python download checksum' | Out-Host
         if ((Get-Item -LiteralPath $archive).Length -gt $Spec.max_download_bytes -or
             (Get-PrivateSHA256 $archive) -ne $Spec.sha256) {
             throw 'Private interpreter checksum mismatch.'
@@ -161,9 +173,11 @@ function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch, [bool]
         $output = Join-Path $attempt 'output'
         Expand-CheckedZip $archive $output $Spec
         $record = @{owner='hwder-private-python-v1';sha256=$Spec.sha256;files=(Get-TreeCertificate $output)}
+        Write-ToolsStage 'Finalizing the verified private Python interpreter' | Out-Host
         [IO.File]::WriteAllText((Join-Path $attempt 'complete.json'), ($record | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
         if ([IO.Directory]::Exists($final)) { [IO.Directory]::Move($final, $final+'.invalid-'+[Guid]::NewGuid().ToString('N').Substring(0,8)) }
         [IO.Directory]::Move($attempt,$final)
+        Write-ToolsStage 'Private Python interpreter installed and verified' | Out-Host
         return (Join-Path $final 'output/python.exe')
     } finally {
         if ($locked) { $lock.Unlock(0,1) }

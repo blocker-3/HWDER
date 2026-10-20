@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -27,6 +28,22 @@ OWNER = "hwder-private-tools-v1"
 NETWORK_HOSTS = {"github.com", "release-assets.githubusercontent.com",
                  "objects.githubusercontent.com", "www.python.org", "files.pythonhosted.org"}
 RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
+
+
+class FileProgress:
+    """Actual completed work only; at most two intermediate updates per second."""
+    def __init__(self, callback=None, clock=None):
+        self.callback=callback
+        self.clock=clock or time.monotonic
+        self.last=None
+
+    def update(self, count, finished=False):
+        if self.callback is None:
+            return
+        now=self.clock()
+        if finished or self.last is None or now-self.last>=0.5:
+            self.callback(count,finished)
+            self.last=now
 
 def filesystem_path(path):
     """Use Win32 extended paths locally; never change the host long-path policy."""
@@ -167,19 +184,21 @@ def inspect_zip(archive, item):
     return entries
 
 
-def unpack(archive, destination, item, cancelled=lambda: False):
+def unpack(archive, destination, item, cancelled=lambda: False, progress=None):
     """Preflight all names/budgets before creating any extracted member."""
     entries = inspect_zip(archive, item)
+    counter=FileProgress(progress)
     destination = Path(destination)
     filesystem_path(destination).mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(archive) as z:
-        for info, relative in entries:
+        for completed,(info, relative) in enumerate(entries,1):
             if cancelled():
                 raise InterruptedError("Private tool extraction cancelled")
             target = owned_path(destination.joinpath(*relative.parts), destination)
             target = filesystem_path(target)
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
+                counter.update(completed)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with z.open(info) as src, target.open("xb") as out:
@@ -193,10 +212,12 @@ def unpack(archive, destination, item, cancelled=lambda: False):
                     out.write(chunk)
                 if count != info.file_size:
                     raise ValueError("Tool ZIP entry was truncated")
+            counter.update(completed)
     base = destination / item["archive_root"]
     for relative in item["required"]:
         if not filesystem_path(base / relative).is_file():
             raise ValueError("Tool archive omitted " + relative)
+    counter.update(len(entries),True)
     return base
 
 
@@ -205,21 +226,22 @@ def identity(value, source):
     return first_run.digest({"manifest": value, "source": str(Path(source).resolve())})
 
 
-def complete(directory, key):
+def complete(directory, key, progress=None):
     directory = Path(directory)
     certificate = first_run.read_json(directory / "complete.json")
     output = directory / "output"
     return (certificate.get("owner") == OWNER and certificate.get("key") == key
             and bool(certificate.get("files")) and output.is_dir()
-            and certificate["files"] == tool_hashes(output))
+            and certificate["files"] == tool_hashes(output,progress))
 
 
-def tool_hashes(root):
+def tool_hashes(root, progress=None):
     # Check ancestors once, then each entry before traversal; do not follow
     # redirects. The old per-header ancestor scan took minutes for 17k files.
     root = filesystem_path(owned_path(root, root))
     pending = [root]
     result = {}
+    counter=FileProgress(progress)
     while pending:
         directory = pending.pop()
         with os.scandir(directory) as entries:
@@ -232,8 +254,10 @@ def tool_hashes(root):
                     pending.append(path)
                 elif stat.S_ISREG(info.st_mode):
                     result[path.relative_to(root).as_posix()] = first_run.file_hash(path)
+                    counter.update(len(result))
                 else:
                     raise ValueError("Nonregular private tool output")
+    counter.update(len(result),True)
     return result
 
 
@@ -253,7 +277,7 @@ def probe_imports(output):
 
 
 def install(data, source, value=None, fetch=download, progress=lambda *a: None,
-            cancelled=lambda: False, validate=probe_imports):
+            cancelled=lambda: False, validate=probe_imports, phase=lambda *a,**k:None):
     value = value or manifest()
     data, source = Path(data).absolute(), Path(source).resolve()
     owned_path(data, data)
@@ -264,7 +288,9 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
         key = identity(value, source)
         final = root / key[:24]
         owned_path(final, data)
-        if complete(final, key):
+        phase("checking_installation")
+        if complete(final, key,lambda count,done:phase("verify_existing",files=count,finished=done)):
+            phase("installed_ready")
             return final
         downloads = owned_path(root / "downloads", data)
         downloads.mkdir(exist_ok=True)
@@ -276,15 +302,20 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
                 raise InterruptedError("Private tool setup cancelled")
             archive = downloads / (item["sha256"] + ".zip")
             owned_path(archive, data)
+            phase("archive_check",artifact=item["id"])
             if not archive.is_file() or first_run.file_hash(archive) != item["sha256"]:
                 temporary = downloads / (item["sha256"] + ".partial-" + uuid.uuid4().hex[:8])
                 fetch(item, temporary, progress, cancelled)
+                phase("download_checksum",artifact=item["id"])
                 if temporary.stat().st_size > item["max_download_bytes"] or first_run.file_hash(temporary) != item["sha256"]:
                     raise ValueError("Tool checksum mismatch: " + item["id"])
                 os.replace(temporary, archive)
-            unpack(archive, output / item["id"], item, cancelled)
+            phase("extract",artifact=item["id"],entries=0,finished=False)
+            unpack(archive, output / item["id"], item, cancelled,
+                   lambda count,done:phase("extract",artifact=item["id"],entries=count,finished=done))
         # Preserve every wheel file, including dist-info and licenses. No pip,
         # executable wheel hooks, .pth execution, or arbitrary wheel relocation.
+        phase("packages")
         python = output / "python"
         packages = python / "Lib/site-packages"
         packages.mkdir(parents=True)
@@ -297,15 +328,20 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
                     entry.rename(packages / entry.name)
         (python / "python313._pth").write_text(
             "python313.zip\n.\nLib/site-packages\n" + str(source / "tools") + "\nimport site\n", encoding="utf-8")
+        phase("imports")
         validate(output)
-        files = tool_hashes(output)
+        phase("imports_done")
+        phase("verify_new",files=0,finished=False)
+        files = tool_hashes(output,lambda count,done:phase("verify_new",files=count,finished=done))
         if cancelled():
             raise InterruptedError("Private tool setup cancelled before publication")
+        phase("finalize")
         first_run.atomic_json(attempt / "complete.json",
                              {"owner": OWNER, "key": key, "files": files, "abi": value["abi"]})
         if final.exists():
             final.rename(root / (final.name + ".invalid-" + uuid.uuid4().hex[:8]))
         attempt.rename(final)
+        phase("installed_ready")
         return final
 
 
@@ -320,12 +356,12 @@ def paths(directory, value=None):
             "cxx": by_id["llvm"] / "bin/x86_64-w64-mingw32-clang++.exe",
             "cmake": by_id["cmake"] / "bin/cmake.exe", "ninja": by_id["ninja"] / "ninja.exe"}
 
-def installed(data, source, value=None):
+def installed(data, source, value=None, progress=None):
     value = value or manifest()
     data = plain_path(data)
     key = identity(value, source)
     directory = owned_path(data / "managed-tools" / key[:24], data)
-    if not complete(directory, key):
+    if not complete(directory, key,progress):
         raise ValueError("Private tools are missing or changed. Choose Install private tools, then recheck.")
     return directory
 
@@ -335,7 +371,9 @@ def prerequisites(source, directory):
     source, directory = Path(source).resolve(), Path(directory).resolve()
     value = manifest()
     key = identity(value, source)
-    if not complete(directory, key):
+    def checked(count,done):
+        first_run.log(f"private-tools: Checking private tool files: {count} files hashed" + (" (scan complete)" if done else ""))
+    if not complete(directory, key,checked):
         raise ValueError("Private tool certificate changed. Choose Install private tools.")
     import importlib.metadata
     versions = {name:importlib.metadata.version(name) for name in ("cryptography","lz4","cffi","pycparser")}
@@ -395,6 +433,21 @@ def environment(directory, value=None, temporary=None):
     return env
 
 
+def phase_message(kind, **fields):
+    if kind in ("verify_existing","verify_new"):
+        return f"Checking private tool files: {fields['files']} files hashed" + (" (scan complete)" if fields['finished'] else "")
+    if kind=="extract":
+        return f"Extracting {fields['artifact']}: {fields['entries']} entries processed" + (" (complete)" if fields['finished'] else "")
+    if kind in ("archive_check","download_checksum"):
+        return "Checking archive checksum: " + fields["artifact"]
+    return {"checking_installation":"Checking for an existing private tool installation",
+            "packages":"Preparing private Python packages and preserving license notices",
+            "imports":"Checking private Python, AES and LZ4 imports",
+            "imports_done":"Private Python import checks passed",
+            "finalize":"Finalizing the verified private tool installation",
+            "installed_ready":"Private tools verified and ready"}[kind]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, type=Path)
@@ -411,10 +464,13 @@ def main():
     def event(kind,message,**fields):
         prefix="HWDER_UI:"+args.nonce+":" if args.nonce else ""
         print(prefix+json.dumps({"type":kind,"message":message,**fields},ensure_ascii=False),flush=True)
+    def phase(kind,**fields):
+        event("stage",phase_message(kind,**fields),stage="tools",phase=kind,**fields)
     if args.bridge_action:
         try:
             event("stage","Verifying private tool files (every file is checked)",stage="tools")
-            directory=installed(args.data,args.source,value)
+            directory=installed(args.data,args.source,value,
+                                progress=lambda count,done:phase("verify_existing",files=count,finished=done))
             command=[str(paths(directory,value)["python"]),"-B","-X","utf8","-u",
                      str(args.source/"tools/setup_bridge.py"),"--action",args.bridge_action,
                      "--data",str(args.data),"--managed-toolchain",str(directory),"--ui-protocol",
@@ -432,7 +488,8 @@ def main():
         print(json.dumps({"manifest_sha256": first_run.file_hash(MANIFEST), "downloads": value["artifacts"]}, indent=2))
         return
     result = install(args.data, args.source, value,
-                     progress=lambda name, got, total:event("stage",f"Downloading {name}: {got//1048576} MiB received",stage="tools"))
+                     progress=lambda name, got, total:event("stage",f"Downloading {name}: {got//1048576} MiB received",stage="tools"),
+                     phase=phase)
     print("tools: verified " + str(result), flush=True)
     event("components_ready","Private tools installed and verified. Choose Check requirements next.")
 
