@@ -25,7 +25,19 @@ def vs_tool(sub, exe, env):
     return found
 
 
-def toolchain():
+def toolchain(managed=None):
+    if managed:
+        import managed_tools
+        value = managed_tools.manifest()
+        key = managed_tools.identity(value, ROOT)
+        if not managed_tools.complete(managed, key):
+            raise RuntimeError("Private toolchain certificate is missing or changed; run setup tools verification")
+        selected = managed_tools.paths(managed, value)
+        for path in selected.values():
+            if not path.is_file():
+                raise RuntimeError("Private toolchain is incomplete: " + str(path))
+        return (managed_tools.environment(managed, value), str(selected["cmake"]), str(selected["ninja"]),
+                str(selected["cc"]), str(selected["cxx"]))
     if os.name == "nt":
         import msvc
         env = msvc.vs_env()
@@ -48,40 +60,48 @@ def main():
     ap.add_argument("--target", default=None)
     ap.add_argument("--build-dir", help="isolated build directory")
     ap.add_argument("--generated-dir", help="user-local generated C directory")
+    ap.add_argument("--managed-toolchain", type=Path, help="verified private LLVM-MinGW toolset directory")
     modes = ap.add_mutually_exclusive_group()
     modes.add_argument("--synthetic-tests", action="store_true", help="configure public tests without game inputs")
     modes.add_argument("--host-tests", action="store_true", help="configure only portable host contract tests")
     modes.add_argument("--game-only", action="store_true", help="compile generated game library without host runtime")
     modes.add_argument("--setup-ui", action="store_true", help="build only the code-free native Windows setup window")
+    modes.add_argument("--managed-probe", action="store_true", help="public Windows GNU-ABI compatibility contracts; no game inputs")
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
-    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui):
+    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe):
         ap.error("--only-file cannot be combined with a test/library mode")
     if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
         ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
+    if a.managed_probe and not a.managed_toolchain:
+        ap.error("--managed-probe requires a certified --managed-toolchain")
     # Single-file probes and complete builds share the same host reservation.
     with build_lock():
         return build(a)
 
 
 def build(a):
-    mode = "setup-ui" if a.setup_ui else "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
-    bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", mode))
+    mode = "probe" if getattr(a, "managed_probe", False) else "setup-ui" if a.setup_ui else "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
+    managed = getattr(a, "managed_toolchain", None)
+    bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", ("managed-" if managed else "") + mode))
     generated = os.path.abspath(a.generated_dir or os.path.join(ROOT, "generated"))
     os.makedirs(bdir, exist_ok=True)
-    env, cmake, ninja, cc, cxx = toolchain()
+    env, cmake, ninja, cc, cxx = toolchain(managed)
     if a.only_file:
         cpp = a.only_file.endswith((".cpp", ".cc", ".cxx"))
         includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src")]
         includes += [os.path.join(ROOT, "third_party", name, "include") for name in ("vulkan-headers", "spirv-headers")]
-        if os.name == "nt":
+        if os.name == "nt" and not managed:
             args = [cc, "/nologo", "/c", "/O2", "/arch:AVX2", "-mfma", "-Wno-everything", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN"]
             args += ["/std:c++20", "/EHsc"] if cpp else []
             args += [f"/I{path}" for path in includes]
             args += [a.only_file, "/Fo" + os.path.join(bdir, "probe.obj")]
         else:
             args = [cxx if cpp else cc, "-c", "-O2", "-mavx2", "-mfma", "-std=c++20" if cpp else "-std=c11"]
+            if managed:
+                args += ["-mf16c", "-maes", "-mpclmul", "-msse4.2", "-mcx16",
+                         "-DNOMINMAX", "-DWIN32_LEAN_AND_MEAN"]
             args += [f"-I{path}" for path in includes]
             args += [a.only_file, "-o", os.path.join(bdir, "probe.o")]
         return subprocess.run(args, cwd=ROOT, env=env).returncode
@@ -91,10 +111,15 @@ def build(a):
             f"-DGEN_DIR={generated}", f"-DHWDER_SYNTHETIC_TESTS_ONLY={'ON' if a.synthetic_tests else 'OFF'}",
             f"-DHWDER_HOST_TESTS_ONLY={'ON' if a.host_tests else 'OFF'}", f"-DHWDER_GAME_ONLY={'ON' if a.game_only else 'OFF'}"]
     args += [f"-DHWDER_SETUP_UI_ONLY={'ON' if a.setup_ui else 'OFF'}"]
+    args += [f"-DHWDER_MANAGED_PROBE_ONLY={'ON' if getattr(a, 'managed_probe', False) else 'OFF'}"]
+    if managed:
+        import managed_tools
+        args += [f"-DPython3_EXECUTABLE={managed_tools.paths(managed)['python']}",
+                 "-DPython3_FIND_REGISTRY=NEVER"]
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
-    target = a.target or ("hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
+    target = a.target or ("managed_compatibility" if getattr(a, "managed_probe", False) else "hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
     return subprocess.run([ninja, "-C", bdir, "-j", str(a.jobs), target], env=env).returncode
 
 
