@@ -11,6 +11,14 @@ target_compile_definitions(managed_production_units PRIVATE NOMINMAX WIN32_LEAN_
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES IMGUI_IMPL_VULKAN_USE_LOADER
     IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USER_CONFIG="gpu/hwder_imconfig.h")
 target_compile_options(managed_production_units PRIVATE ${PROBE_FEATURES} -O2 -g -Wno-everything)
+set(PROBE_VERSION_DIR ${CMAKE_BINARY_DIR}/version)
+add_custom_target(managed_probe_version
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${PROBE_VERSION_DIR}/hwder_version.h
+            -DCMAKE_DISABLE_FIND_PACKAGE_Git=TRUE -P ${CMAKE_SOURCE_DIR}/tools/version.cmake
+    BYPRODUCTS ${PROBE_VERSION_DIR}/hwder_version.h
+    VERBATIM)
+add_dependencies(managed_production_units managed_probe_version)
+target_include_directories(managed_production_units PRIVATE ${PROBE_VERSION_DIR})
 
 add_executable(managed_runtime_probe tools/tests/managed_runtime_probe.cpp)
 target_include_directories(managed_runtime_probe PRIVATE runtime/include)
