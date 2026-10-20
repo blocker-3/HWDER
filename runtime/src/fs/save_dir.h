@@ -7,6 +7,9 @@ namespace hwfs {
 
 std::string default_save_dir();  // <exe dir>\save
 std::string chosen_save_dir();   // the setting, else the default
+// Accept a save root or this game's recognized account leaf; reads file metadata only.
+// On failure root is empty and report explains why the picker must keep the previous setting.
+bool resolve_save_folder(const std::string& selected, std::string& root, std::string& report);
 // The folder the running game uses. Fixed the first time the game opens its save; until then it follows the setting.
 std::string active_save_dir();
 std::wstring active_save_root();  // the same, with the \\?\ prefix, for the host filesystem
