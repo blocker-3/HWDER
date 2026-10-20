@@ -198,7 +198,7 @@ try:
     begin=time.monotonic();confirm_close(p,h);require(p.poll() is None,"Close killed critical publication")
     p.wait(timeout=8);require(p.returncode==0 and time.monotonic()-begin>.3,"Deferred close did not await commit interval")
     checks.append("Native WM_CLOSE after ACK defers through owned synthetic critical publication, then exits normally")
-    (OUT/"results.json").write_text(json.dumps({"result":"PASS","exe":str(EXE),"checks":checks,"scope":"Native preview only; no game/dependency install/download or real NSP","screenshots":sorted(p.name for p in OUT.glob("*.png"))},indent=2))
+    (OUT/"results.json").write_text(json.dumps({"result":"PASS","exe":str(EXE),"checks":checks,"scope":"Actual native Check and synthetic preparation preview; no game/dependency install/download or real NSP","screenshots":sorted(p.name for p in OUT.glob("*.png"))},indent=2))
     print("PASS native UI/JobObject/handshake/state tests:",OUT)
 finally:
     for p in active:

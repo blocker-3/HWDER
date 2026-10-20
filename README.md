@@ -16,27 +16,26 @@ The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys`
 
 ## Playing (source/setup kit)
 
-A native Windows first-time setup prototype is available on this branch:
-[window, player flow and validation limits](docs/windows-setup.md). Its window opens without Python;
-guided prerequisite setup and the existing local build backend prepare the game afterward.
+The native Windows setup prototype on this branch opens without installed Python or Visual
+Studio. See [the setup guide and validation limits](docs/windows-setup.md).
 
-1. Unpack the source/setup kit into a short, writable folder, or clone this repository with
-   `git clone --recursive`. Install the prerequisites below; the kit includes pinned third-party
-   sources and license notices, but no compiler, Windows SDK, Python installation or wheels.
-2. Install **Visual Studio 2022 / Build Tools**, the **Desktop development with C++** workload,
-   **C++ Clang tools for Windows (clang-cl)**, **C++ CMake tools for Windows** (CMake 3.24+ and
-   Ninja), and a **Windows 10/11 SDK** with x64 libraries. Install **Python 3.10+ x64**, then run
-   `python -m pip install -r tools/requirements-setup.txt` (`cryptography` and `lz4`).
-3. Run `python tools/first_run.py --check` to check installed prerequisites.
-4. Run `play-local.bat --nsp "C:\path\your-game.nsp" --keys "C:\path\your-prod.keys"`.
-   Alternatively set `HWDER_NSP` and `HWDER_KEYS` and double-click `play-local.bat`.
+1. Extract the entire setup kit into a permanent writable folder and open **HWDER Setup.exe**.
+2. Choose a **Data folder**, then **Install private tools**. Review the download consent.
+   Pinned Python, LLVM-MinGW, CMake, Ninja and Python packages stay in that folder; no administrator
+   access, system installation or global PATH change is needed. The kit itself bundles no toolchain.
+3. Browse to your own supported `.nsp` and `prod.keys` files. These paths are used in place; keys
+   are never copied. Choose **Check requirements**, then **Prepare game**.
+4. After successful preparation, choose **Play** or create a desktop shortcut. Preparation never
+   launches automatically. **Show details** displays progress/errors; interrupted work can be retried.
 
-The first run validates the base-game title and the exact tested five-module SHA-256 profile,
-extracts ExeFS, runs the ARM64-to-C generator, builds the **complete** local executable and launches
-it. Later runs verify the cached output and reuse it. Setup takes several minutes and substantial
-disk space; compiler work is capped at eight jobs by default (`--jobs N` changes this). Updates,
-bundles and other code versions are rejected before generation. The profile identifies code
-checksums rather than guessing a marketing version. See [local-build.md](docs/local-build.md).
+Preparation validates the exact supported five-module SHA-256 profile, extracts ExeFS, generates
+C and compiles the complete native program locally. Verified stages can be reused. Allow several
+minutes and substantial disk space. Check, Prepare and Play never download missing tools.
+
+This local unsigned prototype has verified private tool installation, public compiler contracts
+and native setup controls. Real game preparation and clean-machine gameplay remain validation
+limits; this is not a published release. The legacy installed-Python/Visual Studio CLI remains
+available for developers in [local-build.md](docs/local-build.md).
 
 **The game-linked `hwder.exe`, PDB and generated C are private game-derived outputs. They are
 excluded from release packaging.** `tools/make_dist.py` creates a source/setup kit, with no game
@@ -51,8 +50,10 @@ a save-file cheats tab; frame interpolation is experimental and disabled). **F11
 keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, Q/E = L/R,
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 
-The automated workflow keeps its playable result in
-`%LOCALAPPDATA%\hwder\local-build-v1\play\hwder.exe`. Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
+The wizard keeps its playable result in the selected Data folder, initially
+`%LOCALAPPDATA%\HWDER\play\hwder.exe`. The legacy CLI defaults to
+`%LOCALAPPDATA%\hwder\local-build-v1`; select that existing folder in the wizard to reuse it.
+There is no automatic data migration. Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
 `save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). The save folder can be
 moved on the startup screen or in the menu's Gameplay tab; your saves are copied there only if you say so, and
 nothing in the old folder is moved or deleted.
@@ -76,8 +77,9 @@ The automated workflow above is also the recommended source build. To prepare wi
 python tools/first_run.py --nsp "<game>.nsp" --keys "<prod.keys>"
 ```
 
-The manual developer flow remains available. Toolchain prerequisites are the same as above,
-including both Python dependencies (`cryptography` for extraction; `lz4` for NSO loading).
+The manual developer flow remains available. It requires installed Python x64 with cryptography
+and lz4, plus VS2022 Build Tools with MSVC x64, Clang, CMake/Ninja and a Windows10/11 SDK.
+The managed wizard does not require those global developer installations.
 
 ```
 git clone --recursive https://github.com/sonsegajp/HWDER
