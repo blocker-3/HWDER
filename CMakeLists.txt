@@ -19,6 +19,10 @@ option(HWDER_HOST_TESTS_ONLY "Build portable host contract tests only" OFF)
 option(HWDER_GAME_ONLY "Build generated game library without host runtime" OFF)
 option(HWDER_SETUP_UI_ONLY "Build only the code-free native Windows setup window" OFF)
 option(HWDER_MANAGED_PROBE_ONLY "Compile public production units and private-toolchain contracts without game inputs" OFF)
+option(HWDER_PUBLIC_RUNTIME_LINK_ONLY "Public synthetic guest fixture: link only, NEVER run or distribute" OFF)
+if(HWDER_PUBLIC_RUNTIME_LINK_ONLY AND (NOT MINGW OR NOT EXISTS "${GEN_DIR}/public-link-fixture.json"))
+    message(FATAL_ERROR "Public runtime link requires the private GNU ABI and explicit public fixture")
+endif()
 
 if(HWDER_SETUP_UI_ONLY)
     if(NOT WIN32)
@@ -131,6 +135,10 @@ foreach(sub hid fs audio gpu gpu/vk shader video game interp)
     include(${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/${sub}/sources.cmake)
 endforeach()
 add_executable(hwder ${RUNTIME_SOURCES})
+if(HWDER_PUBLIC_RUNTIME_LINK_ONLY)
+    # Cannot satisfy first_run's hwder.exe lookup or its ready certificate.
+    set_target_properties(hwder PROPERTIES OUTPUT_NAME "HWDER-public-link-NOT-A-GAME")
+endif()
 
 # Version stamp: regenerated on every build (always out of date), rewritten only when it changes.
 set(HW_VERSION_DIR ${CMAKE_BINARY_DIR}/version)

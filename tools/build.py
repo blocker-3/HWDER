@@ -68,6 +68,7 @@ def main():
     modes.add_argument("--game-only", action="store_true", help="compile generated game library without host runtime")
     modes.add_argument("--setup-ui", action="store_true", help="build only the code-free native Windows setup window")
     modes.add_argument("--managed-probe", action="store_true", help="public Windows GNU-ABI compatibility contracts; no game inputs")
+    modes.add_argument("--managed-runtime-link", action="store_true", help="link public runtime/SDL with reviewed synthetic guest fixture; NEVER run")
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
@@ -77,16 +78,22 @@ def main():
         ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
     if a.managed_probe and not a.managed_toolchain:
         ap.error("--managed-probe requires a certified --managed-toolchain")
+    if a.managed_runtime_link and (not a.managed_toolchain or not a.generated_dir):
+        ap.error("--managed-runtime-link requires private tools and a public fixture directory")
     # Single-file probes and complete builds share the same host reservation.
     with build_lock():
         return build(a)
 
 
 def build(a):
-    mode = "probe" if getattr(a, "managed_probe", False) else "setup-ui" if a.setup_ui else "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
+    mode = "runtime-link-NOT-A-GAME" if getattr(a,"managed_runtime_link",False) else "probe" if getattr(a, "managed_probe", False) else "setup-ui" if a.setup_ui else "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
     managed = getattr(a, "managed_toolchain", None)
     bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", ("managed-" if managed else "") + mode))
     generated = os.path.abspath(a.generated_dir or os.path.join(ROOT, "generated"))
+    if getattr(a,"managed_runtime_link",False):
+        sys.path.insert(0,str(Path(ROOT)/"tools/tests"))
+        import public_runtime_fixture
+        public_runtime_fixture.verify(generated)
     os.makedirs(bdir, exist_ok=True)
     env, cmake, ninja, cc, cxx = toolchain(managed, getattr(a, "managed_temp_dir", None))
     if a.only_file:
@@ -115,6 +122,7 @@ def build(a):
             f"-DHWDER_HOST_TESTS_ONLY={'ON' if a.host_tests else 'OFF'}", f"-DHWDER_GAME_ONLY={'ON' if a.game_only else 'OFF'}"]
     args += [f"-DHWDER_SETUP_UI_ONLY={'ON' if a.setup_ui else 'OFF'}"]
     args += [f"-DHWDER_MANAGED_PROBE_ONLY={'ON' if getattr(a, 'managed_probe', False) else 'OFF'}"]
+    args += [f"-DHWDER_PUBLIC_RUNTIME_LINK_ONLY={'ON' if getattr(a,'managed_runtime_link',False) else 'OFF'}"]
     if managed:
         import managed_tools
         args += [f"-DPython3_EXECUTABLE={managed_tools.paths(managed)['python']}",

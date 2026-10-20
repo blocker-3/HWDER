@@ -94,6 +94,9 @@ class Managed(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"certification"):
                     tools.game_image("never executed")
 
+    def test_relative_tool_paths_are_absolute_for_cmake_and_children(self):
+        self.assertTrue(all(path.is_absolute() for path in tools.paths("build/private-tools").values()))
+
     def test_transaction_reuse_hashes_and_notices(self):
         value, fetch = self.fixture()
         result = self.install(value, fetch)

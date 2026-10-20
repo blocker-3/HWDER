@@ -3,6 +3,7 @@ import ctypes as c
 from ctypes import wintypes as w
 import itertools
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -118,9 +119,11 @@ def shot(hwnd,name):
     finally:
         g.SelectObject(mem,old);g.DeleteObject(bitmap);g.DeleteDC(mem);u.ReleaseDC(hwnd,dc)
         u.SetThreadDpiAwarenessContext(previous)
-def start(mode,name):
-    data=OUT/name
-    p=subprocess.Popen([str(EXE),mode,"--data",str(data)])
+def start(mode,name,data=None):
+    data=Path(data) if data else OUT/name
+    windows=Path(os.environ.get("SystemRoot",r"C:\Windows"))
+    env={**os.environ,"PATH":os.pathsep.join(map(str,(windows/"System32",windows)))}
+    p=subprocess.Popen([str(EXE),*([mode] if mode else []),"--data",str(data)],env=env)
     active.append(p);image=c.create_unicode_buffer(32768);size=w.DWORD(len(image))
     require(k.QueryFullProcessImageNameW(w.HANDLE(int(p._handle)),0,image,c.byref(size)),"Owned image identity unavailable")
     require(Path(image.value).resolve()==EXE.resolve(),"Unexpected child executable")
@@ -144,6 +147,22 @@ try:
     require(not (OUT/"no-python").exists(),"No-Python check unexpectedly created/installed data")
     shot(h,"02-requirements");checks.append("Native window opens with no Python candidate; only synthetic preview needs a fixture interpreter; no data/install created")
     close(p,h)
+    p,h=start("","normal-missing")
+    click(h,107);wait(lambda:"Private tools are not ready" in status(h),seconds=30)
+    require(not enabled(h,111) and not enabled(h,112),"Missing tools enabled preparation/Play")
+    require(not any((OUT/"normal-missing").rglob("*.zip")),"Verify-only Check downloaded payload")
+    require(not any((OUT/"normal-missing").rglob("*.partial-*")),"Verify-only Check created an install attempt")
+    shot(h,"02b-private-tools-missing")
+    checks.append("Normal Check with Windows-only PATH refuses missing private tools without payload/partial creation")
+    close(p,h)
+    installed=ROOT/"build/private-toolchain-data"
+    if (installed/"managed-tools").is_dir():
+        p,h=start("","normal-installed",installed)
+        click(h,107);wait(lambda:"Requirements ready" in status(h) and enabled(h,111),seconds=120)
+        require(not enabled(h,112),"Tool-only Check enabled game Play")
+        shot(h,"02c-private-tools-checked")
+        checks.append("Normal native Check traverses system PowerShell → certified private Python → private bridge with Windows-only PATH; no download/game")
+        close(p,h)
     p,h=start("--demo","cancel")
     checked(h);click(h,111);wait(lambda:"Preparing game code" in status(h))
     backend=owned_backend_handles(p.pid)

@@ -311,7 +311,9 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
 
 def paths(directory, value=None):
     value = value or manifest()
-    root = Path(directory) / "output"
+    # CMake compiler paths and child PATH entries must remain absolute when
+    # callers supply a relative --managed-toolchain from the checkout.
+    root = plain_path(directory) / "output"
     by_id = {item["id"]: root / item["id"] / item["archive_root"] for item in value["artifacts"]}
     return {"python": by_id["python"] / "python.exe",
             "cc": by_id["llvm"] / "bin/x86_64-w64-mingw32-clang.exe",
@@ -408,6 +410,7 @@ def main():
         print(prefix+json.dumps({"type":kind,"message":message,**fields},ensure_ascii=False),flush=True)
     if args.bridge_action:
         try:
+            event("stage","Verifying private tool files (every file is checked)",stage="tools")
             directory=installed(args.data,args.source,value)
             command=[str(paths(directory,value)["python"]),"-B","-X","utf8","-u",
                      str(args.source/"tools/setup_bridge.py"),"--action",args.bridge_action,
