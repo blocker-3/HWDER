@@ -234,9 +234,12 @@ class Managed(unittest.TestCase):
                 tools.check_url(url)
         import os
         from unittest.mock import patch
+        overrides=("CPATH","C_INCLUDE_PATH","CPLUS_INCLUDE_PATH","OBJC_INCLUDE_PATH",
+                   "OBJCPLUS_INCLUDE_PATH","CCC_OVERRIDE_OPTIONS","LIBRARY_PATH","COMPILER_PATH","GCC_EXEC_PREFIX")
         with patch.dict(os.environ, {"INCLUDE":"untrusted SDK", "LIB":"untrusted libs", "CL":"override",
-                                     "HW_VCVARS":"override", "PATH":"untrusted"}):
+                                     "HW_VCVARS":"override", "PATH":"untrusted",**{name:"untrusted" for name in overrides}}):
             env = tools.environment(self.root)
+        for name in overrides:self.assertNotIn(name,env)
         self.assertNotIn("INCLUDE", env)
         self.assertNotIn("LIB", env)
         self.assertNotIn("CL", env)

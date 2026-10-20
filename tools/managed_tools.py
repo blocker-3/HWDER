@@ -383,6 +383,9 @@ def environment(directory, value=None, temporary=None):
                                   "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CMAKE_PREFIX_PATH",
                                   "RC", "AR", "RANLIB", "LD", "CMAKE_TOOLCHAIN_FILE",
                                   "CMAKE_GENERATOR", "CMAKE_MAKE_PROGRAM",
+                                  "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH",
+                                  "OBJCPLUS_INCLUDE_PATH", "CCC_OVERRIDE_OPTIONS", "LIBRARY_PATH",
+                                  "COMPILER_PATH", "GCC_EXEC_PREFIX",
                                   "PYTHONPATH", "PYTHONHOME", "HW_VCVARS", "VCTOOLSINSTALLDIR",
                                   "WINDOWSSDKDIR", "VSINSTALLDIR", "VCINSTALLDIR"}}
     windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
