@@ -162,7 +162,10 @@ def main():
     parser.add_argument("--ui-protocol", action="store_true")
     parser.add_argument("--nonce", default="")
     parser.add_argument("--managed-toolchain",type=Path)
+    parser.add_argument("--managed-launch",action="store_true")
     args = parser.parse_args()
+    if args.managed_launch and args.action!="launch":
+        parser.error("--managed-launch is valid only for launch")
     global NONCE
     if args.nonce and not re.fullmatch("[0-9a-f]{32}", args.nonce):
         parser.error("Invalid UI session identifier")
@@ -189,7 +192,7 @@ def main():
             prepare(args.data, args.nsp, args.keys, before_publish=commit_permission if args.ui_protocol else None,
                     managed=args.managed_toolchain)
         elif args.action == "launch":
-            launch(args.data,managed=args.managed_toolchain)
+            launch(args.data,managed=True if args.managed_launch else args.managed_toolchain)
         return 0
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, struct.error) as error:
         detail = str(error)

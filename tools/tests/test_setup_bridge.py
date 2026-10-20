@@ -104,6 +104,17 @@ class Bridge(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"dependency"):
                 bridge.launch(self.data,lambda *a,**k:self.fail("must not launch"),managed="private")
 
+    def test_managed_launch_cli_uses_no_tools_installer_or_prerequisite_scan(self):
+        with patch.object(sys,"argv",["bridge","--action","launch","--data",str(self.data),"--managed-launch"]), \
+             patch.object(bridge,"compatible",return_value=True),patch.object(bridge,"launch") as launch, \
+             patch.object(bridge,"components",side_effect=AssertionError("install")), \
+             patch.object(bridge.first_run,"check_prerequisites",side_effect=AssertionError("compiler scan")):
+            self.assertEqual(bridge.main(),0)
+            launch.assert_called_once_with(self.data,managed=True)
+        with patch.object(sys,"argv",["bridge","--action","prepare","--data",str(self.data),"--managed-launch"]), \
+             contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            bridge.main()
+
     def test_missing_original_input_prevents_launch(self):
         self.fixture()
         (self.data / "synthetic.keys").unlink()

@@ -218,6 +218,17 @@ function Invoke-PrivateBootstrap {
     }
     Write-ToolsStage $(if($Action -eq 'tools'){'Verifying or installing private tools'}else{'Verifying your private setup interpreter'})
     $python = Install-PrivatePython $DataRoot $spec[0] $fetch ($Action -eq 'tools')
+    if ($Action -eq 'launch') {
+        # Play only needs the completely certified small interpreter, source
+        # helpers and ready executable; compiler/wheel files are not loaded.
+        Write-ToolsStage 'Verifying your prepared game'
+        $entry=(Join-Path $source 'tools/setup_bridge.py').Replace('\','\\').Replace("'","\'")
+        $arguments=@('-I','-B','-X','utf8','-u','-c',("import runpy;runpy.run_path('"+$entry+"',run_name='__main__')"),
+                     '--action','launch','--data',$DataRoot,'--managed-launch','--ui-protocol')
+        if ($Nonce) { $arguments+=@('--nonce',$Nonce) }
+        & $python @arguments
+        return
+    }
     # The embeddable _pth intentionally ignores arbitrary PYTHONPATH. run_path
     # enters the checked-in module, which explicitly adds its own tools folder.
     $entry = (Join-Path $source 'tools/managed_tools.py').Replace('\','\\').Replace("'","\'")
