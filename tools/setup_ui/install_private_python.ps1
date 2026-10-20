@@ -2,6 +2,13 @@
 param([string]$DataRoot, [string]$SourceRoot)
 $ErrorActionPreference = 'Stop'
 
+function Get-PrivateSHA256([string]$Path) {
+    $stream=[IO.File]::OpenRead($Path)
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose();$stream.Dispose() }
+}
+
 function Assert-OwnedPath([string]$Path, [string]$Root) {
     $absolute = [IO.Path]::GetFullPath($Path)
     $base = [IO.Path]::GetFullPath($Root).TrimEnd('\')
@@ -101,7 +108,7 @@ function Get-TreeCertificate([string]$Root) {
             Assert-OwnedPath $entry.FullName $Root | Out-Null
             if ($entry.PSIsContainer) { $queue.Enqueue($entry.FullName);continue }
             $relative = $entry.FullName.Substring($Root.TrimEnd('\').Length+1).Replace('\','/')
-            $result[$relative] = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.FullName).Hash.ToLowerInvariant()
+            $result[$relative] = Get-PrivateSHA256 $entry.FullName
         }
     }
     return $result
@@ -137,7 +144,7 @@ function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch) {
         $archive = Join-Path $attempt 'python.zip'
         & $Fetch $Spec $archive
         if ((Get-Item -LiteralPath $archive).Length -gt $Spec.max_download_bytes -or
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant() -ne $Spec.sha256) {
+            (Get-PrivateSHA256 $archive) -ne $Spec.sha256) {
             throw 'Private interpreter checksum mismatch.'
         }
         $output = Join-Path $attempt 'output'

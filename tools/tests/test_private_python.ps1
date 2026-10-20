@@ -29,7 +29,7 @@ function Rejects([scriptblock]$Action) {
     Require $rejected 'Expected a fail-closed rejection.'
 }
 $payload = Make-Zip 'synthetic.zip' @(@('python.exe','synthetic non-executable interpreter fixture'),@('LICENSE.txt','fixture notice'))
-$spec = [pscustomobject]@{sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $payload).Hash.ToLowerInvariant(); max_download_bytes=10000;max_unpacked_bytes=10000;max_entries=20;required=@('python.exe')}
+$spec = [pscustomobject]@{sha256=(Get-PrivateSHA256 $payload); max_download_bytes=10000;max_unpacked_bytes=10000;max_entries=20;required=@('python.exe')}
 $fetch = { param($item,$destination) [IO.File]::Copy($payload,$destination,$false) }
 $data = Join-Path $case 'data'
 $installed = Install-PrivatePython $data $spec $fetch
