@@ -3,6 +3,7 @@
 #include <dbghelp.h>
 #include <mfapi.h>
 #include <mfidl.h>
+#include <mftransform.h>
 #include <wmcodecdsp.h>
 #include <audioclient.h>
 #include <malloc.h>
