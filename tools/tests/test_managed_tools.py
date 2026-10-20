@@ -192,6 +192,8 @@ class Managed(unittest.TestCase):
         self.assertNotIn("HW_VCVARS", env)
         self.assertNotIn("untrusted", env["PATH"])
         self.assertIn("x86_64", str(tools.paths(self.root)["cc"]))
+        for name in ("TEMP","TMP","TMPDIR"):
+            self.assertEqual(env[name], str(self.root/"tmp"))
 
 
 if __name__ == "__main__":

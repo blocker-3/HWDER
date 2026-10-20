@@ -302,8 +302,15 @@ def paths(directory, value=None):
             "cmake": by_id["cmake"] / "bin/cmake.exe", "ninja": by_id["ninja"] / "ninja.exe"}
 
 
-def environment(directory, value=None):
+def environment(directory, value=None, temporary=None):
     selected = paths(directory, value)
+    directory = Path(directory).absolute()
+    temporary_root = directory.parent.parent if temporary is not None else directory
+    temporary = Path(temporary).absolute() if temporary else directory / "tmp"
+    # A completed toolset and its build outputs share the chosen private Data
+    # root. No compiler or test temporary files may escape that ownership.
+    owned_path(temporary, temporary_root)
+    filesystem_path(temporary).mkdir(parents=True, exist_ok=True)
     env = {key: val for key, val in os.environ.items()
            if key.upper() not in {"INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "LINK", "_LINK_",
                                   "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CMAKE_PREFIX_PATH",
@@ -314,6 +321,7 @@ def environment(directory, value=None):
     windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     env["PATH"] = os.pathsep.join(map(str, [selected["cc"].parent, selected["cmake"].parent,
                                            selected["ninja"].parent, windows / "System32", windows]))
+    env.update({name:str(temporary) for name in ("TEMP","TMP","TMPDIR")})
     return env
 
 

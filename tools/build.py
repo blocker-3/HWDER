@@ -25,7 +25,7 @@ def vs_tool(sub, exe, env):
     return found
 
 
-def toolchain(managed=None):
+def toolchain(managed=None, temporary=None):
     if managed:
         import managed_tools
         value = managed_tools.manifest()
@@ -36,7 +36,7 @@ def toolchain(managed=None):
         for path in selected.values():
             if not path.is_file():
                 raise RuntimeError("Private toolchain is incomplete: " + str(path))
-        return (managed_tools.environment(managed, value), str(selected["cmake"]), str(selected["ninja"]),
+        return (managed_tools.environment(managed, value, temporary), str(selected["cmake"]), str(selected["ninja"]),
                 str(selected["cc"]), str(selected["cxx"]))
     if os.name == "nt":
         import msvc
@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--build-dir", help="isolated build directory")
     ap.add_argument("--generated-dir", help="user-local generated C directory")
     ap.add_argument("--managed-toolchain", type=Path, help="verified private LLVM-MinGW toolset directory")
+    ap.add_argument("--managed-temp-dir", type=Path, help="owned private compiler/test temporary directory")
     modes = ap.add_mutually_exclusive_group()
     modes.add_argument("--synthetic-tests", action="store_true", help="configure public tests without game inputs")
     modes.add_argument("--host-tests", action="store_true", help="configure only portable host contract tests")
@@ -87,7 +88,7 @@ def build(a):
     bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", ("managed-" if managed else "") + mode))
     generated = os.path.abspath(a.generated_dir or os.path.join(ROOT, "generated"))
     os.makedirs(bdir, exist_ok=True)
-    env, cmake, ninja, cc, cxx = toolchain(managed)
+    env, cmake, ninja, cc, cxx = toolchain(managed, getattr(a, "managed_temp_dir", None))
     if a.only_file:
         cpp = a.only_file.endswith((".cpp", ".cc", ".cxx"))
         includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src")]

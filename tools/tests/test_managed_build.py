@@ -34,9 +34,10 @@ class ManagedBuild(unittest.TestCase):
         def run(argv,**kwargs):
             calls.append((argv,kwargs))
             return subprocess.CompletedProcess(argv,0)
-        with patch.object(build,"toolchain",return_value=({"PATH":"private-only"},"private-cmake","private-ninja","private-cc","private-cxx")), \
+        with patch.object(build,"toolchain",return_value=({"PATH":"private-only"},"private-cmake","private-ninja","private-cc","private-cxx")) as toolchain, \
              patch.object(build.subprocess,"run",side_effect=run):
-            self.assertEqual(build.build(self.args()),0)
+            self.assertEqual(build.build(self.args(managed_temp_dir=ROOT/"build/private-data/probe/tmp")),0)
+        toolchain.assert_called_once_with(ROOT/"build/fake-private-tools",ROOT/"build/private-data/probe/tmp")
         command=calls[0][0]
         self.assertIn(str(ROOT/"build/managed-probe"),command)
         self.assertIn("-DHWDER_MANAGED_PROBE_ONLY=ON",command)

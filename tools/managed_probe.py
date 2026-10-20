@@ -91,7 +91,7 @@ def main():
             config=SimpleNamespace(jobs=2,only_file=None,target=None,build_dir=str(output/"cmake"),
                                    generated_dir=None,synthetic_tests=False,host_tests=False,
                                    game_only=False,setup_ui=False,managed_probe=True,
-                                   managed_toolchain=toolset)
+                                   managed_toolchain=toolset,managed_temp_dir=output/"tmp")
             result=build.build(config)
             report["build_exit"]=result
             if result:
@@ -99,7 +99,7 @@ def main():
                 return result
             selected=managed_tools.paths(toolset)
             ctest=selected["cmake"].with_name("ctest.exe")
-            env=managed_tools.environment(toolset)
+            env=managed_tools.environment(toolset,temporary=output/"tmp")
             result=subprocess.run([str(ctest),"--test-dir",str(output/"cmake"),
                                    "--output-on-failure","--no-tests=error","--verbose"],env=env).returncode
             report["test_exit"]=result
