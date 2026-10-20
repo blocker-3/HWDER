@@ -55,7 +55,8 @@ class ManagedBuild(unittest.TestCase):
              patch.object(build.subprocess,"run",side_effect=run):
             self.assertEqual(build.build(self.args(only_file="runtime/src/threads.cpp",managed_probe=False)),0)
         for flag in ("-mavx2","-mfma","-mf16c","-maes","-mpclmul","-msse4.2","-mcx16",
-                     "-DNOMINMAX","-DWIN32_LEAN_AND_MEAN","-std=c++20"):
+                     "-DNOMINMAX","-DWIN32_LEAN_AND_MEAN","-std=c++20",
+                     "-D_WIN32_WINNT=0x0A00","-DWINVER=0x0A00","-DNTDDI_VERSION=0x0A000000"):
             self.assertIn(flag,calls[0])
         self.assertNotIn("/EHsc",calls[0])
 

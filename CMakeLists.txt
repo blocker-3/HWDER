@@ -10,6 +10,10 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 set(GEN_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH "User-local recompiled game sources")
 set(TP ${CMAKE_SOURCE_DIR}/third_party)
+if(MINGW)
+    # This private UCRT stack targets Windows10+, not MinGW's Windows7 default.
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000000)
+endif()
 option(HWDER_SYNTHETIC_TESTS_ONLY "Build public tests without generated game code" OFF)
 option(HWDER_HOST_TESTS_ONLY "Build portable host contract tests only" OFF)
 option(HWDER_GAME_ONLY "Build generated game library without host runtime" OFF)

@@ -102,7 +102,8 @@ def build(a):
             args = [cxx if cpp else cc, "-c", "-O2", "-mavx2", "-mfma", "-std=c++20" if cpp else "-std=c11"]
             if managed:
                 args += ["-mf16c", "-maes", "-mpclmul", "-msse4.2", "-mcx16",
-                         "-DNOMINMAX", "-DWIN32_LEAN_AND_MEAN"]
+                         "-DNOMINMAX", "-DWIN32_LEAN_AND_MEAN", "-D_WIN32_WINNT=0x0A00",
+                         "-DWINVER=0x0A00", "-DNTDDI_VERSION=0x0A000000"]
             args += [f"-I{path}" for path in includes]
             args += [a.only_file, "-o", os.path.join(bdir, "probe.o")]
         return subprocess.run(args, cwd=ROOT, env=env).returncode
