@@ -52,10 +52,11 @@ def main():
     modes.add_argument("--synthetic-tests", action="store_true", help="configure public tests without game inputs")
     modes.add_argument("--host-tests", action="store_true", help="configure only portable host contract tests")
     modes.add_argument("--game-only", action="store_true", help="compile generated game library without host runtime")
+    modes.add_argument("--setup-ui", action="store_true", help="build only the code-free native Windows setup window")
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
-    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only):
+    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui):
         ap.error("--only-file cannot be combined with a test/library mode")
     if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
         ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
@@ -65,7 +66,7 @@ def main():
 
 
 def build(a):
-    mode = "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
+    mode = "setup-ui" if a.setup_ui else "synthetic" if a.synthetic_tests else "host" if a.host_tests else "game" if a.game_only else "release"
     bdir = os.path.abspath(a.build_dir or os.path.join(ROOT, "build", mode))
     generated = os.path.abspath(a.generated_dir or os.path.join(ROOT, "generated"))
     os.makedirs(bdir, exist_ok=True)
@@ -89,10 +90,11 @@ def build(a):
             "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}",
             f"-DGEN_DIR={generated}", f"-DHWDER_SYNTHETIC_TESTS_ONLY={'ON' if a.synthetic_tests else 'OFF'}",
             f"-DHWDER_HOST_TESTS_ONLY={'ON' if a.host_tests else 'OFF'}", f"-DHWDER_GAME_ONLY={'ON' if a.game_only else 'OFF'}"]
+    args += [f"-DHWDER_SETUP_UI_ONLY={'ON' if a.setup_ui else 'OFF'}"]
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
-    target = a.target or ("synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
+    target = a.target or ("hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
     return subprocess.run([ninja, "-C", bdir, "-j", str(a.jobs), target], env=env).returncode
 
 

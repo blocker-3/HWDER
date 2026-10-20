@@ -91,6 +91,41 @@ class Fixture(unittest.TestCase):
         self.assertFalse((self.root / "generated").exists())
         self.assertFalse((self.root / "build").exists())
 
+    def test_ui_cancel_before_commit_retains_previous_play_certificate_and_save(self):
+        exe = self.prepare()
+        old, marker = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
+        save = exe.parent / "save.bin"
+        save.write_bytes(b"precious save")
+        (self.root / "runtime/source.cpp").write_text("new version")
+        calls = []
+        def refuse():
+            calls.append("permission")
+            raise ValueError("cancel before ACK")
+        with self.assertRaisesRegex(ValueError, "cancel before ACK"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          self.run_stage, lambda n,k:self.modules, before_publish=refuse)
+        self.assertEqual(calls, ["permission"])
+        self.assertEqual(exe.read_bytes(), old)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), marker)
+        self.assertEqual(save.read_bytes(), b"precious save")
+
+    def test_ui_ack_then_pointer_failure_rolls_back_existing_play(self):
+        exe = self.prepare()
+        old, marker = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()
+        (self.root / "runtime/source.cpp").write_text("new version")
+        original = setup.atomic_json
+        acknowledged = []
+        def fail(path, value):
+            if Path(path) == self.cache / "last-success.json":
+                self.assertEqual(acknowledged, ["commit"])
+                raise OSError("commit failure")
+            original(path, value)
+        with patch.object(setup, "atomic_json", side_effect=fail), self.assertRaisesRegex(OSError, "commit failure"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain,
+                          self.run_stage, lambda n,k:self.modules, before_publish=lambda:acknowledged.append("commit"))
+        self.assertEqual(exe.read_bytes(), old)
+        self.assertEqual((self.cache / "last-success.json").read_bytes(), marker)
+
     def test_runtime_change_only_rebuilds_and_preserves_play_state(self):
         exe = self.prepare()
         save = exe.parent / "save" / "player.bin"

@@ -16,6 +16,10 @@ The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys`
 
 ## Playing (source/setup kit)
 
+A native Windows first-time setup prototype is available on this branch:
+[window, player flow and validation limits](docs/windows-setup.md). Its window opens without Python;
+guided prerequisite setup and the existing local build backend prepare the game afterward.
+
 1. Unpack the source/setup kit into a short, writable folder, or clone this repository with
    `git clone --recursive`. Install the prerequisites below; the kit includes pinned third-party
    sources and license notices, but no compiler, Windows SDK, Python installation or wheels.

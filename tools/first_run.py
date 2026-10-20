@@ -194,7 +194,7 @@ def run_command(argv, cwd):
     subprocess.run([str(a) for a in argv], cwd=cwd, check=True)
 
 
-def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None):
+def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None):
     """Injectable stage boundary permits meaningful synthetic orchestration/failure tests."""
     from local_game import read_program, supported_profile
     root, cache, nsp, keys = map(Path, (root, cache, nsp, keys))
@@ -286,6 +286,8 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
             or keys_before != (keys.stat().st_size, keys.stat().st_mtime_ns)):
         raise ValueError("Game or keys input changed during setup; rerun")
     # Stable play directory retains user settings, saves and private caches across source updates.
+    if before_publish:
+        before_publish()  # UI commit permission: no stable play transaction has started yet.
     play = cache / "play"
     play.mkdir(parents=True, exist_ok=True)
     target = play / "hwder.exe"
