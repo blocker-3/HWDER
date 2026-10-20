@@ -51,6 +51,15 @@ class Package(unittest.TestCase):
             for name,sha in manifest["files"].items():self.assertEqual(dist.digest(z.read(name)),sha)
         with self.assertRaises(FileExistsError):self.package()
 
+    def test_only_exact_public_bootstrap_script_is_overlaid(self):
+        script="tools/setup_ui/install_private_python.ps1"
+        for name in (script,"tools/arbitrary.ps1"):
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text("public fixture")
+            self.sources.append(name)
+        with zipfile.ZipFile(self.package()) as z:
+            self.assertIn("source/"+script,z.namelist())
+            self.assertNotIn("source/tools/arbitrary.ps1",z.namelist())
+
     def test_game_executable_cannot_replace_certified_bootstrap(self):
         self.exe.write_bytes(b"MZsynthetic game-linked binary")
         with self.assertRaisesRegex(ValueError,"code-free"):self.package()

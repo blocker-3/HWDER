@@ -91,6 +91,39 @@ class Fixture(unittest.TestCase):
         self.assertFalse((self.root / "generated").exists())
         self.assertFalse((self.root / "build").exists())
 
+    def test_managed_args_cache_separation_and_image_gate_before_publish(self):
+        old=self.prepare().read_bytes()
+        self.toolchain.update(kind="llvm-mingw-ucrt-static-cxx-v1",managed_directory="private toolset")
+        commands=[]
+        def run(args,cwd):
+            commands.append(list(args));self.run_stage(args,cwd)
+        with patch("managed_tools.game_image",side_effect=ValueError("bad dependency")):
+            with self.assertRaisesRegex(ValueError,"bad dependency"):
+                setup.prepare(self.root,self.cache,self.nsp,self.keys,2,self.toolchain,run,
+                              lambda n,k:self.modules,before_publish=lambda:self.fail("must not publish"))
+        self.assertEqual((self.cache/"play/hwder.exe").read_bytes(),old)
+        self.assertEqual(commands[0][1:4],["-B","-X","utf8"])
+        self.assertEqual(len(commands),1)  # Existing generator stage is reused.
+        self.assertIn("--managed-toolchain",commands[0]);self.assertIn("--managed-temp-dir",commands[0])
+        self.assertEqual(self.calls,["generate","build","build"])
+        # Generation cache is ABI-independent; complete program cache is not.
+        with patch("managed_tools.game_image") as image:
+            setup.prepare(self.root,self.cache,self.nsp,self.keys,2,self.toolchain,run,lambda n,k:self.modules)
+            image.assert_called_once()
+        with patch("managed_tools.game_image") as image:
+            setup.prepare(self.root,self.cache,self.nsp,self.keys,2,self.toolchain,run,lambda n,k:self.modules)
+            image.assert_called_once()  # Reused image is still gated.
+        commands.clear()
+        with patch("managed_tools.game_image"):
+            setup.prepare(self.root,self.cache/"fresh",self.nsp,self.keys,2,self.toolchain,run,lambda n,k:self.modules)
+        self.assertEqual(commands[0][1:4],["-B","-X","utf8"])
+        self.assertIn("-m",commands[0])
+
+    def test_default_prerequisites_remain_opt_in_managed(self):
+        with patch("managed_tools.prerequisites",return_value={"kind":"private"}) as selected:
+            self.assertEqual(setup.check_prerequisites(self.root,"private"),{"kind":"private"})
+            selected.assert_called_once_with(self.root,"private")
+
     def test_ui_cancel_before_commit_retains_previous_play_certificate_and_save(self):
         exe = self.prepare()
         old, marker = exe.read_bytes(), (self.cache / "last-success.json").read_bytes()

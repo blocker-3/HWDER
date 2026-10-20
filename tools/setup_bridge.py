@@ -11,6 +11,8 @@ import sys
 import time
 import venv
 
+sys.dont_write_bytecode = True
+sys.path.insert(0,str(Path(__file__).resolve().parent))
 import first_run
 
 PINS = {"cryptography": "47.0.0", "lz4": "4.4.5", "cffi": "2.0.0", "pycparser": "3.0"}
@@ -91,10 +93,10 @@ def commit_permission():
         raise ValueError("Cancelled before updating the playable version.")
 
 
-def prepare(data, nsp, keys, backend=first_run, before_publish=None):
+def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=None):
     data = Path(data).resolve()
     nsp, keys = Path(nsp).resolve(), Path(keys).resolve()
-    toolchain = backend.check_prerequisites(first_run.ROOT)
+    toolchain = backend.check_prerequisites(first_run.ROOT, managed) if managed else backend.check_prerequisites(first_run.ROOT)
     with backend.setup_lock(data):
         exe = backend.prepare(first_run.ROOT, data, nsp, keys, max(1, min(8, os.cpu_count() or 1)),
                               toolchain, before_publish=before_publish)
@@ -105,15 +107,21 @@ def prepare(data, nsp, keys, backend=first_run, before_publish=None):
     emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe))
 
 
-def launch(data, popen=subprocess.Popen):
+def launch(data, popen=subprocess.Popen, managed=None):
     # A separate, explicit UI action; never assigned to the cancellable preparation job.
     with first_run.setup_lock(Path(data)):
         exe, nsp, keys = checked_ready(data)
+        if managed is not None:
+            import managed_tools
+            managed_tools.game_image(exe)
         env = dict(os.environ)
         for name in list(env):
             if name.startswith("HWDER_"):
                 del env[name]
         env.update(HWDER_NSP=str(nsp), HWDER_KEYS=str(keys))
+        if managed is not None:
+            windows=Path(os.environ.get("SystemRoot",r"C:\Windows"))
+            env["PATH"]=os.pathsep.join(map(str,(windows/"System32",windows)))
         popen([str(exe)], cwd=exe.parent, env=env, close_fds=True,
               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     emit("launched", "Game started.")
@@ -149,6 +157,7 @@ def main():
     parser.add_argument("--demo-fail", action="store_true")
     parser.add_argument("--ui-protocol", action="store_true")
     parser.add_argument("--nonce", default="")
+    parser.add_argument("--managed-toolchain",type=Path)
     args = parser.parse_args()
     global NONCE
     if args.nonce and not re.fullmatch("[0-9a-f]{32}", args.nonce):
@@ -163,7 +172,7 @@ def main():
         elif args.action == "components":
             components(args.data)
         elif args.action == "check":
-            first_run.check_prerequisites(first_run.ROOT)
+            first_run.check_prerequisites(first_run.ROOT,args.managed_toolchain)
             emit("checked", "Requirements ready. Choose your game and key, then Prepare game.")
             try:
                 exe, _, _ = checked_ready(args.data)
@@ -173,13 +182,16 @@ def main():
         elif args.action == "prepare":
             if not args.nsp or not args.keys:
                 raise ValueError("Choose your NSP and prod.keys files.")
-            prepare(args.data, args.nsp, args.keys, before_publish=commit_permission if args.ui_protocol else None)
+            prepare(args.data, args.nsp, args.keys, before_publish=commit_permission if args.ui_protocol else None,
+                    managed=args.managed_toolchain)
         elif args.action == "launch":
-            launch(args.data)
+            launch(args.data,managed=args.managed_toolchain)
         return 0
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, struct.error) as error:
         detail = str(error)
-        if "Install Python dependencies" in detail:
+        if args.managed_toolchain and any(word in detail for word in ("Private","private","CMake","Ninja","clang")):
+            recovery = "Choose Install private tools, then Check requirements again."
+        elif "Install Python dependencies" in detail:
             recovery = "Choose Install setup components, then Check requirements again."
         elif "pinned third-party" in detail:
             recovery = "Extract the complete release kit, including its source folder, then retry."

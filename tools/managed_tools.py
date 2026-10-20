@@ -215,9 +215,26 @@ def complete(directory, key):
 
 
 def tool_hashes(root):
-    for entry in filesystem_path(root).rglob("*"):
-        owned_path(entry, root)
-    return first_run.tree_hashes(filesystem_path(root))
+    # Check ancestors once, then each entry before traversal; do not follow
+    # redirects. The old per-header ancestor scan took minutes for 17k files.
+    root = filesystem_path(owned_path(root, root))
+    pending = [root]
+    result = {}
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise ValueError("Redirected tool output is unsupported")
+                path = Path(entry.path)
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    result[path.relative_to(root).as_posix()] = first_run.file_hash(path)
+                else:
+                    raise ValueError("Nonregular private tool output")
+    return result
 
 
 def probe_imports(output):
@@ -301,6 +318,54 @@ def paths(directory, value=None):
             "cxx": by_id["llvm"] / "bin/x86_64-w64-mingw32-clang++.exe",
             "cmake": by_id["cmake"] / "bin/cmake.exe", "ninja": by_id["ninja"] / "ninja.exe"}
 
+def installed(data, source, value=None):
+    value = value or manifest()
+    data = plain_path(data)
+    key = identity(value, source)
+    directory = owned_path(data / "managed-tools" / key[:24], data)
+    if not complete(directory, key):
+        raise ValueError("Private tools are missing or changed. Choose Install private tools, then recheck.")
+    return directory
+
+
+def prerequisites(source, directory):
+    """Exact tool/package identity for the existing first_run build cache key."""
+    source, directory = Path(source).resolve(), Path(directory).resolve()
+    value = manifest()
+    key = identity(value, source)
+    if not complete(directory, key):
+        raise ValueError("Private tool certificate changed. Choose Install private tools.")
+    import importlib.metadata
+    versions = {name:importlib.metadata.version(name) for name in ("cryptography","lz4","cffi","pycparser")}
+    for item in value["artifacts"]:
+        if item["id"] in versions and versions[item["id"]] != item["version"]:
+            raise ValueError("Private Python package identity differs from the pinned wheels")
+    for relative in ("SDL/CMakeLists.txt","imgui/imgui.cpp","vulkan-headers/include/vulkan/vulkan.h",
+                     "spirv-headers/include/spirv/unified1/spirv.hpp"):
+        if not (source/"third_party"/relative).is_file():
+            raise ValueError("Missing pinned third-party sources; extract the complete release kit")
+    selected = paths(directory, value)
+    env = environment(directory, value)
+    for name in ("cc","cmake","ninja"):
+        result = subprocess.run([str(selected[name]),"--version"],env=env,check=True,capture_output=True,text=True)
+        versions[name] = {"path":str(selected[name]),"version":result.stdout.strip(),
+                          "sha256":first_run.file_hash(selected[name])}
+    versions.update(kind=value["abi"],managed_directory=str(directory),installation_key=key,
+                    tool_certificate_sha256=first_run.file_hash(directory/"complete.json"),python=sys.version)
+    return versions
+
+
+def game_image(path):
+    """Static private ABI requires OS-only imports; never depend on tool PATH."""
+    import pe_dependencies
+    record = pe_dependencies.inspect(path)
+    unknown = [name for name in record["imports"] + record["delay_imports"]
+               if not name.startswith(("api-ms-win-", "ext-ms-win-"))
+               and name.removesuffix(".dll") not in pe_dependencies.OS_DLLS]
+    if unknown or record["stack_reserve"] != 16777216 or record["dynamic_base"]:
+        raise ValueError("Private game image failed dependency/stack/ASLR certification: " + ", ".join(unknown))
+    return record
+
 
 def environment(directory, value=None, temporary=None):
     selected = paths(directory, value)
@@ -330,15 +395,41 @@ def main():
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--source", default=MANIFEST.parent.parent, type=Path)
     parser.add_argument("--install", action="store_true", help="explicit consent to pinned private downloads")
+    parser.add_argument("--bridge-action", choices=("check","prepare","launch"))
+    parser.add_argument("--nonce",default="")
+    parser.add_argument("--nsp")
+    parser.add_argument("--keys")
     args = parser.parse_args()
     value = manifest()
+    if args.nonce and not re.fullmatch("[0-9a-f]{32}",args.nonce):
+        parser.error("Invalid setup session")
+    def event(kind,message,**fields):
+        prefix="HWDER_UI:"+args.nonce+":" if args.nonce else ""
+        print(prefix+json.dumps({"type":kind,"message":message,**fields},ensure_ascii=False),flush=True)
+    if args.bridge_action:
+        try:
+            directory=installed(args.data,args.source,value)
+            command=[str(paths(directory,value)["python"]),"-B","-X","utf8","-u",
+                     str(args.source/"tools/setup_bridge.py"),"--action",args.bridge_action,
+                     "--data",str(args.data),"--managed-toolchain",str(directory),"--ui-protocol",
+                     "--nonce",args.nonce]
+            if args.nsp:
+                command+=["--nsp",args.nsp]
+            if args.keys:
+                command+=["--keys",args.keys]
+            return subprocess.run(command,env=environment(directory,value)).returncode
+        except (ValueError,OSError,subprocess.SubprocessError) as error:
+            event("log",str(error))
+            event("failed","Private tools need verification. Choose Install private tools, then Check requirements.")
+            return 1
     if not args.install:
         print(json.dumps({"manifest_sha256": first_run.file_hash(MANIFEST), "downloads": value["artifacts"]}, indent=2))
         return
     result = install(args.data, args.source, value,
-                     progress=lambda name, got, total: print(f"tools: {name} {got}/{total}", flush=True))
+                     progress=lambda name, got, total:event("stage",f"Downloading {name}: {got//1048576} MiB received",stage="tools"))
     print("tools: verified " + str(result), flush=True)
+    event("components_ready","Private tools installed and verified. Choose Check requirements next.")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

@@ -10,7 +10,7 @@ target_include_directories(managed_production_units PRIVATE runtime/include runt
 target_compile_definitions(managed_production_units PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES IMGUI_IMPL_VULKAN_USE_LOADER
     IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_USER_CONFIG="gpu/hwder_imconfig.h")
-target_compile_options(managed_production_units PRIVATE ${PROBE_FEATURES} -O2 -g -Wno-everything)
+target_compile_options(managed_production_units PRIVATE ${PROBE_FEATURES} -O2 -g -fno-strict-aliasing -Wno-everything)
 set(PROBE_VERSION_DIR ${CMAKE_BINARY_DIR}/version)
 add_custom_target(managed_probe_version
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${PROBE_VERSION_DIR}/hwder_version.h

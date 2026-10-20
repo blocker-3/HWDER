@@ -51,16 +51,24 @@ k.CreateToolhelp32Snapshot.argtypes=[w.DWORD,w.DWORD];k.CreateToolhelp32Snapshot
 k.Process32FirstW.argtypes=[w.HANDLE,c.POINTER(ProcessEntry)];k.Process32NextW.argtypes=[w.HANDLE,c.POINTER(ProcessEntry)]
 checks=[];active=[]
 def owned_backend_handles(parent):
-    snapshot=k.CreateToolhelp32Snapshot(2,0);entry=ProcessEntry();entry.dwSize=c.sizeof(entry);handles=[]
+    snapshot=k.CreateToolhelp32Snapshot(2,0);entry=ProcessEntry();entry.dwSize=c.sizeof(entry);handles=[];entries=[]
     try:
         ok=k.Process32FirstW(snapshot,c.byref(entry))
         while ok:
-            if entry.parent==parent and entry.exe.lower()=="python.exe":
-                handle=k.OpenProcess(0x100000|0x1000,False,entry.pid)
-                if handle:handles.append((entry.pid,handle))
+            entries.append((entry.pid,entry.parent,entry.exe.lower()))
             ok=k.Process32NextW(snapshot,c.byref(entry))
     finally:k.CloseHandle(snapshot)
-    require(handles,"No exact owned Python backend found during work")
+    owned={parent}
+    for _ in range(8):
+        found={pid for pid,ppid,name in entries if ppid in owned}
+        if found.issubset(owned):break
+        owned.update(found)
+    names=[]
+    for pid,ppid,name in entries:
+        if pid in owned and pid!=parent and name in ("python.exe","powershell.exe"):
+            handle=k.OpenProcess(0x100000|0x1000,False,pid)
+            if handle:handles.append((pid,handle));names.append(name)
+    require("python.exe" in names and "powershell.exe" in names,"No exact owned PowerShell/private bridge chain found")
     return handles
 def require(value,message):
     if not value:raise AssertionError(message)
@@ -132,9 +140,9 @@ def confirm_close(p,h):
 try:
     p,h=start("--demo-no-python","no-python")
     shot(h,"01-initial");require(not enabled(h,111) and not enabled(h,112),"Initial unsafe controls")
-    click(h,107);wait(lambda:"Install standard Python" in status(h))
+    click(h,107);wait(lambda:"Preview interpreter unavailable" in status(h))
     require(not (OUT/"no-python").exists(),"No-Python check unexpectedly created/installed data")
-    shot(h,"02-requirements");checks.append("Native window opens and requirement guidance works with no Python candidate; no data/install created")
+    shot(h,"02-requirements");checks.append("Native window opens with no Python candidate; only synthetic preview needs a fixture interpreter; no data/install created")
     close(p,h)
     p,h=start("--demo","cancel")
     checked(h);click(h,111);wait(lambda:"Preparing game code" in status(h))

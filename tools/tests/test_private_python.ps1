@@ -37,7 +37,13 @@ Require ([IO.File]::Exists($installed)) 'Synthetic bootstrap did not publish.'
 Require ([IO.File]::ReadAllText((Join-Path ([IO.Path]::GetDirectoryName($installed)) 'LICENSE.txt')) -eq 'fixture notice') 'Notice was lost.'
 $reused = Install-PrivatePython $data $spec {throw 'Must not fetch a verified interpreter again.'}
 Require ($installed -eq $reused) 'Verified bootstrap reuse failed.'
+$verifyOnly = Install-PrivatePython $data $spec {throw 'Verify-only cannot fetch.'} $false
+Require ($verifyOnly -eq $installed) 'Verify-only refused valid certificate.'
+$missing = Join-Path $case 'missing-tools'
+Rejects { Install-PrivatePython $missing $spec {throw 'Verify-only cannot fetch.'} $false }
+Require (@(Get-ChildItem -LiteralPath (Join-Path $missing 'managed-bootstrap') -ErrorAction SilentlyContinue).Count -eq 0) 'Verify-only made partial payload.'
 [IO.File]::WriteAllText($installed,'damaged fixture')
+Rejects { Install-PrivatePython $data $spec {throw 'Verify-only cannot repair.'} $false }
 $repaired = Install-PrivatePython $data $spec $fetch
 Require ([IO.File]::ReadAllText($repaired) -like 'synthetic*') 'Damaged output was trusted.'
 Require (@(Get-ChildItem -Directory -LiteralPath (Join-Path $data 'managed-bootstrap') | Where-Object Name -Like '*.invalid-*').Count -eq 1) 'Invalid tool evidence was not preserved.'

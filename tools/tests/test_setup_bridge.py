@@ -94,6 +94,16 @@ class Bridge(unittest.TestCase):
         with self.assertRaises(ValueError):
             bridge.launch(self.data, lambda *a,**k:self.fail("uncertified launch"))
 
+    def test_managed_launch_has_no_tool_path_and_verifies_image(self):
+        exe=self.fixture();calls=[]
+        with patch("managed_tools.game_image") as image,patch.dict(bridge.os.environ,{"PATH":"HOST-TOOLS"}):
+            bridge.launch(self.data,lambda *a,**k:calls.append((a,k)),managed="private")
+            image.assert_called_once_with(exe)
+        self.assertNotIn("HOST-TOOLS",calls[0][1]["env"]["PATH"])
+        with patch("managed_tools.game_image",side_effect=ValueError("dependency")):
+            with self.assertRaisesRegex(ValueError,"dependency"):
+                bridge.launch(self.data,lambda *a,**k:self.fail("must not launch"),managed="private")
+
     def test_missing_original_input_prevents_launch(self):
         self.fixture()
         (self.data / "synthetic.keys").unlink()

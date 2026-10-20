@@ -151,7 +151,7 @@ target_compile_definitions(hwder PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN IMGUI_IMPL
 if(MSVC)
     target_compile_options(hwder PRIVATE ${HW_ARCH_FLAGS} /Z7 /O2 /EHsc -Wno-everything)
 else()
-    target_compile_options(hwder PRIVATE ${HW_ARCH_FLAGS} -g -O2 -Wno-everything)
+    target_compile_options(hwder PRIVATE ${HW_ARCH_FLAGS} -g -O2 -fno-strict-aliasing -Wno-everything)
 endif()
 if(MSVC)
     target_link_options(hwder PRIVATE /DEBUG /STACK:16777216 /DYNAMICBASE:NO /FIXED:NO)

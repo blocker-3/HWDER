@@ -1,6 +1,16 @@
 # Windows PowerShell5.1/.NET bootstrap. No Python, toolchain, admin or global changes.
-param([string]$DataRoot, [string]$SourceRoot)
+param([string]$DataRoot, [string]$SourceRoot,
+      [ValidateSet('tools','check','prepare','launch')][string]$Action='tools',
+      [string]$Nonce='', [string]$Nsp='', [string]$Keys='',
+      [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+
+function Write-ToolsStage([string]$Message) {
+    if ($Nonce) {
+        Write-Output ('HWDER_UI:'+$Nonce+':'+(@{type='stage';message=$Message;stage='tools'} | ConvertTo-Json -Compress))
+    } else { Write-Host $Message }
+}
 
 function Get-PrivateSHA256([string]$Path) {
     $stream=[IO.File]::OpenRead($Path)
@@ -114,7 +124,7 @@ function Get-TreeCertificate([string]$Root) {
     return $result
 }
 
-function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch) {
+function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch, [bool]$AllowDownload=$true) {
     $data = Assert-OwnedPath $Data $Data
     [IO.Directory]::CreateDirectory($data) | Out-Null
     $lockPath = Assert-OwnedPath (Join-Path $data 'setup.lock') $data
@@ -139,6 +149,7 @@ function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch) {
             foreach ($name in $oldNames) { if ($old.files.$name -ne $files[$name]) { $equal=$false } }
             if ($equal -and [IO.File]::Exists((Join-Path $final 'output/python.exe'))) { return (Join-Path $final 'output/python.exe') }
         }
+        if (-not $AllowDownload) { throw 'Private tools are not ready. Choose Install private tools, then recheck.' }
         $attempt = Join-Path $root ($leaf + '.partial-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
         [IO.Directory]::CreateDirectory($attempt) | Out-Null
         $archive = Join-Path $attempt 'python.zip'
@@ -162,7 +173,19 @@ function Install-PrivatePython([string]$Data, $Spec, [scriptblock]$Fetch) {
 
 function Invoke-PrivateBootstrap {
     if (-not $DataRoot -or -not $SourceRoot) { throw 'Choose a data folder and complete source kit.' }
+    if ($Nonce -and $Nonce -notmatch '^[0-9a-f]{32}$') { throw 'Invalid setup session identifier.' }
     $source = [IO.Path]::GetFullPath($SourceRoot)
+    if ($Preview) {
+        # Explicit native UI preview only: forces synthetic bridge events;
+        # cannot invoke installers, preparation, or gameplay.
+        if (-not [IO.File]::Exists($PreviewPython)) { throw 'No preview interpreter.' }
+        $arguments=@('-B','-X','utf8','-u',(Join-Path $source 'tools/setup_bridge.py'),
+                     '--demo','--action',$(if($Action -eq 'tools'){'components'}else{$Action}),
+                     '--data',$DataRoot,'--ui-protocol','--nonce',$Nonce)
+        if ($PreviewFail) { $arguments+='--demo-fail' }
+        & $PreviewPython @arguments
+        return
+    }
     $manifest = Get-Content -Raw -LiteralPath (Join-Path $source 'tools/managed_toolchain.json') | ConvertFrom-Json
     if ($manifest.schema -ne 1 -or $manifest.owner -ne 'hwder-private-tools-v1') { throw 'Unknown tool manifest.' }
     $spec = @($manifest.artifacts | Where-Object id -eq 'python')
@@ -188,18 +211,34 @@ function Invoke-PrivateBootstrap {
                     $total+=$count
                     if ($total -gt $item.max_download_bytes) { throw 'Interpreter download exceeded its limit.' }
                     $outputStream.Write($buffer,0,$count)
-                    Write-Output ('tools: Python '+$total+'/'+$item.max_download_bytes) | Out-Host
+                    Write-ToolsStage ('Downloading private Python: '+[math]::Round($total/1048576,1)+' MiB received') | Out-Host
                 }
             } finally { $outputStream.Dispose(); $inputStream.Dispose() }
         } finally { $response.Dispose() }
     }
-    Write-Host 'tools: Downloading the pinned private interpreter'
-    $python = Install-PrivatePython $DataRoot $spec[0] $fetch
+    Write-ToolsStage $(if($Action -eq 'tools'){'Verifying or installing private tools'}else{'Verifying your private setup interpreter'})
+    $python = Install-PrivatePython $DataRoot $spec[0] $fetch ($Action -eq 'tools')
     # The embeddable _pth intentionally ignores arbitrary PYTHONPATH. run_path
     # enters the checked-in module, which explicitly adds its own tools folder.
     $entry = (Join-Path $source 'tools/managed_tools.py').Replace('\','\\').Replace("'","\'")
-    & $python -I -B -u -c ("import runpy;runpy.run_path('"+$entry+"',run_name='__main__')") --install --data $DataRoot --source $source
-    if ($LASTEXITCODE -ne 0) { throw 'Private tool installation did not finish. Retry to verify reusable downloads.' }
+    $arguments=@('-I','-B','-X','utf8','-u','-c',("import runpy;runpy.run_path('"+$entry+"',run_name='__main__')"),
+                 '--data',$DataRoot,'--source',$source)
+    if ($Nonce) { $arguments+=@('--nonce',$Nonce) }
+    if ($Action -eq 'tools') { $arguments+='--install' } else { $arguments+=@('--bridge-action',$Action) }
+    if ($Nsp) { $arguments+=@('--nsp',$Nsp) }
+    if ($Keys) { $arguments+=@('--keys',$Keys) }
+    & $python @arguments
 }
 
-if ($MyInvocation.InvocationName -ne '.') { Invoke-PrivateBootstrap }
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        Invoke-PrivateBootstrap
+        exit $LASTEXITCODE
+    } catch {
+        Write-Host $_.Exception.Message
+        if ($Nonce -match '^[0-9a-f]{32}$') {
+            Write-Output ('HWDER_UI:'+$Nonce+':'+(@{type='failed';message='Private tools are not ready. Choose Install private tools, then Check requirements. See Details if installation was interrupted.'} | ConvertTo-Json -Compress))
+        }
+        exit 1
+    }
+}

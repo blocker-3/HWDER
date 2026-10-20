@@ -9,6 +9,8 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -65,6 +67,32 @@ class Managed(unittest.TestCase):
         self.assertEqual(pins["python"]["version"], "3.13.16")
         self.assertIn("ucrt", pins["llvm"]["version"])
         self.assertLess(sum(p["max_download_bytes"] for p in pins.values()), 270_000_000)
+
+    def test_check_prepare_launch_are_verify_only_and_forward_owned_protocol(self):
+        for action in ("check","prepare","launch"):
+            argv=["managed_tools","--data",str(self.data),"--source",str(self.source),
+                  "--bridge-action",action,"--nonce","a"*32,"--nsp","own.nsp","--keys","own.keys"]
+            with patch.object(sys,"argv",argv),patch.object(tools,"installed",return_value=self.root/"toolset"), \
+                 patch.object(tools,"install",side_effect=AssertionError("must not install")), \
+                 patch.object(tools,"environment",return_value={"PATH":"private"}), \
+                 patch.object(tools.subprocess,"run",return_value=subprocess.CompletedProcess([],0)) as child:
+                self.assertEqual(tools.main(),0)
+            args=child.call_args.args[0]
+            self.assertEqual(args[1:5],["-B","-X","utf8","-u"])
+            self.assertEqual(args[args.index("--action")+1],action)
+            self.assertEqual(args[args.index("--nonce")+1],"a"*32)
+            self.assertIn("--managed-toolchain",args)
+            self.assertEqual(child.call_args.kwargs["env"],{"PATH":"private"})
+
+    def test_real_image_gate_rejects_host_dll_or_wrong_stack(self):
+        import pe_dependencies
+        record=dict(imports=["kernel32.dll","ucrtbase.dll"],delay_imports=[],stack_reserve=16777216,dynamic_base=False)
+        with patch.object(pe_dependencies,"inspect",return_value=record):
+            self.assertEqual(tools.game_image("never executed"),record)
+        for changed in ({"imports":["vcruntime140.dll"]},{"stack_reserve":1048576},{"dynamic_base":True}):
+            with patch.object(pe_dependencies,"inspect",return_value={**record,**changed}):
+                with self.assertRaisesRegex(ValueError,"certification"):
+                    tools.game_image("never executed")
 
     def test_transaction_reuse_hashes_and_notices(self):
         value, fetch = self.fixture()
@@ -175,6 +203,26 @@ class Managed(unittest.TestCase):
         self.assertTrue(tools.complete(destination.parent, "long-fixture"))
         with self.assertRaises(ValueError):
             tools.owned_path(tools.filesystem_path(self.root / "../outside"), self.root)
+
+    def test_linear_tree_hashes_keep_every_file_and_reject_redirected_entries(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        output = self.root / "hash-fixture"
+        (output / "nested/deeper").mkdir(parents=True)
+        (output / "top").write_bytes(b"one")
+        (output / "nested/deeper/leaf").write_bytes(b"two")
+        self.assertEqual(tools.tool_hashes(output), tools.first_run.tree_hashes(output))
+        # Tools run with -B; unexpected bytecode is an added file, not ignored.
+        (output / "extra.pyc").write_bytes(b"not trusted")
+        self.assertIn("extra.pyc",tools.tool_hashes(output))
+        class Entries:
+            def __enter__(self):
+                return iter([SimpleNamespace(stat=lambda **kw:SimpleNamespace(st_mode=stat.S_IFDIR,st_file_attributes=0x400))])
+            def __exit__(self,*args):
+                pass
+        with patch.object(tools.os,"scandir",return_value=Entries()):
+            with self.assertRaisesRegex(ValueError,"Redirected"):
+                tools.tool_hashes(output)
 
     def test_url_and_environment_do_not_inherit_sdk(self):
         for url in ("http://www.python.org/a", "https://evil.invalid/a", "https://user@github.com/a",

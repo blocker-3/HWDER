@@ -62,7 +62,7 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     # Project roots only; don't recursively sweep this checkout or its private builds/runs.
     for name in tracked(root):
         p = PurePosixPath(name)
-        allowed = name in make_dist.TOP_FILES or (p.parts[0] in ("runtime","tools","docs") and p.suffix.lower() in make_dist.SOURCE_SUFFIXES)
+        allowed = name in make_dist.TOP_FILES or name in make_dist.PUBLIC_SCRIPTS or (p.parts[0] in ("runtime","tools","docs") and p.suffix.lower() in make_dist.SOURCE_SUFFIXES)
         if not allowed:
             continue
         if not make_dist.safe_member(name) or (root/name).is_symlink():
@@ -73,9 +73,9 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     members["HWDER Setup.exe"] = data  # The ONLY binary exception. Never a generic *.exe allowance.
     members["START HERE.txt"] = (
         "HWDER setup prototype\n\nExtract the complete kit into a permanent writable application folder, then open HWDER Setup.exe.\n"
-        "The window opens without Python. It guides official Python/C++ Build Tools installation and checks requirements.\n"
+        "The window opens without Python. Install private tools downloads verified tools into your chosen Data folder.\n"
         "Your own NSP and keys remain in place. No game, generated C, key file, Python package or compiler is bundled.\n"
-        "Only choose Install setup components after reviewing its network/private-environment consent.\n"
+        "Only choose Install private tools after reviewing its network/private-environment consent. No system installation is needed.\n"
         "Preparation can take minutes and several GB. Your data folder keeps saves/settings separately from this kit.\n"
         "This local unsigned prototype is not published or a claim of clean-machine support.\n"
     ).encode()
