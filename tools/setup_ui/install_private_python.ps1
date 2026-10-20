@@ -1,8 +1,8 @@
 # Windows PowerShell5.1/.NET bootstrap. No Python, toolchain, admin or global changes.
 param([string]$DataRoot, [string]$SourceRoot,
-      [ValidateSet('tools','check','prepare','launch')][string]$Action='tools',
+      [ValidateSet('tools','check','prepare','launch','status')][string]$Action='tools',
       [string]$Nonce='', [string]$Nsp='', [string]$Keys='',
-      [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail)
+      [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail, [switch]$PreviewLifecycle, [switch]$PreviewRace)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
@@ -197,6 +197,8 @@ function Invoke-PrivateBootstrap {
                      '--demo','--action',$(if($Action -eq 'tools'){'components'}else{$Action}),
                      '--data',$DataRoot,'--ui-protocol','--nonce',$Nonce)
         if ($PreviewFail) { $arguments+='--demo-fail' }
+        if ($PreviewLifecycle) { $arguments+='--demo-lifecycle' }
+        if ($PreviewRace) { $arguments+='--demo-lifecycle-race' }
         & $PreviewPython @arguments
         return
     }
@@ -232,13 +234,13 @@ function Invoke-PrivateBootstrap {
     }
     Write-ToolsStage $(if($Action -eq 'tools'){'Verifying or installing private tools'}else{'Verifying your private setup interpreter'})
     $python = Install-PrivatePython $DataRoot $spec[0] $fetch ($Action -eq 'tools')
-    if ($Action -eq 'launch') {
+    if ($Action -in @('launch','status')) {
         # Play only needs the completely certified small interpreter, source
         # helpers and ready executable; compiler/wheel files are not loaded.
         Write-ToolsStage 'Verifying your prepared game'
         $entry=(Join-Path $source 'tools/setup_bridge.py').Replace('\','\\').Replace("'","\'")
         $arguments=@('-I','-B','-X','utf8','-u','-c',("import runpy;runpy.run_path('"+$entry+"',run_name='__main__')"),
-                     '--action','launch','--data',$DataRoot,'--managed-launch','--ui-protocol')
+                     '--action',$Action,'--data',$DataRoot,'--managed-launch','--ui-protocol')
         if ($Nonce) { $arguments+=@('--nonce',$Nonce) }
         & $python @arguments
         return

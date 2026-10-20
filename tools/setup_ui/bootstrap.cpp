@@ -21,12 +21,13 @@
 
 namespace fs=std::filesystem;
 constexpr UINT Event=WM_APP+1;
-enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Prepare,Play,Shortcut,Details,Cancel };
-HWND window,gameBox,keyBox,dataBox,statusBox,progress,detailBox,prepareButton,playButton,shortcutButton,cancelButton;
+enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Prepare,Play,Shortcut,Details,Cancel,OpenGame };
+HWND window,gameBox,keyBox,dataBox,statusBox,progress,detailBox,prepareButton,playButton,shortcutButton,cancelButton,locationBox,titleBox;
 HFONT font,titleFont;fs::path source,application;bool demo=false,busy=false,publishing=false,closeDeferred=false,ready=false,requirements=false,pendingReady=false,pendingChecked=false,launching=false,committed=false,hadPublishPermission=false;
 std::wstring activeData,certifiedData,activeAction,failureMessage;
 bool demoFail=false;
 bool noPythonPreview=false;
+bool lifecycleRace=false;bool pathsReady=false;bool lifecyclePreview=false;fs::path installedExe,shortcutDirectory;HANDLE runningGame=nullptr;
 unsigned generation=0;std::atomic<bool> cancelRequested{false};std::mutex handles;HANDLE currentJob=nullptr,inputWrite=nullptr;
 struct Notice{unsigned generation;std::wstring line;DWORD exit=STILL_ACTIVE;bool control=false;};
 std::wstring wide(const std::string& s){if(s.empty())return{};int n=MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),nullptr,0);std::wstring r(n,0);MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),r.data(),n);return r;}
@@ -38,6 +39,22 @@ void post(unsigned gen,std::wstring line,bool control=false,DWORD exit=STILL_ACT
 void state(const std::wstring& s){SetWindowTextW(statusBox,s.c_str());}
 void log(const std::wstring& s){if(GetWindowTextLengthW(detailBox)>1024*1024)SetWindowTextW(detailBox,L"[Earlier details omitted]\r\n");SendMessageW(detailBox,EM_SETSEL,-1,-1);std::wstring row=s+L"\r\n";SendMessageW(detailBox,EM_REPLACESEL,0,(LPARAM)row.c_str());}
 fs::path data(){return fs::path(text(dataBox));}
+bool samePath(const fs::path& a,const fs::path& b){try{auto x=fs::absolute(a).lexically_normal().make_preferred().wstring(),y=fs::absolute(b).lexically_normal().make_preferred().wstring();return CompareStringOrdinal(x.c_str(),-1,y.c_str(),-1,TRUE)==CSTR_EQUAL;}catch(...){return false;}}
+void forgetGame(){if(runningGame)CloseHandle(runningGame);runningGame=nullptr;KillTimer(window,1);}
+bool monitorGame(const std::wstring& json){
+    forgetGame();auto pid=field(json,L"pid"),created=field(json,L"created");if(pid.empty()&&created.empty())return true;
+    try{
+        size_t p=0,c=0;auto id=std::stoul(pid,&p);auto stamp=std::stoull(created,&c);if(p!=pid.size()||c!=created.size()||!id)return false;
+        HANDLE process=OpenProcess(SYNCHRONIZE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,id);
+        if(!process)return GetLastError()==ERROR_INVALID_PARAMETER; // Already exited is still a ready game.
+        if(WaitForSingleObject(process,0)==WAIT_OBJECT_0){CloseHandle(process);return true;}
+        wchar_t name[32768];DWORD count=32768;FILETIME start,end,kernel,user;
+        bool match=QueryFullProcessImageNameW(process,0,name,&count)&&GetProcessTimes(process,&start,&end,&kernel,&user)&&
+            (((ULONGLONG)start.dwHighDateTime<<32)|start.dwLowDateTime)==stamp&&
+            CompareStringOrdinal(name,-1,installedExe.c_str(),-1,TRUE)==CSTR_EQUAL;
+        if(!match){CloseHandle(process);return false;}runningGame=process;SetTimer(window,1,250,nullptr);return true;
+    }catch(...){return false;}
+}
 bool supportedPython(const fs::path& p){
     // Isolated standard-library-only compatibility probe; no manager/Store aliases.
     std::wstring cmd=quote(p.wstring())+L" -I -S -c \"import sys,struct,platform,sysconfig;sys.exit(not(sys.implementation.name=='cpython' and (3,11)<=sys.version_info[:2]<=(3,14) and struct.calcsize('P')==8 and platform.machine().lower() in ('amd64','x86_64') and not sysconfig.get_config_var('Py_GIL_DISABLED')))\"";
@@ -62,12 +79,16 @@ fs::path findPython(bool allowOwned=true){
 }
 void controls(){
     const bool bound=ready&&certifiedData==text(dataBox);
-    EnableWindow(prepareButton,!busy&&requirements);EnableWindow(playButton,!busy&&bound&&!demo);EnableWindow(shortcutButton,!busy&&bound&&!demo);
+    EnableWindow(prepareButton,!busy&&requirements&&!runningGame);EnableWindow(playButton,!busy&&bound&&!runningGame&&(!demo||lifecyclePreview));EnableWindow(shortcutButton,!busy&&bound&&pathsReady&&(!demo||lifecyclePreview));
+    EnableWindow(GetDlgItem(window,OpenGame),!busy&&bound);SetWindowTextW(titleBox,bound?L"Ready to play":L"Let’s get HWDER ready");
+    SendMessageW(playButton,BM_SETSTYLE,bound?BS_DEFPUSHBUTTON:BS_PUSHBUTTON,TRUE);SendMessageW(prepareButton,BM_SETSTYLE,bound?BS_PUSHBUTTON:BS_DEFPUSHBUTTON,TRUE);
+    SetWindowTextW(locationBox,bound?(L"Installed game: "+installedExe.wstring()+(pathsReady?L"\r\nPlay here or create a Desktop shortcut. The installed game needs no setup kit.":L"\r\nGame running. The installed shortcut handoff will finish when it closes.")).c_str():L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.");
     EnableWindow(cancelButton,busy&&!publishing&&!launching);
     for(int id:{Game,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,Components,PythonSite,ToolsSite})EnableWindow(GetDlgItem(window,id),!busy);
 }
 void run(std::wstring action){
     if(busy)return;
+    if(action==L"launch"&&runningGame){state(L"Your game is already running. Play will be available when it closes.");return;}
     // Normal setup enters through the Windows system helper, before Python exists.
     // Only the explicitly synthetic preview uses a pre-existing interpreter.
     fs::path previewPython;if(demo){previewPython=findPython(false);if(previewPython.empty()){state(L"Preview interpreter unavailable. Normal setup installs its own private tools and needs no installed Python.");return;}}
@@ -80,6 +101,7 @@ void run(std::wstring action){
     std::wstring command=quote(shell.wstring())+L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "+quote((source/L"tools/setup_ui/install_private_python.ps1").wstring())+L" -Action "+action+L" -DataRoot "+quote(root.wstring())+L" -SourceRoot "+quote(source.wstring())+L" -Nonce "+nonce;
     if(demo)command+=L" -Preview -PreviewPython "+quote(previewPython.wstring());
     if(demoFail)command+=L" -PreviewFail";
+    if(lifecyclePreview)command+=L" -PreviewLifecycle";if(lifecycleRace)command+=L" -PreviewRace";
     if(action==L"prepare")command+=L" -Nsp "+quote(text(gameBox))+L" -Keys "+quote(text(keyBox));
     if(text(dataBox)!=root.wstring())SetWindowTextW(dataBox,root.c_str());activeData=root.wstring();activeAction=action;
     if(action==L"tools")requirements=ready=false;
@@ -134,51 +156,53 @@ void browse(int id){
     if(GetOpenFileNameW(&of))SetWindowTextW(id==BrowseGame?gameBox:keyBox,name);
 }
 void shortcut(){
-    wchar_t desktop[MAX_PATH];if(FAILED(SHGetFolderPathW(nullptr,CSIDL_DESKTOPDIRECTORY,nullptr,0,desktop)))return;
+    if(!ready||!pathsReady||certifiedData!=text(dataBox)||installedExe.empty())return;
+    wchar_t desktop[MAX_PATH];if(shortcutDirectory.empty()&&FAILED(SHGetFolderPathW(nullptr,CSIDL_DESKTOPDIRECTORY,nullptr,0,desktop)))return;
     IShellLinkW* link=nullptr;if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&link)))){
-        link->SetPath(application.c_str());std::wstring args=L"--data "+quote(data().wstring())+L" --play";link->SetArguments(args.c_str());link->SetDescription(L"HWDER — play your verified prepared game");link->SetWorkingDirectory(application.parent_path().c_str());
-        IPersistFile* file=nullptr;if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))){auto path=fs::path(desktop)/L"HWDER.lnk";if(fs::exists(path))state(L"Desktop HWDER shortcut already exists; it was not overwritten.");else if(SUCCEEDED(file->Save(path.c_str(),TRUE)))state(L"Desktop shortcut created. It opens this setup with your data folder.");file->Release();}link->Release();}
+        link->SetPath(installedExe.c_str());link->SetDescription(L"HWDER — play your installed game");link->SetWorkingDirectory(installedExe.parent_path().c_str());
+        IPersistFile* file=nullptr;if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))){auto path=(shortcutDirectory.empty()?fs::path(desktop):shortcutDirectory)/L"HWDER.lnk";if(fs::exists(path))state(L"Desktop HWDER shortcut already exists; it was not overwritten.");else if(SUCCEEDED(file->Save(path.c_str(),TRUE)))state(L"Desktop HWDER shortcut created. It opens your installed game, even without this setup kit.");else state(L"Could not create a Desktop shortcut. Open the game folder to launch hwder.exe.");file->Release();}link->Release();}
 }
 HWND control(const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int w,int h,int id=0){HWND c=CreateWindowExW(cls==std::wstring(L"EDIT")?WS_EX_CLIENTEDGE:0,cls,label,WS_CHILD|WS_VISIBLE|style,x,y,w,h,window,(HMENU)(INT_PTR)id,GetModuleHandleW(nullptr),nullptr);SendMessageW(c,WM_SETFONT,(WPARAM)font,TRUE);return c;}
 LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
     if(message==WM_CTLCOLORSTATIC){SetBkColor((HDC)wp,RGB(255,255,255));return(LRESULT)GetStockObject(WHITE_BRUSH);}
     if(message==WM_CREATE){window=h;font=CreateFontW(-17,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");titleFont=CreateFontW(-27,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
-        auto title=control(L"STATIC",L"Let’s get HWDER ready",0,28,20,780,40);SendMessageW(title,WM_SETFONT,(WPARAM)titleFont,TRUE);
+        titleBox=control(L"STATIC",L"Let’s get HWDER ready",0,28,20,780,40);SendMessageW(titleBox,WM_SETFONT,(WPARAM)titleFont,TRUE);
         control(L"STATIC",L"Use your own game dump and keys. They stay where you choose — no keys are copied.",0,28,64,780,30);
         control(L"STATIC",L"Game file (.nsp)",0,28,108,180,24);gameBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,104,505,28,Game);control(L"BUTTON",L"Browse…",BS_PUSHBUTTON,727,104,95,28,BrowseGame);
         control(L"STATIC",L"Your prod.keys file",0,28,148,180,24);keyBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,144,505,28,Keys);control(L"BUTTON",L"Browse…",BS_PUSHBUTTON,727,144,95,28,BrowseKeys);
         control(L"STATIC",L"Data folder",0,28,188,180,24);dataBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,184,505,28,Data);control(L"BUTTON",L"Choose…",BS_PUSHBUTTON,727,184,95,28,BrowseData);
         control(L"STATIC",L"Saves and settings stay in Data folder\\play. Application files stay beside this setup.",0,210,217,615,26);
         control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,258,170,32,Check);control(L"BUTTON",L"About tools",BS_PUSHBUTTON,210,258,130,32,PythonSite);control(L"BUTTON",L"Open data folder",BS_PUSHBUTTON,352,258,160,32,ToolsSite);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,524,258,220,32,Components);
-        control(L"STATIC",L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.",0,28,301,790,28);
+        locationBox=control(L"STATIC",L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.",0,28,296,790,47);
         statusBox=control(L"STATIC",L"First install private tools, then Check requirements. Downloads always need your confirmation.",0,28,345,790,54);
         progress=control(PROGRESS_CLASSW,L"",PBS_MARQUEE,28,405,790,10);
-        prepareButton=control(L"BUTTON",L"Prepare game",BS_DEFPUSHBUTTON,28,438,165,36,Prepare);playButton=control(L"BUTTON",L"Play",BS_PUSHBUTTON,205,438,100,36,Play);shortcutButton=control(L"BUTTON",L"Desktop shortcut",BS_PUSHBUTTON,317,438,160,36,Shortcut);cancelButton=control(L"BUTTON",L"Cancel",BS_PUSHBUTTON,489,438,110,36,Cancel);control(L"BUTTON",L"Show details",BS_AUTOCHECKBOX,650,442,170,30,Details);
+        prepareButton=control(L"BUTTON",L"Prepare game",BS_DEFPUSHBUTTON,28,438,140,36,Prepare);playButton=control(L"BUTTON",L"Play",BS_PUSHBUTTON,178,434,110,44,Play);shortcutButton=control(L"BUTTON",L"Create Desktop shortcut",BS_PUSHBUTTON,298,438,185,36,Shortcut);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,493,438,140,36,OpenGame);cancelButton=control(L"BUTTON",L"Cancel",BS_PUSHBUTTON,643,438,78,36,Cancel);control(L"BUTTON",L"Details",BS_AUTOCHECKBOX,730,442,90,30,Details);
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,492,790,185);ShowWindow(detailBox,SW_HIDE);controls();return 0;}
-    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Data)){ready=false;if(id==Data)requirements=false;controls();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseData)browse(id);else if(id==Check)run(L"check");else if(id==Components)run(L"tools");else if(id==Prepare)run(L"prepare");else if(id==Play)run(L"launch");else if(id==Shortcut)shortcut();else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling owned setup work; your previous playable version is retained.");}
+    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)requirements=false;controls();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseData)browse(id);else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components)run(L"tools");else if(id==Prepare)run(L"prepare");else if(id==Play)run(L"launch");else if(id==Shortcut)shortcut();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling owned setup work; your previous playable version is retained.");}
         else if(id==Details){bool shown=SendMessageW(GetDlgItem(h,Details),BM_GETCHECK,0,0)==BST_CHECKED;ShowWindow(detailBox,shown?SW_SHOW:SW_HIDE);SetWindowPos(h,nullptr,0,0,866,shown?735:535,SWP_NOMOVE|SWP_NOZORDER);}
         else if(id==PythonSite){MessageBoxW(h,L"HWDER uses its own pinned Python, LLVM-MinGW, CMake and Ninja, plus cryptography, lz4, cffi and pycparser.\n\nInstall private tools is the only action that downloads. Check, Prepare and Play only verify existing tools.\n\nTools and full license notices live in the Data folder. No global PATH, registry or administrator installation is needed.",L"About private tools",MB_OK|MB_ICONINFORMATION);}
         else if(id==ToolsSite){if(fs::is_directory(data()))ShellExecuteW(h,L"open",data().c_str(),nullptr,nullptr,SW_SHOWNORMAL);else state(L"Choose or create your Data folder first.");}return 0;}
     if(message==Event){std::unique_ptr<Notice> p((Notice*)lp);if(p->generation!=generation)return 0;
-        if(p->exit!=STILL_ACTIVE){busy=false;publishing=false;launching=false;SendMessageW(progress,PBM_SETMARQUEE,FALSE,0);ready=p->exit==0&&pendingReady&&!cancelRequested;if(ready)certifiedData=activeData;if(activeAction==L"check")requirements=p->exit==0&&pendingChecked;if(cancelRequested)state(committed?L"The safe update finished before closing. Open setup again to verify and play.":hadPublishPermission?L"Setup ended after the safe update boundary. Retry to verify the playable version.":L"Cancelled before updating the playable version; you can retry.");else if(p->exit!=0){ready=false;state(failureMessage.empty()?L"Setup did not finish. Saves/settings are retained; retry to verify the playable version.":failureMessage);SetWindowTextW(prepareButton,L"Retry");}controls();if(closeDeferred)DestroyWindow(h);return 0;}
+        if(p->exit!=STILL_ACTIVE){busy=false;publishing=false;launching=false;SendMessageW(progress,PBM_SETMARQUEE,FALSE,0);ready=p->exit==0&&pendingReady&&!cancelRequested;if(ready){certifiedData=activeData;if(!runningGame)state(L"Ready to play. Choose Play now, or Create Desktop shortcut for next time.");}if(activeAction==L"check")requirements=p->exit==0&&pendingChecked;if(cancelRequested)state(committed?L"The safe update finished before closing. Open setup again to verify and play.":hadPublishPermission?L"Setup ended after the safe update boundary. Retry to verify the playable version.":L"Cancelled before updating the playable version; you can retry.");else if(p->exit!=0||!failureMessage.empty()){ready=false;state(failureMessage.empty()?L"Setup did not finish. Saves/settings are retained; retry to verify the playable version.":failureMessage);SetWindowTextW(prepareButton,L"Retry");}controls();if(closeDeferred)DestroyWindow(h);else if(ready&&!pathsReady&&!runningGame&&(!demo||lifecyclePreview))run(L"status");return 0;}
         if(!p->control){log(p->line);return 0;}auto type=field(p->line,L"type"),msg=field(p->line,L"message");log(msg);
         if(type==L"publish_request"){std::lock_guard<std::mutex> lock(handles);const char* reply=cancelRequested?"cancel\n":"commit\n";publishing=!cancelRequested;hadPublishPermission=publishing;DWORD done=0;if(inputWrite&&(!WriteFile(inputWrite,reply,(DWORD)strlen(reply),&done,nullptr)||done!=strlen(reply))){CloseHandle(inputWrite);inputWrite=nullptr;log(L"Commit acknowledgement channel failed; waiting for safe completion/rollback.");}controls();}
-        else if(type==L"checked")pendingChecked=true;else if(type==L"ready"||type==L"ready_available"){pendingReady=true;committed=type==L"ready";}
-        else if(type==L"failed")failureMessage=msg;
+        else if(type==L"checked")pendingChecked=true;else if(type==L"ready"||type==L"ready_available"){auto exe=field(p->line,L"exe");if(demo&&!lifecyclePreview){pendingReady=true;}else if(!exe.empty()&&(lifecyclePreview||samePath(fs::path(exe),fs::path(activeData)/L"play/hwder.exe"))){installedExe=exe;pathsReady=field(p->line,L"paths_ready")==L"yes";pendingReady=true;}committed=type==L"ready";}
+        else if(type==L"launched"){if(installedExe.empty())installedExe=fs::path(activeData)/L"play/hwder.exe";if(field(p->line,L"paths_ready")==L"yes")pathsReady=true;pendingReady=monitorGame(p->line);if(!pendingReady){failureMessage=L"The game may be running, but its identity could not be verified. Close it, then use Check requirements to verify and retry.";state(failureMessage);}}else if(type==L"failed")failureMessage=msg;
         if(type!=L"log")state(msg);return 0;}
+    if(message==WM_TIMER&&wp==1){if(runningGame&&WaitForSingleObject(runningGame,0)==WAIT_OBJECT_0){forgetGame();if(ready&&certifiedData==text(dataBox)){state(L"Game closed. Verifying your installed game for Play again…");run(L"status");}controls();}return 0;}
     if(message==WM_CLOSE){if(busy){if(launching){closeDeferred=true;state(L"Finishing the explicit launch check before closing…");return 0;}if(MessageBoxW(h,publishing?L"Close when the safe update finishes? The new playable version may be committed.":L"Cancel the current setup and close? The playable version has not been updated.",L"Close setup",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;cancelRequested=true;closeDeferred=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);if(publishing)state(L"Finishing the safe update before closing…");return 0;}DestroyWindow(h);return 0;}
-    if(message==WM_DESTROY){PostQuitMessage(0);return 0;}return DefWindowProcW(h,message,wp,lp);
+    if(message==WM_DESTROY){forgetGame();PostQuitMessage(0);return 0;}return DefWindowProcW(h,message,wp,lp);
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int){
     // Native controls use a 96-DPI layout; Windows scales GDI text/geometry for desktop scaling.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED);CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);INITCOMMONCONTROLSEX cc{sizeof cc,ICC_PROGRESS_CLASS};InitCommonControlsEx(&cc);
     wchar_t exe[32768];GetModuleFileNameW(nullptr,exe,32768);application=exe;source=application.parent_path()/L"source";if(!fs::is_regular_file(source/L"tools/setup_bridge.py")){source=application.parent_path();for(int n=0;n<4&&!fs::is_regular_file(source/L"tools/setup_bridge.py");++n)source=source.parent_path();}
     if(!fs::is_regular_file(source/L"tools/setup_bridge.py")||!fs::is_regular_file(source/L"tools/managed_toolchain.json")||!fs::is_regular_file(source/L"tools/setup_ui/install_private_python.ps1")){MessageBoxW(nullptr,L"Keep HWDER Setup.exe beside its complete source folder. Extract the whole setup kit first.",L"Setup files missing",MB_OK|MB_ICONERROR);return 1;}
-    int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);std::wstring selected;bool autoPlay=false;for(int i=1;i<argc;++i){if(std::wstring(argv[i])==L"--demo")demo=true;else if(std::wstring(argv[i])==L"--demo-no-python"){demo=true;noPythonPreview=true;}else if(std::wstring(argv[i])==L"--demo-fail"){demo=true;demoFail=true;}else if(std::wstring(argv[i])==L"--play")autoPlay=true;else if(std::wstring(argv[i])==L"--data"&&i+1<argc)selected=argv[++i];}LocalFree(argv);
+    int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);std::wstring selected;bool autoPlay=false;for(int i=1;i<argc;++i){if(std::wstring(argv[i])==L"--demo")demo=true;else if(std::wstring(argv[i])==L"--demo-lifecycle-race"){demo=true;lifecyclePreview=true;lifecycleRace=true;}else if(std::wstring(argv[i])==L"--demo-lifecycle"){demo=true;lifecyclePreview=true;}else if(std::wstring(argv[i])==L"--shortcut-directory"&&i+1<argc)shortcutDirectory=argv[++i];else if(std::wstring(argv[i])==L"--demo-no-python"){demo=true;noPythonPreview=true;}else if(std::wstring(argv[i])==L"--demo-fail"){demo=true;demoFail=true;}else if(std::wstring(argv[i])==L"--play")autoPlay=true;else if(std::wstring(argv[i])==L"--data"&&i+1<argc)selected=argv[++i];}LocalFree(argv);if(!lifecyclePreview)shortcutDirectory.clear();
     if(selected.empty()){PWSTR local=nullptr;SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,nullptr,&local);selected=(fs::path(local)/L"HWDER").wstring();CoTaskMemFree(local);}
     WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"HWDERSetupPrototype";cls.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);cls.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&cls);
     window=CreateWindowW(cls.lpszClassName,demo?L"HWDER Setup — Preview (no game or installs)":L"HWDER Setup",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,866,535,nullptr,nullptr,instance,nullptr);SetWindowTextW(dataBox,selected.c_str());
     std::ifstream saved(fs::path(selected)/L"setup-inputs.json",std::ios::binary);if(saved){std::string value((std::istreambuf_iterator<char>(saved)),{});auto json=wide(value);SetWindowTextW(gameBox,field(json,L"nsp").c_str());SetWindowTextW(keyBox,field(json,L"keys").c_str());}
-    ShowWindow(window,SW_SHOW);UpdateWindow(window);if(autoPlay&&!demo)run(L"launch");
+    ShowWindow(window,SW_SHOW);UpdateWindow(window);if(autoPlay&&!demo)run(L"launch");else if(lifecyclePreview||(!demo&&fs::is_regular_file(fs::path(selected)/L"last-success.json")))run(L"status");
     MSG message;while(GetMessageW(&message,nullptr,0,0)>0){if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}CoUninitialize();return 0;
 }

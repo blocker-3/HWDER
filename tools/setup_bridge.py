@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import time
+import uuid
 
 sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -94,6 +95,137 @@ def checked_ready(data):
     return exe, nsp, keys
 
 
+def process_identity(pid):
+    """Read-only process identity. None means exited; inaccessible is not 'exited'."""
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = (w.HANDLE,)
+    kernel.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
+    kernel.QueryFullProcessImageNameW.argtypes = (w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD))
+    kernel.GetProcessTimes.argtypes = (w.HANDLE,) + (ctypes.POINTER(w.FILETIME),) * 4
+    handle = kernel.OpenProcess(0x100000 | 0x1000, False, int(pid))
+    if not handle:
+        if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
+            return None
+        raise OSError("Cannot verify the previously launched game. Close it before retrying.")
+    try:
+        if kernel.WaitForSingleObject(handle, 0) == 0:
+            return None
+        name = ctypes.create_unicode_buffer(32768)
+        length = w.DWORD(len(name))
+        times = [w.FILETIME() for _ in range(4)]
+        if not kernel.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(length)) or not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            raise OSError("Cannot verify the running game identity. Close it before retrying.")
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return {"pid": str(pid), "created": str(created), "exe": str(Path(name.value).resolve())}
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def running_game(data, exe, identity=process_identity):
+    path = Path(data) / "game-running.json"
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        raise ValueError("The game launch record could not be read. Close the game before repairing it.")
+    if not marker:
+        return None
+    if not isinstance(marker, dict) or marker.get("schema") != 1 or marker.get("exe") != str(exe.resolve()) or not str(marker.get("pid", "")).isdigit() or not str(marker.get("created", "")).isdigit() or not 0 < int(marker["pid"]) < 2**32 or not 0 < int(marker["created"]) < 2**64:
+        raise ValueError("The game launch record is invalid. Close the game, then retry verification.")
+    actual = identity(int(marker["pid"]))
+    if actual is not None and actual == {k: marker[k] for k in ("pid", "created", "exe")}:
+        return actual
+    return None  # Exited, or a reused PID belonging to a different process.
+
+
+def discovered_game(exe):
+    """Also recognize direct installed-EXE/shortcut launches. Read-only, exact image match."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes as w
+    class Entry(ctypes.Structure):
+        _fields_ = [("size", w.DWORD), ("usage", w.DWORD), ("pid", w.DWORD), ("heap", ctypes.c_size_t),
+                    ("module", w.DWORD), ("threads", w.DWORD), ("parent", w.DWORD), ("priority", w.LONG),
+                    ("flags", w.DWORD), ("name", w.WCHAR * 260)]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = (w.DWORD, w.DWORD)
+    kernel.CreateToolhelp32Snapshot.restype = w.HANDLE
+    kernel.Process32FirstW.argtypes = kernel.Process32NextW.argtypes = (w.HANDLE, ctypes.POINTER(Entry))
+    kernel.CloseHandle.argtypes = (w.HANDLE,)
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise OSError("Cannot check whether your installed game is already running.")
+    try:
+        entry = Entry(); entry.size = ctypes.sizeof(entry)
+        ctypes.set_last_error(0)
+        more = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.name.casefold() == exe.name.casefold():
+                actual = process_identity(entry.pid)  # Access denied is deliberately not 'not running'.
+                if actual and os.path.normcase(actual["exe"]) == os.path.normcase(str(exe.resolve())):
+                    return actual
+            ctypes.set_last_error(0)
+            more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES is the only successful end.
+            raise OSError("Could not finish checking whether the installed game is running.")
+    finally:
+        kernel.CloseHandle(snapshot)
+    return None
+
+
+def ready_status(data, managed=None, identity=process_identity):
+    with first_run.setup_lock(Path(data)):
+        exe, _, _ = checked_ready(data)
+        if managed is not None:
+            import managed_tools
+            managed_tools.game_image(exe)
+        running = running_game(data, exe, identity) or discovered_game(exe)
+        if not running:
+            installed_paths(data, exe)
+    emit("ready_available", "Ready to play. Use Play now, or create a desktop shortcut for next time.", exe=str(exe), paths_ready="no" if running else "yes")
+    if running:
+        emit("launched", "Game is running. Play will be available when it closes.", **running)
+
+
+def installed_paths(data, exe):
+    """Persist paths, never inputs, so the installed game works without the setup kit."""
+    config = first_run.read_json(Path(data) / "setup-inputs.json")
+    values = {"nsp_path": str(Path(config["nsp"]).resolve()), "keys_path": str(Path(config["keys"]).resolve())}
+    for key, value in values.items():
+        if any(c in value for c in "\r\n\0") or len((key + "=" + value).encode("utf-8")) >= 2046:
+            raise ValueError("The selected path cannot be stored in the game's settings. Choose a shorter path.")
+    settings = exe.parent / "hwder_settings.ini"
+    original = settings.read_bytes() if settings.exists() else b"version=2\n"
+    # Runtime reads flat key=value records. Preserve all unrelated bytes, including line endings.
+    result = []
+    seen = set()
+    for line in original.splitlines(keepends=True):
+        key = line.split(b"=", 1)[0].decode("utf-8", errors="replace")
+        if key in values:
+            if key not in seen:
+                result.append((key + "=" + values[key]).encode("utf-8") + (b"\r\n" if line.endswith(b"\r\n") else b"\n"))
+                seen.add(key)
+        else:
+            result.append(line)
+    if result and not result[-1].endswith((b"\r", b"\n")):
+        result.append(b"\n")
+    result.extend((key + "=" + value + "\n").encode("utf-8") for key, value in values.items() if key not in seen)
+    content = b"".join(result)
+    if content != original or not settings.exists():
+        temporary = settings.with_name(".setup-settings-" + uuid.uuid4().hex + ".tmp")
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, settings)
+        finally:
+            temporary.unlink(missing_ok=True)
+    first_run.atomic_json(Path(data) / "installed-game.json", {"schema": 1, "exe": str(exe.resolve()),
+                         "game_folder": str(exe.parent.resolve()), **config})
+
+
 def commit_permission():
     emit("publish_request", "Finishing setup. Cancellation will wait while your playable version is committed.")
     if sys.stdin.readline().strip() != "commit":
@@ -105,22 +237,31 @@ def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=Non
     nsp, keys = Path(nsp).resolve(), Path(keys).resolve()
     toolchain = backend.check_prerequisites(first_run.ROOT, managed) if managed else backend.check_prerequisites(first_run.ROOT)
     with backend.setup_lock(data):
+        existing = data / "play/hwder.exe"
+        if existing.is_file() and (running_game(data, existing) or discovered_game(existing)):
+            raise ValueError("Your game is running. Close it before preparing again.")
         exe = backend.prepare(first_run.ROOT, data, nsp, keys, max(1, min(8, os.cpu_count() or 1)),
                               toolchain, before_publish=before_publish)
         # The original backend owns all extraction/build/publication/certification and the host lock.
         if first_run.file_hash(exe) != backend.read_json(data / "last-success.json").get("exe_sha256"):
             raise ValueError("Prepared executable certificate did not match.")
         backend.atomic_json(data / "setup-inputs.json", {"nsp": str(nsp), "keys": str(keys)})
-    emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe))
+        installed_paths(data, exe)
+    emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe), paths_ready="yes")
 
 
-def launch(data, popen=subprocess.Popen, managed=None):
+def launch(data, popen=subprocess.Popen, managed=None, identity=process_identity):
     # A separate, explicit UI action; never assigned to the cancellable preparation job.
     with first_run.setup_lock(Path(data)):
         exe, nsp, keys = checked_ready(data)
         if managed is not None:
             import managed_tools
             managed_tools.game_image(exe)
+        running = running_game(data, exe, identity) or discovered_game(exe)
+        if running:
+            emit("launched", "Game is already running. Play will be available when it closes.", paths_ready="no", **running)
+            return
+        installed_paths(data, exe)
         env = dict(os.environ)
         for name in list(env):
             if name.startswith("HWDER_"):
@@ -129,12 +270,47 @@ def launch(data, popen=subprocess.Popen, managed=None):
         if managed is not None:
             windows=Path(os.environ.get("SystemRoot",r"C:\Windows"))
             env["PATH"]=os.pathsep.join(map(str,(windows/"System32",windows)))
-        popen([str(exe)], cwd=exe.parent, env=env, close_fds=True,
-              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    emit("launched", "Game started.")
+        # A persisted intent fails closed if the launcher dies after Popen but before identity publication.
+        marker = Path(data) / "game-running.json"
+        first_run.atomic_json(marker, {"schema": 1, "exe": str(exe.resolve()), "state": "starting"})
+        try:
+            child = popen([str(exe)], cwd=exe.parent, env=env, close_fds=True,
+                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            first_run.atomic_json(marker, {})  # Definitive Popen failure; no child was created.
+            raise
+        running = identity(child.pid) if child is not None else None  # injectable no-process test boundary
+        if running:
+            first_run.atomic_json(marker, {"schema": 1, **running})
+        else:
+            first_run.atomic_json(marker, {})
+    emit("launched", "Game started. You can close Setup; the game stays open.", exe=str(exe), paths_ready="yes",
+         **({k: running[k] for k in ("pid", "created")} if running else {}))
 
 
-def demo(action, fail=False):
+def demo(action, fail=False, lifecycle=False, data=None, race=False):
+    if lifecycle:
+        # Explicit native lifecycle fixture: standard Python sleep only, never the game or user inputs.
+        exe = Path(sys.executable).resolve()
+        if race and action == "status" and not (Path(data) / "preview-race-once").exists():
+            (Path(data) / "preview-race-once").write_text("fixed immediate-exit fixture")
+            child = subprocess.Popen([str(exe), "-I", "-S", "-c", "import time;time.sleep(0.15)"], close_fds=True,
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            identity = process_identity(child.pid)
+            emit("ready_available", "Synthetic running old install; path handoff deferred.", exe=str(exe), paths_ready="no")
+            if identity: emit("launched", "Synthetic child exits while helper is still busy.", **identity)
+            time.sleep(0.8)
+            return
+        if action == "launch":
+            child = subprocess.Popen([str(exe), "-I", "-S", "-c", "import time;time.sleep(4)"],
+                close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            identity = process_identity(child.pid)
+            if identity:
+                first_run.atomic_json(Path(data) / "preview-child.json", identity)
+                emit("launched", "Preview child running (no game).", **identity)
+                return
+        emit("ready_available", "Ready to play (synthetic lifecycle fixture; no game).", exe=str(exe), paths_ready="yes")
+        return
     # No paths, input inspection, venv, package installation, compiler or game process.
     print('{"type":"publish_request","message":"UNTRUSTED ordinary log, not a control"}', flush=True)
     print('HWDER_UI:00000000000000000000000000000000:{"type":"ready"}', flush=True)
@@ -156,19 +332,21 @@ def demo(action, fail=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--action", choices=("check", "components", "prepare", "launch"), required=True)
+    parser.add_argument("--action", choices=("check", "components", "prepare", "launch", "status"), required=True)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--nsp")
     parser.add_argument("--keys")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--demo-fail", action="store_true")
+    parser.add_argument("--demo-lifecycle", action="store_true")
+    parser.add_argument("--demo-lifecycle-race", action="store_true")
     parser.add_argument("--ui-protocol", action="store_true")
     parser.add_argument("--nonce", default="")
     parser.add_argument("--managed-toolchain",type=Path)
     parser.add_argument("--managed-launch",action="store_true")
     args = parser.parse_args()
-    if args.managed_launch and args.action!="launch":
-        parser.error("--managed-launch is valid only for launch")
+    if args.managed_launch and args.action not in ("launch", "status"):
+        parser.error("--managed-launch is valid only for launch/status")
     global NONCE
     if args.nonce and not re.fullmatch("[0-9a-f]{32}", args.nonce):
         parser.error("Invalid UI session identifier")
@@ -176,7 +354,7 @@ def main():
     first_run.log = stage_log
     try:
         if args.demo:
-            demo(args.action, args.demo_fail)
+            demo(args.action, args.demo_fail, args.demo_lifecycle, args.data, args.demo_lifecycle_race)
         elif not compatible():
             raise ValueError("Install standard Windows x64 CPython 3.11–3.14 (not free-threaded), then recheck.")
         elif args.action == "components":
@@ -196,6 +374,8 @@ def main():
                     managed=args.managed_toolchain)
         elif args.action == "launch":
             launch(args.data,managed=True if args.managed_launch else args.managed_toolchain)
+        elif args.action == "status":
+            ready_status(args.data,managed=True if args.managed_launch else args.managed_toolchain)
         return 0
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, struct.error) as error:
         detail = str(error)
