@@ -9,7 +9,6 @@ import struct
 import subprocess
 import sys
 import time
-import venv
 
 sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -38,6 +37,11 @@ def components(data, create=None, run=subprocess.run):
 
 
 def _components_locked(data, create, run):
+    # Legacy installed-Python action only. The managed embeddable interpreter
+    # intentionally has no venv/pip and never takes this path.
+    if create is None:
+        import venv
+        create=lambda p:venv.EnvBuilder(with_pip=True).create(p)
     data = Path(data).resolve()
     directory = data / "setup-python"
     if directory.resolve() != directory:
@@ -53,7 +57,7 @@ def _components_locked(data, create, run):
         directory.mkdir(parents=True)
         first_run.atomic_json(marker, {"owner": OWNER, "pins": PINS})
     emit("stage", "Creating your private setup environment", stage="components")
-    (create or (lambda p: venv.EnvBuilder(with_pip=True).create(p)))(directory)
+    create(directory)
     python = directory / "Scripts/python.exe"
     emit("stage", "Installing the four pinned setup components from PyPI", stage="components")
     run([str(python), "-m", "pip", "--isolated", "install", "--require-virtualenv",

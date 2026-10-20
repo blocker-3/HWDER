@@ -48,20 +48,25 @@ def directory(path):
     return owned_path(path,ROOT/"build/private-toolchain-data/probes")
 
 
+def payloads():
+    return {"sources.cmake":
+        'if(NOT HWDER_PUBLIC_RUNTIME_LINK_ONLY)\n  message(FATAL_ERROR "Public link fixture is NOT game code")\nendif()\n'
+        'set(RECOMP_SOURCES "${GEN_DIR}/rc_public_link_only.c")\n',
+        "rc_public_link_only.c":'#include "hwder/cpu.h"\n'+
+        '\n'.join('void '+name+'(Ctx* c) { (void)c; }' for name in GUESTS)+'\n',
+        "functable.c":'#include "hwder/dispatch.h"\n'
+        'const HwFuncEntry hw_func_table[1]={{0,0}};\nconst unsigned hw_func_count=0;\n'
+        'const unsigned long long hw_resumable[1]={0};\nconst unsigned hw_resumable_count=0;\n',
+        "module_info.c":'#include "hwder/module.h"\n'
+        'const HwModuleInfo hw_modules[1]={{0,0,0,0,0}};\nconst unsigned hw_module_count=0;\n'}
+
+
 def create(path):
     path=directory(path)
     bindings=public_bindings(ROOT)
     path.mkdir(parents=True,exist_ok=False)
-    (path/"sources.cmake").write_text(
-        'if(NOT HWDER_PUBLIC_RUNTIME_LINK_ONLY)\n  message(FATAL_ERROR "Public link fixture is NOT game code")\nendif()\n'
-        'set(RECOMP_SOURCES "${GEN_DIR}/rc_public_link_only.c")\n',encoding="utf-8")
-    (path/"rc_public_link_only.c").write_text('#include "hwder/cpu.h"\n'+
-        '\n'.join('void '+name+'(Ctx* c) { (void)c; }' for name in GUESTS)+'\n',encoding="utf-8")
-    (path/"functable.c").write_text('#include "hwder/dispatch.h"\n'
-        'const HwFuncEntry hw_func_table[1]={{0,0}};\nconst unsigned hw_func_count=0;\n'
-        'const unsigned long long hw_resumable[1]={0};\nconst unsigned hw_resumable_count=0;\n',encoding="utf-8")
-    (path/"module_info.c").write_text('#include "hwder/module.h"\n'
-        'const HwModuleInfo hw_modules[1]={{0,0,0,0,0}};\nconst unsigned hw_module_count=0;\n',encoding="utf-8")
+    for name,text in payloads().items():
+        (path/name).write_text(text,encoding="utf-8")
     record={"owner":OWNER,"guest_bindings":bindings,"never_execute":True,
             "source_sha256":{name:sha(ROOT/name) for name in sorted({p for files in bindings.values() for p in files})},
             "files":{p.name:sha(p) for p in path.iterdir()}}
@@ -78,6 +83,13 @@ def verify(path):
         raise ValueError("Unexpected fixture source set")
     if set(p.name for p in path.iterdir())!=set(record["files"])|{"public-link-fixture.json"}:
         raise ValueError("Extra fixture files")
+    from managed_tools import owned_path
+    for entry in path.iterdir():owned_path(entry,path)
+    if any((path/name).read_text(encoding="utf-8")!=text for name,text in payloads().items()):
+        raise ValueError("Fixture payload differs from the exact public guest schema")
+    expected_sources={p for files in public_bindings(ROOT).values() for p in files}
+    if set(record.get("source_sha256",{}))!=expected_sources:
+        raise ValueError("Unexpected fixture source identities")
     if any(sha(path/name)!=digest for name,digest in record["files"].items()) or any(sha(ROOT/name)!=digest for name,digest in record["source_sha256"].items()):
         raise ValueError("Fixture/source identity changed")
     return record

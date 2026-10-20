@@ -60,6 +60,21 @@ class Package(unittest.TestCase):
             self.assertIn("source/"+script,z.namelist())
             self.assertNotIn("source/tools/arbitrary.ps1",z.namelist())
 
+    def test_gnu_bootstrap_requires_exact_notice_and_link_map_certificates(self):
+        self.cert["compiler_abi"]="llvm-mingw-ucrt-static-cxx-v1"
+        self.certificate.write_text(json.dumps(self.cert))
+        with self.assertRaisesRegex(ValueError,"runtime notices"):self.package()
+        notices={}
+        for name in dist.GNU_NOTICES:
+            p=self.root/name;p.parent.mkdir(exist_ok=True);p.write_text("synthetic licensed runtime notice")
+            notices[name]=dist.digest(p.read_bytes())
+        self.cert["runtime_notices"]=notices
+        (self.root/"setup-ui-link.map").write_text("synthetic linker provenance")
+        self.cert["link_map_sha256"]=dist.digest((self.root/"setup-ui-link.map").read_bytes())
+        self.certificate.write_text(json.dumps(self.cert))
+        with zipfile.ZipFile(self.package()) as z:
+            self.assertTrue(dist.GNU_NOTICES.issubset(z.namelist()))
+
     def test_game_executable_cannot_replace_certified_bootstrap(self):
         self.exe.write_bytes(b"MZsynthetic game-linked binary")
         with self.assertRaisesRegex(ValueError,"code-free"):self.package()

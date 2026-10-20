@@ -35,7 +35,13 @@ class Fixture(unittest.TestCase):
             fixture.verify(self.output)
         (self.output/"host-stub.c").unlink()
         (self.output/"rc_public_link_only.c").write_text("void host_fake(void) {}")
-        with self.assertRaisesRegex(ValueError,"identity changed"):
+        with self.assertRaisesRegex(ValueError,"public guest schema"):
+            fixture.verify(self.output)
+        # Recomputing an untrusted sidecar cannot authorize host stubs either.
+        marker=self.output/"public-link-fixture.json"
+        record=json.loads(marker.read_text());record["files"]["rc_public_link_only.c"]=fixture.sha(self.output/"rc_public_link_only.c")
+        marker.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError,"public guest schema"):
             fixture.verify(self.output)
 
     def test_no_outside_output_and_no_new_guest_dependency_without_review(self):

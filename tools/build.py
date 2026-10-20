@@ -72,7 +72,7 @@ def main():
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
-    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe):
+    if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe or a.managed_runtime_link):
         ap.error("--only-file cannot be combined with a test/library mode")
     if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
         ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")

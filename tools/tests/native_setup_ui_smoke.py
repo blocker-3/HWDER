@@ -121,8 +121,8 @@ def shot(hwnd,name):
         u.SetThreadDpiAwarenessContext(previous)
 def start(mode,name,data=None):
     data=Path(data) if data else OUT/name
-    windows=Path(os.environ.get("SystemRoot",r"C:\Windows"))
-    env={**os.environ,"PATH":os.pathsep.join(map(str,(windows/"System32",windows)))}
+    system_root=Path(os.environ.get("SystemRoot",r"C:\Windows"))
+    env={**os.environ,"PATH":os.pathsep.join(map(str,(system_root/"System32",system_root)))}
     p=subprocess.Popen([str(EXE),*([mode] if mode else []),"--data",str(data)],env=env)
     active.append(p);image=c.create_unicode_buffer(32768);size=w.DWORD(len(image))
     require(k.QueryFullProcessImageNameW(w.HANDLE(int(p._handle)),0,image,c.byref(size)),"Owned image identity unavailable")
@@ -158,7 +158,13 @@ try:
     installed=ROOT/"build/private-toolchain-data"
     if (installed/"managed-tools").is_dir():
         p,h=start("","normal-installed",installed)
-        click(h,107);wait(lambda:"Requirements ready" in status(h) and enabled(h,111),seconds=120)
+        click(h,107)
+        def normal_checked():
+            current=status(h)
+            if any(word in current for word in ("did not finish","Private tools need","Private tools are not ready")):
+                raise AssertionError("Normal private Check failed: "+current)
+            return "Requirements ready" in current and enabled(h,111)
+        wait(normal_checked,seconds=360)
         require(not enabled(h,112),"Tool-only Check enabled game Play")
         shot(h,"02c-private-tools-checked")
         checks.append("Normal native Check traverses system PowerShell → certified private Python → private bridge with Windows-only PATH; no download/game")

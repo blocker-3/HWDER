@@ -13,6 +13,8 @@ import zipfile
 
 import make_dist
 
+GNU_NOTICES={"runtime-notices/LLVM-LICENSE.TXT","runtime-notices/COPYING.MinGW-w64-runtime.txt"}
+GNU_OPTIONAL_NOTICES={"runtime-notices/COPYING.winpthreads.txt"}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -71,6 +73,18 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     members = {"source/"+n:b for n,b in files.items()}
     members["source/source-manifest.json"] = json.dumps({n:digest(b) for n,b in files.items()},indent=2).encode()
     members["HWDER Setup.exe"] = data  # The ONLY binary exception. Never a generic *.exe allowance.
+    if cert.get("compiler_abi")=="llvm-mingw-ucrt-static-cxx-v1":
+        notices=cert.get("runtime_notices",{})
+        if not GNU_NOTICES.issubset(notices) or set(notices)-GNU_NOTICES-GNU_OPTIONAL_NOTICES:
+            raise ValueError("Missing or unexpected GNU bootstrap runtime notices")
+        base=Path(certificate).resolve().parent
+        if digest((base/"setup-ui-link.map").read_bytes())!=cert.get("link_map_sha256"):
+            raise ValueError("Bootstrap link-map identity mismatch")
+        for name,sha in notices.items():
+            payload=(base/name).read_bytes()
+            if digest(payload)!=sha:
+                raise ValueError("Bootstrap runtime notice hash mismatch")
+            members[name]=payload
     members["START HERE.txt"] = (
         "HWDER setup prototype\n\nExtract the complete kit into a permanent writable application folder, then open HWDER Setup.exe.\n"
         "The window opens without Python. Install private tools downloads verified tools into your chosen Data folder.\n"
