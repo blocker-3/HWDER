@@ -35,6 +35,7 @@
 #include "hwder/runtime.h"
 #include "interp/camera.h"
 #include "interp/interp.h"
+#include "debug_flags.h"
 
 #pragma clang fp contract(off)
 
@@ -53,7 +54,7 @@ namespace interp {
 // Settings > Display > "120 fps" (settings::video().fps120, switchable while playing); HWDER_GAME_INTERP=0/1
 // overrides it for tests.
 bool game_interp() {
-    static const int env = getenv("HWDER_GAME_INTERP") ? (atoi(getenv("HWDER_GAME_INTERP")) != 0) : -1;
+    static const int env = debug::flag(debug::GameInterp) ? (atoi(debug::str(debug::GameInterp)) != 0) : -1;
     const bool enabled = env >= 0 ? env != 0 : settings::video().fps120.load(std::memory_order_relaxed);
     static std::atomic<bool> announced{false};
     if (enabled && !announced.exchange(true, std::memory_order_relaxed))
@@ -97,10 +98,10 @@ Stats g_st;
 void report_ipc();
 
 void report() {
-    static const bool on = getenv("HWDER_GI_LOG") != nullptr;
+    static const bool on = debug::flag(debug::GiLog);
     static u64 last = 0;
     u64 t = GetTickCount64();
-    static const u64 every = getenv("HWDER_GI_LOG_MS") ? strtoull(getenv("HWDER_GI_LOG_MS"), nullptr, 10) : 5000;
+    static const u64 every = debug::value(debug::GiLogMs, (u64)5000, 10);
     if (t - last < every) return;
     last = t;
     if (on)
