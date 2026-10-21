@@ -342,6 +342,7 @@ struct Framebuffer {
 // Shared across the renderer's units (defined where the comment says).
 extern const char* kPipelineCacheFile;  // vk_renderer.cpp
 double prof_flush();                    // vk_renderer.cpp
+bool drawlog_active();                  // vk_renderer.cpp
 
 class VkRenderer final : public Renderer {
 public:
