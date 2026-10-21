@@ -25,6 +25,7 @@
 #include "gpu/settings.h"
 #include "fs/nsp.h"
 #include "fs/save_dir.h"
+#include "debug_flags.h"
 
 // ------------------------------------------------------------------ dispatch
 // One dense table per module text segment: (addr - text_lo) / 4 -> host function.
@@ -221,7 +222,7 @@ extern "C" void hw_log(const char* fmt, ...) {
 extern "C" void hw_fatal(const char* why) {
     hw_log("fatal: %s", why);
     if (IsDebuggerPresent()) __debugbreak();
-    if (getenv("HWDER_HOLD")) {  // keep the window up showing the reason
+    if (debug::flag(debug::Hold)) {  // keep the window up showing the reason
         display::set_status(std::string("halted: ") + why);
         for (;;) Sleep(1000);
     }
@@ -422,7 +423,7 @@ static void dump_threads() {
     }
 }
 static void start_thread_dumper() {
-    const char* e = getenv("HWDER_THREAD_DUMP");
+    const char* e = debug::str(debug::ThreadDump);
     if (!e || !atoi(e)) return;
     static int period = atoi(e);
     CreateThread(nullptr, 0, [](void*) -> DWORD {
@@ -516,7 +517,7 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
     // (1/60 s, plus 1/30 s for its half-rate mode). Rewriting them to 1/hz together with releasing
     // frames at hz tells us whether the simulation is dt-driven (then high refresh is feasible).
     if (!strcmp(mi.name, "main")) {
-        if (const char* hz = getenv("HWDER_PATCH_DT")) {
+        if (const char* hz = debug::str(debug::PatchDt)) {
             float f = (float)atof(hz);
             if (f >= 30.0f) {
                 float dt = 1.0f / f, dt2 = 2.0f / f;
@@ -627,15 +628,15 @@ int main(int argc, char** argv) {
         // skipped in the settings. Never in directory (dev) mode or in automated runs (HWDER_NO_PRELAUNCH, or
         // HWDER_MUTE with HWDER_OFFSCREEN); HWDER_PRELAUNCH=1 forces it for the latter.
         const bool dev = !env_u8("HWDER_EXEFS").empty() || !env_u8("HWDER_ROMFS").empty() || (!nsp && have_dir);
-        const bool automated = getenv("HWDER_MUTE") && getenv("HWDER_OFFSCREEN") && env_u8("HWDER_PRELAUNCH") != "1";
-        if (!dev && !getenv("HWDER_NO_PRELAUNCH") && !automated)
+        const bool automated = debug::flag(debug::Mute) && debug::flag(debug::Offscreen) && env_u8("HWDER_PRELAUNCH") != "1";
+        if (!dev && !debug::flag(debug::NoPrelaunch) && !automated)
             prelaunch = !nsp || !settings::launch().skip_prelaunch || shift || env_u8("HWDER_PRELAUNCH") == "1";
         if (!nsp && !have_dir && !prelaunch) {
             std::string msg = err.empty() ? "No game data found.\n\nPut your own dump of Hyrule Warriors: Definitive Edition "
                                             "(the .nsp) and your prod.keys next to hwder.exe.\n\n(Looked for *.nsp in: " + dir + ")"
                                           : "Cannot load the game from the NSP:\n\n" + err;
             hw_log("boot: %s", msg.c_str());
-            if (!getenv("HWDER_MUTE")) MessageBoxW(nullptr, to_w(msg).c_str(), L"HWDER", MB_ICONERROR | MB_OK);
+            if (!debug::flag(debug::Mute)) MessageBoxW(nullptr, to_w(msg).c_str(), L"HWDER", MB_ICONERROR | MB_OK);
             return 2;
         }
         if (!prelaunch) hw_log("boot: game data from %s", nsp ? hwfs::nsp::path().c_str() : exefs.c_str());
