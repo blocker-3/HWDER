@@ -1,7 +1,9 @@
 // am: applet manager (appletOE: the application's view of the system: focus, messages, storage).
+#include <algorithm>
 #include <mutex>
 
 #include "common.h"
+#include "hid/host_input.h"
 
 namespace ipc {
 
@@ -113,7 +115,12 @@ public:
         });
         nop({1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 42, 44, 45, 46, 50, 51, 61, 62, 64, 65, 68, 72,
              100, 110, 120});
-        reg(9, [](Request&, Response& rs) { push_handle(rs, make_event()); });   // GetLibraryAppletLaunchableEvent
+        reg(9, [](Request&, Response& rs) {  // GetLibraryAppletLaunchableEvent
+            // The application waits on this before it may create a library applet (the controller screen,
+            // opened with L3 on the warrior select). It is always launchable here, so the event stays signaled.
+            hw_log("am: GetLibraryAppletLaunchableEvent (signaled)");
+            push_handle(rs, make_event(true));
+        });
         reg(40, [](Request&, Response& rs) { rs.push<u64>(1); });                 // CreateManagedDisplayLayer
         reg(43, [](Request&, Response& rs) { rs.push<u64>(1); rs.push<u64>(2); });  // CreateManagedDisplaySeparableLayer
         ret<u32>(63, 0);   // GetIdleTimeDetectionExtension
@@ -140,18 +147,112 @@ public:
     }
 };
 
+constexpr u32 kAppletController = 0x0C;  // AppletId LibraryAppletController (0x0B is the cabinet applet)
+
+// Library applets complete at once. The controller applet (nn::hid::ShowControllerSupport, opened when the
+// player picks 2P) answers with the players the host has: switchbrew "Controller Applet".
 class ILibraryAppletAccessor : public SimpleService {
 public:
     explicit ILibraryAppletAccessor(u32 id) : SimpleService("ILibraryAppletAccessor"), id_(id) {
         reg(0, [](Request&, Response& rs) { push_handle(rs, make_event(true)); });  // GetAppletStateChangedEvent
         ret<u8>(1, 1);                                                               // IsCompleted
         nop({10, 20, 25, 100, 103, 104, 105});                                       // Start, RequestExit, Push*
-        reg(10, [this](Request&, Response&) { hw_log("am: library applet 0x%x started (auto-completes)", id_); });
-        reg(101, [](Request&, Response& rs) { rs.result = ResultNoData; });  // PopOutData
-        reg(106, [](Request&, Response& rs) { push_handle(rs, make_event()); });
+        reg(10, [this](Request&, Response&) {
+            if (id_ == kAppletController) run_controller_applet();
+            else hw_log("am: library applet 0x%x started (auto-completes)", id_);
+        });
+        reg(100, [this](Request& rq, Response&) {  // PushInData(IStorage)
+            auto st = rq.in_services.empty() ? nullptr : std::dynamic_pointer_cast<IStorage>(rq.in_services[0]);
+            if (!st) {
+                hw_log("am: applet 0x%x PushInData without a storage object", id_);
+                return;
+            }
+            in_data_.push_back(st->s_->data);
+        });
+        reg(101, [this](Request&, Response& rs) {  // PopOutData -> IStorage
+            if (out_data_.empty()) return void(rs.result = ResultNoData);
+            auto s = std::make_shared<Storage>();
+            s->data = std::move(out_data_.front());
+            out_data_.pop_front();
+            rs.push_object(std::make_shared<IStorage>(s));
+        });
+        reg(30, [this](Request&, Response&) { hw_log("am: applet 0x%x GetResult -> ok", id_); });  // GetResult
+        reg(104, [this](Request&, Response& rs) {  // PopInteractiveOutData
+            hw_log("am: applet 0x%x PopInteractiveOutData -> no data", id_);
+            rs.result = ResultNoData;
+        });
+        reg(106, [](Request&, Response& rs) { push_handle(rs, make_event()); });  // GetPopOutDataEvent
+        reg(107, [](Request&, Response& rs) { push_handle(rs, make_event()); });  // GetPopInteractiveOutDataEvent
         reg(105, [](Request&, Response& rs) { push_handle(rs, make_event()); });
     }
+
+    // Every applet command is logged so a playtest log shows the full sequence the game uses.
+    void dispatch(Request& rq, Response& rs) override {
+        hw_log("am: applet 0x%x command %u (objs %zu, handles %zu)", id_, rq.command, rq.in_services.size(),
+               rq.copy_handles.size() + rq.move_handles.size());
+        SimpleService::dispatch(rq, rs);
+    }
+
+private:
+    // In data, in push order: LibAppletArgs (0x20), ControllerSupportArgPrivate (0x14: private size, arg size, flag0, flag1,
+    // u8 mode, u8 caller, npad style set, joy hold type), then ControllerSupportArg (0x21C for 4
+    // players, 0x430 for 8: s8 min players, s8 max players, take over connection, left justify, permit
+    // joy dual, single mode, ...). Out: ControllerSupportResultInfo, 0x10 bytes: s8 player count, pad[3],
+    // u32 selected npad id, u32 result (0 ok, 2 cancelled), u32 pad.
+    void run_controller_applet() {
+        int min_players = 1, max_players = 1, mode = 0;
+        u32 controller_type = 0;
+        bool have_arg = false;
+        for (const std::vector<u8>& d : in_data_) {
+            if (d.size() == 0x14) {
+                mode = d[0xA];
+                memcpy(&controller_type, d.data() + 0xC, 4);
+                u32 hold = 0;
+                memcpy(&hold, d.data() + 0x10, 4);
+                hw_log("am: controller applet private arg: mode %d, caller %u, style set 0x%x, hold type %u, flags %u/%u",
+                       mode, d[0xB], controller_type, hold, d[8], d[9]);
+            } else if (d.size() == 0x21C || d.size() == 0x430) {
+                have_arg = true;
+                min_players = (s8)d[0];
+                max_players = (s8)d[1];
+                hw_log("am: controller applet arg (%zu bytes): players %d..%d, take over %u, left justify %u, "
+                       "permit joy dual %u, single mode %u, id colour %u",
+                       d.size(), min_players, max_players, d[2], d[3], d[4], d[5], d[6]);
+            } else if (d.size() == 0x20) {
+                u32 version = 0, api = 0;
+                memcpy(&version, d.data(), 4);
+                memcpy(&api, d.data() + 8, 4);
+                hw_log("am: controller applet common args: version %u, api %u", version, api);
+            } else {
+                hw_log("am: controller applet: unknown in data of %zu bytes", d.size());
+            }
+        }
+        if (!have_arg) hw_log("am: controller applet: no ControllerSupportArg pushed; assuming 1 player");
+        min_players = std::clamp(min_players, 1, hid::kPlayerSlots);
+        max_players = std::clamp(max_players, min_players, hid::kPlayerSlots);
+
+        const u32 slots = hid::connected_slots();
+        int present = 0;
+        for (int i = 0; i < hid::kPlayerSlots; i++)
+            if (slots & (1u << i)) present++;
+        if (present < 1) present = 1;  // player 1 is always reported connected
+        const int count = std::clamp(present, min_players, max_players);
+        // Mode 0 (ShowControllerSupport) answers with the players; other modes (strap guide, firmware
+        // update, key remapping) just return success.
+        u32 result = 0;
+        if (mode == 0 && present < min_players) result = 2;  // fewer players than the game needs: cancelled
+        std::vector<u8> out(0x10, 0);
+        out[0] = (u8)(s8)count;
+        u32 selected = 0;  // npad id of player 1
+        memcpy(out.data() + 4, &selected, 4);
+        memcpy(out.data() + 8, &result, 4);
+        out_data_.push_back(std::move(out));
+        hw_log("am: controller applet: host slots 0x%x (%d present) -> %d player(s), result %u", slots, present, count, result);
+    }
+
     u32 id_;
+    std::vector<std::vector<u8>> in_data_;
+    std::deque<std::vector<u8>> out_data_;
 };
 
 class ILibraryAppletCreator : public SimpleService {

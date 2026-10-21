@@ -619,6 +619,29 @@ static void tab_input(bool& changed) {
     if (ImGui::Checkbox("Read the controller while another window is active", &in.background_pad)) changed = true;
     help("Off: the game ignores the controller while it is in the background. The keyboard is always ignored then.");
 
+    section("Players");
+    {
+        static const char* kb_names[] = {"Off", "Automatic", "Player 1", "Player 2", "Player 3", "Player 4"};
+        int cur = std::clamp(in.keyboard_slot + 1, 0, 5);
+        if (ImGui::BeginCombo("Keyboard plays as", kb_names[cur])) {
+            for (int i = 0; i < 6; i++) {
+                if (ImGui::Selectable(kb_names[i], i == cur)) {
+                    in.keyboard_slot = i - 1;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        help("Controllers take players 1 to 4 in the order they connect. Automatic: the keyboard is the first player\n"
+             "without a controller, so with one controller plugged in the keyboard is player 2 for local co-op.");
+        for (int i = 0; i < hid::kPlayerSlots; i++) {
+            char name[96];
+            hid::slot_name(i, name, sizeof(name));
+            if (name[0]) ImGui::Text("Player %d: %s", i + 1, name);
+            else ImGui::TextDisabled("Player %d: -", i + 1);
+        }
+    }
+
     section("Buttons");
     {
         const bool fixed = hid::face_labels_fixed(family);

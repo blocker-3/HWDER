@@ -133,13 +133,18 @@ void apply(const std::string& dir, bool copy, bool in_game, bool& changed) {
     }
 }
 
-void on_pick(const std::string& dir, bool in_game, bool& changed) {
+void on_pick(const std::string& selected, bool in_game, bool& changed) {
+    std::string dir, report;
+    if (!hwfs::resolve_save_folder(selected, dir, report)) {
+        set_status(kError, report + " The save folder was not changed.");
+        return;
+    }
     if (!writable(dir)) {
         set_status(kError, "Can't write to " + dir + ". Choose another folder.");
         return;
     }
     if (hwfs::same_dir(dir, hwfs::chosen_save_dir())) {
-        set_status(kOk, "That is already the save folder.");
+        set_status(kOk, report.empty() ? "That is already the save folder." : report);
         return;
     }
     const std::string from = hwfs::active_save_dir();
@@ -184,6 +189,7 @@ void opt_save_folder(bool in_game, bool& changed) {
     }
     ImGui::EndDisabled();
     help("Where your saves are kept. The default is the save folder next to hwder.exe.\n"
+         "Choose the save root, or the account folder containing zmha.bin and zmhasd.bin; its root is used automatically.\n"
          "Changing it never moves or deletes saves: if the current folder has any, you are asked whether to copy them,\n"
          "and anything the copy would replace in the new folder is backed up beside it first.");
     ImGui::SameLine();

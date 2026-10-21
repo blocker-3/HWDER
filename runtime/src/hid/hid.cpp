@@ -90,6 +90,7 @@ struct HidState {
     u32 supported_styles = kStyleFullKey | kStyleHandheld | kStyleJoyDual | kStyleJoyLeft | kStyleJoyRight;
     bool id_supported[10] = {true, true, true, true, true, true, true, true, true, true};
     u32 cur_style[10] = {};  // style currently reported per npad entry
+    bool slot_connected[hid::kPlayerSlots] = {};  // host controller or keyboard per player slot
     std::shared_ptr<ReadableEvent> style_event[10];
     s64 hold_type = 0;       // 0 vertical, 1 horizontal
     s64 handheld_mode = 0;
@@ -100,15 +101,15 @@ HidState g_hid;
 
 u8* shm() { return g_hid.shmem->ptr(); }
 
-// Which style the given npad entry exposes now (0 = disconnected).
+// Which style the given npad entry exposes now (0 = disconnected). Player 1 is always connected so the
+// game never loses its controller; players 2..4 follow the host slots (a pad or the keyboard).
 u32 desired_style(int idx) {
     u32 sup = g_hid.supported_styles;
     if (!g_hid.id_supported[idx]) return 0;
-    if (idx == 0) {
+    if (idx == 0 || (idx < hid::kPlayerSlots && g_hid.slot_connected[idx])) {
         if (sup & kStyleFullKey) return kStyleFullKey;
         if (sup & kStyleJoyDual) return kStyleJoyDual;
-        if (sup & kStyleHandheld) return 0;  // handheld-only game: entry 8 carries the input
-        return 0;
+        return 0;  // handheld-only game: entry 8 carries the input
     }
     if (idx == 8) return (sup & kStyleHandheld) ? kStyleHandheld : 0;
     return 0;
@@ -208,7 +209,8 @@ void update_once(const hid::HostInput& in) {
     u64 ticks = hw_cntvct();
     u64 s = ++g_hid.sampling;
     u8* m = shm();
-    update_npad_styles();
+    for (int i = 0; i < hid::kPlayerSlots; i++) g_hid.slot_connected[i] = in.connected[i];
+    update_npad_styles();  // signals the style event on a hot-plug so the game re-reads the npad
 
     lifo_push_empty(m + kOffDebugPad, 0x28, s, ticks);
     lifo_push(m + kOffTouch, 0x298, s, ticks, [&](u8* p) {
@@ -236,13 +238,15 @@ void update_once(const hid::HostInput& in) {
     for (int i = 0; i < 10; i++) {
         u8* e = m + kOffNpad + (u64)i * kNpadEntrySize;
         u32 style = g_hid.cur_style[i];
+        // Entries 0..3 are the player slots; handheld (8) is player 1 too.
+        const hid::PadInput& pad = in.pads[i < hid::kPlayerSlots ? i : 0];
         for (int l = 0; l < 7; l++) {
             u32 lstyle = 1u << l;  // lifo order matches style bits: fullkey, handheld, dual, left, right, palma, sysext
             NpadGenericState st{};
             if (style && style == lstyle) {
-                st.buttons = in.pad.buttons;
-                st.lx = in.pad.lx; st.ly = in.pad.ly;
-                st.rx = in.pad.rx; st.ry = in.pad.ry;
+                st.buttons = pad.buttons;
+                st.lx = pad.lx; st.ly = pad.ly;
+                st.rx = pad.rx; st.ry = pad.ry;
                 if (style == kStyleFullKey) st.attributes = kAttrConnected;
                 else if (style == kStyleHandheld)
                     st.attributes = kAttrConnected | kAttrWired | kAttrLeftConnected | kAttrLeftWired |
@@ -313,9 +317,9 @@ void update_thread() {
             // B leaves a sub-screen, Up x3 reaches Start Battle at the top, A starts.
             const bool prebattle = skip && hw_last_frame_draws.load() >= 90;
             if (prebattle && !in_battle) {
-                if (c < 100) in.pad.buttons |= hid::kBtnB;
-                if ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)) in.pad.buttons |= hid::kBtnUp;
-                if (c >= 1500 && c < 1620) in.pad.buttons |= hid::kBtnA;
+                if (c < 100) in.pads[0].buttons |= hid::kBtnB;
+                if ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)) in.pads[0].buttons |= hid::kBtnUp;
+                if (c >= 1500 && c < 1620) in.pads[0].buttons |= hid::kBtnA;
             }
             if (skip && !prebattle && t > 8000 && !in_battle) {
                 u64 s6 = t % 6000;
@@ -328,58 +332,58 @@ void update_thread() {
                     static u64 menu_since = 0;
                     if (!menu_since && hw_last_frame_draws.load() >= 40) menu_since = t;
                     if (s6 < 10) skip_armed = hw_last_frame_draws.load() < 30 || (menu_since && t - menu_since > 10000);
-                    if (skip_armed) in.pad.buttons |= hid::kBtnPlus;
+                    if (skip_armed) in.pads[0].buttons |= hid::kBtnPlus;
                 }
-                if (s6 >= 1000 && s6 < 1120 && skip_armed) in.pad.buttons |= hid::kBtnLeft;
-                if (s6 >= 1500 && s6 < 1620) in.pad.buttons |= hid::kBtnA;
-                if (s6 >= 3000 && s6 < 3120) in.pad.buttons |= hid::kBtnA;
-                if (s6 >= 4600 && s6 < 4720) in.pad.buttons |= hid::kBtnA;
+                if (s6 >= 1000 && s6 < 1120 && skip_armed) in.pads[0].buttons |= hid::kBtnLeft;
+                if (s6 >= 1500 && s6 < 1620) in.pads[0].buttons |= hid::kBtnA;
+                if (s6 >= 3000 && s6 < 3120) in.pads[0].buttons |= hid::kBtnA;
+                if (s6 >= 4600 && s6 < 4720) in.pads[0].buttons |= hid::kBtnA;
             }
             if (!skip && t > 5000 && !in_battle) {
-                if (t > 25000 && c < 100) in.pad.buttons |= hid::kBtnB;
+                if (t > 25000 && c < 100) in.pads[0].buttons |= hid::kBtnB;
                 if (t > 25000 && ((c >= 500 && c < 600) || (c >= 800 && c < 900) || (c >= 1100 && c < 1200)))
-                    in.pad.buttons |= hid::kBtnUp;
-                if (c >= 1500 && c < 1620) in.pad.buttons |= hid::kBtnA;
+                    in.pads[0].buttons |= hid::kBtnUp;
+                if (c >= 1500 && c < 1620) in.pads[0].buttons |= hid::kBtnA;
             }
-            if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pad.buttons |= hid::kBtnPlus;  // loading tips
+            if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pads[0].buttons |= hid::kBtnPlus;  // loading tips
             static const bool idle_in_battle = getenv("HWDER_AUTOPLAY_IDLE") != nullptr;  // experiments: no input in battle
             if (in_battle && !idle_in_battle) {
-                if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
-                in.pad.ly = 20000;
-                in.pad.lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
+                if ((t % 800) < 100) in.pads[0].buttons |= hid::kBtnY;
+                in.pads[0].ly = 20000;
+                in.pads[0].lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
                 // HWDER_AUTOPLAY_CIRCLE=1: run in a slow circle (one turn every 8 s) so Link crosses the map
                 // and the view covers every direction instead of pushing against a wall.
                 static const bool circle = getenv("HWDER_AUTOPLAY_CIRCLE") != nullptr;
                 if (circle) {
                     double a = (t % 8000) / 8000.0 * 6.283185307;
-                    in.pad.lx = (s32)(24000 * std::cos(a));
-                    in.pad.ly = (s32)(24000 * std::sin(a));
+                    in.pads[0].lx = (s32)(24000 * std::cos(a));
+                    in.pads[0].ly = (s32)(24000 * std::sin(a));
                 }
                 // HWDER_AUTOPLAY_CAM=1: also turn the camera with the right stick (2 s right, 2 s left,
                 // 2 s still), for camera interpolation tests.
                 static const bool cam = getenv("HWDER_AUTOPLAY_CAM") != nullptr;
-                if (cam) in.pad.rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
+                if (cam) in.pads[0].rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
             }
         } else if (autoplay) {
             u64 t = GetTickCount64() - t0;
             u64 c = t % 4000;
             // Generic advance: A every 1.5 s. Skip cutscenes: + opens "Skip cutscene?", Left selects Yes, A confirms.
-            if (t > 5000 && (t % 1500) < 120) in.pad.buttons |= hid::kBtnA;
+            if (t > 5000 && (t % 1500) < 120) in.pads[0].buttons |= hid::kBtnA;
             // The skip sequence only during the window where the opening cutscenes play (otherwise +
             // interferes with menus such as the mission list).
             bool skip_window = t > 18000 && t < 34000;
-            if (skip_window && c >= 700 && c < 900) in.pad.buttons |= hid::kBtnPlus;
-            if (skip_window && c >= 1600 && c < 1720) in.pad.buttons |= hid::kBtnLeft;
-            if (skip_window && c >= 2100 && c < 2220) in.pad.buttons |= hid::kBtnA;
-            if (skip_window && c >= 2600 && c < 2720) in.pad.buttons |= hid::kBtnA;
+            if (skip_window && c >= 700 && c < 900) in.pads[0].buttons |= hid::kBtnPlus;
+            if (skip_window && c >= 1600 && c < 1720) in.pads[0].buttons |= hid::kBtnLeft;
+            if (skip_window && c >= 2100 && c < 2220) in.pads[0].buttons |= hid::kBtnA;
+            if (skip_window && c >= 2600 && c < 2720) in.pads[0].buttons |= hid::kBtnA;
             // In battle (after ~50 s): close any menu with B now and then, run forward and attack.
             if (t > 50000) {
                 // Loading-screen tips wait for Start; a B 1.5 s later closes the pause menu if that is what + opened.
-                if ((t % 12000) < 150) in.pad.buttons |= hid::kBtnPlus;
-                if ((t % 12000) >= 1500 && (t % 12000) < 1620) in.pad.buttons |= hid::kBtnB;
-                if ((t % 800) < 100) in.pad.buttons |= hid::kBtnY;
-                in.pad.ly = 20000;
-                in.pad.lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
+                if ((t % 12000) < 150) in.pads[0].buttons |= hid::kBtnPlus;
+                if ((t % 12000) >= 1500 && (t % 12000) < 1620) in.pads[0].buttons |= hid::kBtnB;
+                if ((t % 800) < 100) in.pads[0].buttons |= hid::kBtnY;
+                in.pads[0].ly = 20000;
+                in.pads[0].lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
             }
         }
         update_once(in);
@@ -412,18 +416,20 @@ public:
 };
 
 // Vibration handle: u8 type, u8 npad id, u8 device index (0 left, 1 right), u8 pad.
-// Left device drives the low-frequency (big) motor, right device the high-frequency one.
+// Left device drives the low-frequency (big) motor, right device the high-frequency one. Npad N goes to
+// player slot N; handheld is player 1.
 void send_vibration(u32 handle, const float v[4]) {
     u8 npad = (u8)(handle >> 8), dev = (u8)(handle >> 16);
-    if (npad != 0 && npad != kNpadHandheld) return;
+    int slot = npad == kNpadHandheld ? 0 : npad < hid::kPlayerSlots ? (int)npad : -1;
+    if (slot < 0) return;
     static std::mutex m;
-    static float amp[2] = {0, 0}, sent[2] = {-1, -1};
+    static float amp[hid::kPlayerSlots][2] = {}, sent[hid::kPlayerSlots][2] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}};
     std::lock_guard<std::mutex> l(m);
-    amp[dev & 1] = std::max(v[0], v[2]);
-    if (amp[0] == sent[0] && amp[1] == sent[1]) return;
-    sent[0] = amp[0];
-    sent[1] = amp[1];
-    hid::set_rumble(amp[0], amp[1]);
+    amp[slot][dev & 1] = std::max(v[0], v[2]);
+    if (amp[slot][0] == sent[slot][0] && amp[slot][1] == sent[slot][1]) return;
+    sent[slot][0] = amp[slot][0];
+    sent[slot][1] = amp[slot][1];
+    hid::set_rumble(slot, amp[slot][0], amp[slot][1]);
 }
 
 class IHidServer : public SimpleService {

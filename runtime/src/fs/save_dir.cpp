@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include "fs/save_dir.h"
+#include "fs/save_folder_selection.h"
 
 #include <ctime>
 #include <filesystem>
@@ -57,7 +58,19 @@ std::string default_save_dir() { return wide_to_utf8(strip_prefix(exe_dir()) + L
 
 std::string chosen_save_dir() {
     const std::string& s = settings::launch().save_dir;
-    return s.empty() ? default_save_dir() : wide_to_utf8(normalize(s));
+    if (s.empty()) return default_save_dir();
+    std::string root, report;
+    // Also repair the interpretation of a leaf already saved by an older picker.
+    // Do not rewrite preferences or move/copy any save files here.
+    return resolve_save_folder(s, root, report) ? root : wide_to_utf8(normalize(s));
+}
+
+bool resolve_save_folder(const std::string& selected, std::string& root, std::string& report) {
+    const auto result = inspect_save_folder(fsys::path(normalize(selected)));
+    root = result.error ? "" : wide_to_utf8(result.root.wstring());
+    report = result.error ? result.error : result.account_leaf
+        ? "Recognized the account save folder. The save root used by the game is " + root + "." : "";
+    return !result.error;
 }
 
 std::wstring active_save_root() {
