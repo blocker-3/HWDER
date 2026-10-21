@@ -381,7 +381,10 @@ extern "C" void f_10003d45cc_orig(Ctx* c);
 
 // Hook (tools/recomp/hooks.txt): x0 = scene object, w1 = render buffer index (S + 0x710dc), used
 // mod 3. Must leave Ctx exactly as the original does; only reads guest memory after it returns.
+extern "C" void hw_widescreen_tick();  // game/widescreen.cpp
+
 extern "C" void f_10003d45cc(Ctx* c) {
+    hw_widescreen_tick();
     u64 scene = c->x[0];
     u32 slot = (u32)c->x[1];
     f_10003d45cc_orig(c);
