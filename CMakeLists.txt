@@ -88,6 +88,7 @@ add_subdirectory(${TP}/SDL ${CMAKE_BINARY_DIR}/SDL EXCLUDE_FROM_ALL)
 # Explicit lists: the checkout path may contain [ ] which CMake globs treat as patterns.
 set(RUNTIME_SOURCES
     runtime/src/core.cpp
+    runtime/src/debug_flags.cpp
     runtime/src/threads.cpp
     runtime/src/config.cpp
     runtime/src/version.cpp
