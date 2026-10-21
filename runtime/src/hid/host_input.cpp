@@ -319,18 +319,21 @@ void apply_rumble(SdlPad* active) {
             g_rumble_sent[0] = g_rumble_sent[1] = 0;
             g_rumble_at = 0;
         }
-        if (!active || !active->rumble) return;
-        // SDL rumble runs for a set time: refresh it while the game keeps it on.
-        const u64 now = GetTickCount64();
-        // While the slider drags, send a new preview strength at most every 50 ms.
-        if (preview && now - g_rumble_at < 50) return;
-        if (lo != g_rumble_sent[0] || hi != g_rumble_sent[1] || ((lo || hi) && now - g_rumble_at > 1000)) {
-            SDL_RumbleGamepad(active->gp, lo, hi, (lo || hi) ? 2000 : 0);
-            g_rumble_sent[0] = lo;
-            g_rumble_sent[1] = hi;
-            g_rumble_at = now;
+        if (active) {
+            if (!active->rumble) return;
+            // SDL rumble runs for a set time: refresh it while the game keeps it on.
+            const u64 now = GetTickCount64();
+            // While the slider drags, send a new preview strength at most every 50 ms.
+            if (preview && now - g_rumble_at < 50) return;
+            if (lo != g_rumble_sent[0] || hi != g_rumble_sent[1] || ((lo || hi) && now - g_rumble_at > 1000)) {
+                SDL_RumbleGamepad(active->gp, lo, hi, (lo || hi) ? 2000 : 0);
+                g_rumble_sent[0] = lo;
+                g_rumble_sent[1] = hi;
+                g_rumble_at = now;
+            }
+            return;
         }
-        return;
+        // No SDL pad open: the XInput fallback pad (poll_host_input), if any, rumbles below.
     }
     if (!g_set_state || g_active_pad < 0 || (lo == g_rumble_sent[0] && hi == g_rumble_sent[1])) return;
     XINPUT_VIBRATION v;
@@ -472,8 +475,10 @@ void poll_host_input(HostInput& out) {
 
     RawPad raw;
     SdlPad* active = nullptr;
+    // With no SDL pad open, XInput too: SDL can miss a pad paired while the game runs (no hot-plug event
+    // arrives), while XInput sees an Xbox pad as soon as Windows connects it.
     if (g_sdl_ok) active = sdl_poll(cfg.motion, raw, out.motion);
-    else poll_xinput(raw);
+    if (!active) poll_xinput(raw);
     apply_rumble(active);
     if (!focused && !cfg.background_pad) {
         // Keep the pad's identity for the menu, drop its input.
