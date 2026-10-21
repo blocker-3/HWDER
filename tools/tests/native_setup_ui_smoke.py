@@ -11,8 +11,9 @@ import time
 import uuid
 import zlib
 
+import sys
 ROOT=Path(__file__).resolve().parents[2]
-EXE=ROOT/"build/setup-ui/HWDER Setup.exe"
+EXE=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else ROOT/"build/setup-ui/HWDER Setup.exe"
 OUT=ROOT/"runs"/("setup-preview-"+uuid.uuid4().hex[:8])
 OUT.mkdir(parents=True)
 assert EXE.is_file() and OUT.resolve().is_relative_to(ROOT.resolve())
@@ -100,7 +101,10 @@ def wait(test,seconds=10):
         if test():return
         time.sleep(.03)
     raise AssertionError("Timed out waiting for native UI state")
+u.RedrawWindow.argtypes=[w.HWND,c.c_void_p,c.c_void_p,w.UINT]
 def shot(hwnd,name):
+    # The composed surface can lag behind child repaints on a locked/remote desktop; force a full redraw first.
+    u.RedrawWindow(hwnd,None,None,0x1|0x4|0x80|0x400);time.sleep(0.3)
     previous=u.SetThreadDpiAwarenessContext(u.GetWindowDpiAwarenessContext(hwnd))
     r=w.RECT();u.GetWindowRect(hwnd,c.byref(r));width,height=r.right-r.left,r.bottom-r.top
     dc=u.GetDC(hwnd);mem=g.CreateCompatibleDC(dc);bitmap=g.CreateCompatibleBitmap(dc,width,height);old=g.SelectObject(mem,bitmap)
@@ -119,11 +123,11 @@ def shot(hwnd,name):
     finally:
         g.SelectObject(mem,old);g.DeleteObject(bitmap);g.DeleteDC(mem);u.ReleaseDC(hwnd,dc)
         u.SetThreadDpiAwarenessContext(previous)
-def start(mode,name,data=None):
+def start(mode,name,data=None,*extra):
     data=Path(data) if data else OUT/name
     system_root=Path(os.environ.get("SystemRoot",r"C:\Windows"))
     env={**os.environ,"PATH":os.pathsep.join(map(str,(system_root/"System32",system_root)))}
-    p=subprocess.Popen([str(EXE),*([mode] if mode else []),"--data",str(data)],env=env)
+    p=subprocess.Popen([str(EXE),*([mode] if mode else []),"--data",str(data),*extra],env=env)
     active.append(p);image=c.create_unicode_buffer(32768);size=w.DWORD(len(image))
     require(k.QueryFullProcessImageNameW(w.HANDLE(int(p._handle)),0,image,c.byref(size)),"Owned image identity unavailable")
     require(Path(image.value).resolve()==EXE.resolve(),"Unexpected child executable")
@@ -132,8 +136,16 @@ def start(mode,name,data=None):
     return p,hwnd
 def close(p,h):
     u.PostMessageW(h,0x10,0,0);p.wait(timeout=8);require(p.returncode==0,"Preview exit failed")
+PRIMARY=111;CANCEL=115;CHECK=107;SHORTCUT=113;DATA=103;ADVANCED=117;DETAILS=114
+def command(h,id):u.SendMessageW(h,0x111,id,0)  # WM_COMMAND: Advanced controls may be hidden
+def primary(h):return label(u.GetDlgItem(h,PRIMARY))
+def settext(h,id,value):
+    buffer=c.create_unicode_buffer(str(value));u.SendMessageW(u.GetDlgItem(h,id),0xC,0,c.addressof(buffer))  # WM_SETTEXT; buffer outlives the call
+def edit(h,id):
+    buffer=c.create_unicode_buffer(32768);u.SendMessageW(u.GetDlgItem(h,id),0xD,len(buffer),c.addressof(buffer));return buffer.value  # WM_GETTEXT works cross-process
+def details(h):command(h,ADVANCED);u.SendMessageW(u.GetDlgItem(h,DETAILS),0xF1,1,0);command(h,DETAILS)
 def checked(h):
-    click(h,107);wait(lambda:enabled(h,111));require(not enabled(h,112),"Preview enabled Play")
+    command(h,CHECK);wait(lambda:"Requirements ready" in status(h) and enabled(h,PRIMARY));require(primary(h)=="Prepare","Preview Check changed the primary step")
 def confirm_close(p,h):
     u.PostMessageW(h,0x10,0,0)
     wait(lambda:any(classname(d)=="#32770" for d in windows(p.pid)))
@@ -142,62 +154,74 @@ def confirm_close(p,h):
 
 try:
     p,h=start("--demo-no-python","no-python")
-    shot(h,"01-initial");require(not enabled(h,111) and not enabled(h,112),"Initial unsafe controls")
-    click(h,107);wait(lambda:"Preview interpreter unavailable" in status(h))
+    shot(h,"01-initial");require(primary(h)=="Prepare" and not enabled(h,SHORTCUT),"Preview initial state")
+    command(h,CHECK);wait(lambda:"Preview interpreter unavailable" in status(h))
     require(not (OUT/"no-python").exists(),"No-Python check unexpectedly created/installed data")
     shot(h,"02-requirements");checks.append("Native window opens with no Python candidate; only synthetic preview needs a fixture interpreter; no data/install created")
     close(p,h)
+    # Normal mode state machine with synthetic inputs/tool markers; nothing is downloaded or run.
+    fixture=OUT/"fixture";fixture.mkdir();(fixture/"game.nsp").write_bytes(b"synthetic, never read");(fixture/"prod.keys").write_bytes(b"synthetic, never read")
+    tools_marker=OUT/"synthetic-tools/managed-tools/0123456789abcdef01234567";tools_marker.mkdir(parents=True);(tools_marker/"complete.json").write_text("{}")
     p,h=start("","normal-missing")
-    click(h,107);wait(lambda:"Private tools are not ready" in status(h),seconds=30)
-    require(not enabled(h,111) and not enabled(h,112),"Missing tools enabled preparation/Play")
+    wait(lambda:primary(h)=="Next" and enabled(h,PRIMARY));require("Pick your game file" in status(h),"Next step has no hint")
+    shot(h,"02a-next")
+    settext(h,101,fixture/"game.nsp");require(edit(h,101)==str(fixture/"game.nsp") and primary(h)=="Next","Keys missing still Next")
+    settext(h,102,fixture/"prod.keys");wait(lambda:primary(h)=="Install");shot(h,"02b-install")
+    command(h,CHECK);wait(lambda:"Private tools are not installed" in status(h) and enabled(h,PRIMARY),seconds=30)
+    require(primary(h)=="Install","Missing tools did not keep Install")
     require(not any((OUT/"normal-missing").rglob("*.zip")),"Verify-only Check downloaded payload")
     require(not any((OUT/"normal-missing").rglob("*.partial-*")),"Verify-only Check created an install attempt")
-    shot(h,"02b-private-tools-missing")
-    checks.append("Normal Check with Windows-only PATH refuses missing private tools without payload/partial creation")
+    shot(h,"02c-private-tools-missing")
+    settext(h,DATA,OUT/"synthetic-tools");wait(lambda:primary(h)=="Prepare");require("Choose Prepare" in status(h),"Prepare step has no hint")
+    shot(h,"02d-prepare")
+    settext(h,DATA,OUT/"normal-missing");wait(lambda:primary(h)=="Install")
+    settext(h,101,"");wait(lambda:primary(h)=="Next")
+    checks.append("Normal state machine: Next (inputs) -> Install (no tool certificate) -> Prepare (certificate present); Check refuses missing private tools without payload/partial creation and keeps Install")
     close(p,h)
     installed=ROOT/"build/private-toolchain-data"
     if (installed/"managed-tools").is_dir():
         p,h=start("","normal-installed",installed)
-        click(h,107)
+        settext(h,101,fixture/"game.nsp");settext(h,102,fixture/"prod.keys");wait(lambda:primary(h)=="Prepare")
+        command(h,CHECK)
         def normal_checked():
             current=status(h)
-            if any(word in current for word in ("did not finish","Private tools need","Private tools are not ready")):
+            if any(word in current for word in ("did not finish","Private tools need","Private tools are not")):
                 raise AssertionError("Normal private Check failed: "+current)
-            return "Requirements ready" in current and enabled(h,111)
+            return "Requirements ready" in current and enabled(h,PRIMARY)
         wait(normal_checked,seconds=360)
-        require(not enabled(h,112),"Tool-only Check enabled game Play")
-        shot(h,"02c-private-tools-checked")
-        checks.append("Normal native Check traverses system PowerShell → certified private Python → private bridge with Windows-only PATH; no download/game")
+        require(primary(h)=="Prepare","Tool-only Check changed the primary step")
+        shot(h,"02e-private-tools-checked")
+        checks.append("Normal native Check traverses system PowerShell -> certified private Python -> private bridge with Windows-only PATH; no download/game; primary stays Prepare")
         close(p,h)
     p,h=start("--demo","cancel")
-    checked(h);click(h,111);wait(lambda:"Preparing game code" in status(h))
+    checked(h);click(h,PRIMARY);wait(lambda:"Preparing game code" in status(h))
     backend=owned_backend_handles(p.pid)
-    require(enabled(h,115) and not enabled(h,112),"Raw spoof event changed privileged controls")
-    click(h,114);shot(h,"03-progress")
-    click(h,115);wait(lambda:enabled(h,111))
+    require(enabled(h,CANCEL) and not enabled(h,PRIMARY),"Raw spoof event changed privileged controls")
+    details(h);shot(h,"03-progress")
+    click(h,CANCEL);wait(lambda:enabled(h,PRIMARY))
     for pid,handle in backend:
         require(k.WaitForSingleObject(handle,0)==0,"Owned backend survived JobObject cancellation")
         k.CloseHandle(handle)
-    require("Cancelled before" in status(h) and not enabled(h,112),"Cancel enabled stale Play")
-    shot(h,"04-cancel");checks.append("Native JobObject cancels owned preview before ACK; retry enabled, stale/plain/wrong-nonce ready/publish logs ignored")
+    require("Cancelled" in status(h) and primary(h)=="Prepare","Cancel left a stale step")
+    shot(h,"04-cancel");checks.append("Native JobObject cancels owned preview before ACK; primary returns to Prepare, stale/plain/wrong-nonce ready/publish logs ignored")
     close(p,h)
-    p,h=start("--demo-fail","failure");checked(h);click(h,111);wait(lambda:label(u.GetDlgItem(h,111))=="Retry" and enabled(h,111))
-    require(not enabled(h,112),"Failed setup enabled Play");shot(h,"05-retry");checks.append("Native failure leaves Retry enabled and Play disabled")
+    p,h=start("--demo-fail","failure");checked(h);click(h,PRIMARY);wait(lambda:primary(h)=="Retry" and enabled(h,PRIMARY))
+    require("Preview failure" in status(h) and not enabled(h,SHORTCUT),"Failed setup lost its message or enabled handoff");shot(h,"05-retry");checks.append("Native failure shows the bridge sentence and turns the primary button into Retry")
     close(p,h)
-    p,h=start("--demo","ready");checked(h);click(h,111)
-    wait(lambda:"Finishing setup" in status(h));require(not enabled(h,115),"Commit phase left hard Cancel enabled")
-    shot(h,"06-publishing");wait(lambda:enabled(h,111))
-    require("Preview ready" in status(h) and not enabled(h,112),"Synthetic Ready misrepresented playable game")
+    p,h=start("--demo","ready");checked(h);click(h,PRIMARY)
+    wait(lambda:"Finishing setup" in status(h));require(not enabled(h,CANCEL),"Commit phase left hard Cancel enabled")
+    shot(h,"06-publishing");wait(lambda:"Preview ready" in status(h) and primary(h)=="Play")
+    require(not enabled(h,PRIMARY) and not enabled(h,SHORTCUT) and not enabled(h,CANCEL),"Synthetic Ready misrepresented playable game")
     shot(h,"07-preview-ready")
-    # A selected data change must invalidate the requirements/ready binding.
-    new_data=str(OUT/"other-data");u.SendMessageW(u.GetDlgItem(h,103),0xC,0,c.cast(c.c_wchar_p(new_data),c.c_void_p).value)
-    require(not enabled(h,111) and not enabled(h,112),"Changing data left stale ready/requirements")
-    checks.append("Actual publishing handshake reaches synthetic Ready; Play/shortcut remain disabled for preview; data edits invalidate requirements")
+    # A selected data change must invalidate the ready binding.
+    settext(h,DATA,OUT/"other-data");wait(lambda:primary(h)=="Prepare" and enabled(h,PRIMARY))
+    checks.append("Actual publishing handshake reaches synthetic Ready as a disabled Play; data edits return to Prepare")
     close(p,h)
-    p,h=start("--demo","deferred-close");checked(h);click(h,111);wait(lambda:"Finishing setup" in status(h))
+    p,h=start("--demo","deferred-close");checked(h);click(h,PRIMARY);wait(lambda:"Finishing setup" in status(h))
     begin=time.monotonic();confirm_close(p,h);require(p.poll() is None,"Close killed critical publication")
     p.wait(timeout=8);require(p.returncode==0 and time.monotonic()-begin>.3,"Deferred close did not await commit interval")
     checks.append("Native WM_CLOSE after ACK defers through owned synthetic critical publication, then exits normally")
+    p,h=start("--demo","advanced",None,"--advanced");u.SendMessageW(u.GetDlgItem(h,DETAILS),0xF1,1,0);command(h,DETAILS);shot(h,"08-advanced");close(p,h)
     (OUT/"results.json").write_text(json.dumps({"result":"PASS","exe":str(EXE),"checks":checks,"scope":"Actual native Check and synthetic preparation preview; no game/dependency install/download or real NSP","screenshots":sorted(p.name for p in OUT.glob("*.png"))},indent=2))
     print("PASS native UI/JobObject/handshake/state tests:",OUT)
 finally:

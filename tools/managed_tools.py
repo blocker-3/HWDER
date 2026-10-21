@@ -482,7 +482,7 @@ def main():
             return subprocess.run(command,env=environment(directory,value)).returncode
         except (ValueError,OSError,subprocess.SubprocessError) as error:
             event("log",str(error))
-            event("failed","Private tools need verification. Choose Install private tools, then Check requirements.")
+            event("failed","Private tools are not installed for this kit yet. Choose Install (about 260 MB, no administrator access).",next="install")
             return 1
     if not args.install:
         print(json.dumps({"manifest_sha256": first_run.file_hash(MANIFEST), "downloads": value["artifacts"]}, indent=2))
@@ -491,7 +491,7 @@ def main():
                      progress=lambda name, got, total:event("stage",f"Downloading {name}: {got//1048576} MiB received",stage="tools"),
                      phase=phase)
     print("tools: verified " + str(result), flush=True)
-    event("components_ready","Private tools installed and verified. Choose Check requirements next.")
+    event("components_ready","Private tools installed and verified. Choose Prepare next.")
 
 
 if __name__ == "__main__":

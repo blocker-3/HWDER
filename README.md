@@ -20,13 +20,15 @@ The native Windows setup prototype on this branch opens without installed Python
 Studio. See [the setup guide and validation limits](docs/windows-setup.md).
 
 1. Extract the entire setup kit into a permanent writable folder and open **HWDER Setup.exe**.
-2. Choose a **Data folder**, then **Install private tools**. Review the download consent.
-   Pinned Python, LLVM-MinGW, CMake, Ninja and Python packages stay in that folder; no administrator
-   access, system installation or global PATH change is needed. The kit itself bundles no toolchain.
-3. Browse to your own supported `.nsp` and `prod.keys` files. These paths are used in place; keys
-   are never copied. Choose **Check requirements**, then **Prepare game**.
-4. After successful preparation, choose **Play** or create a desktop shortcut. Preparation never
-   launches automatically. **Show details** displays progress/errors; interrupted work can be retried.
+2. The window has one main button that tells you the next step. **Next** opens the file pickers for
+   your own supported `.nsp` and `prod.keys`; the paths are used in place and keys are never copied.
+3. **Install** downloads pinned private tools into the Data folder (default `%LOCALAPPDATA%\HWDER`)
+   after you confirm the download: Python, LLVM-MinGW, CMake, Ninja and four Python packages. No
+   administrator access, system installation or global PATH change; the kit itself bundles no toolchain.
+4. **Prepare** checks the tools and your dump, extracts, generates C and builds the game, showing the
+   step, file count and remaining time. **Play** starts the installed game; Setup can be closed.
+5. **Advanced** holds the Data folder, Check requirements (an optional diagnostic), Open game folder,
+   Create Desktop shortcut and the Details log. Next time, Setup opens straight on **Play**.
 
 Preparation validates the exact supported five-module SHA-256 profile, extracts ExeFS, generates
 C and compiles the complete native program locally. Verified stages can be reused. Allow several

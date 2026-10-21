@@ -87,9 +87,10 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
             members[name]=payload
     members["START HERE.txt"] = (
         "HWDER setup prototype\n\nExtract the complete kit into a permanent writable application folder, then open HWDER Setup.exe.\n"
-        "The window opens without Python. Install private tools downloads verified tools into your chosen Data folder.\n"
+        "The window opens without Python. Its one main button leads through Next (pick your NSP and prod.keys),\n"
+        "Install (verified private tools into your Data folder), Prepare (build your game) and Play. Advanced holds the rest.\n"
         "Your own NSP and keys remain in place. No game, generated C, key file, Python package or compiler is bundled.\n"
-        "Only choose Install private tools after reviewing its network/private-environment consent. No system installation is needed.\n"
+        "Only confirm Install after reviewing its network/private-environment consent. No system installation is needed.\n"
         "Preparation can take minutes and several GB. Your data folder keeps saves/settings separately from this kit.\n"
         "This local unsigned prototype is not published or a claim of clean-machine support.\n"
     ).encode()

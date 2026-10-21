@@ -264,7 +264,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     } catch {
         Write-Host $_.Exception.Message
         if ($Nonce -match '^[0-9a-f]{32}$') {
-            Write-Output ('HWDER_UI:'+$Nonce+':'+(@{type='failed';message='Private tools are not ready. Choose Install private tools, then Check requirements. See Details if installation was interrupted.'} | ConvertTo-Json -Compress))
+            Write-Output ('HWDER_UI:'+$Nonce+':'+(@{type='failed';message='Private tools are not installed yet. Choose Install (about 260 MB, no administrator access).';next='install'} | ConvertTo-Json -Compress))
         }
         exit 1
     }

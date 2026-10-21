@@ -67,19 +67,63 @@ def _components_locked(data, create, run):
     emit("components_ready", "Setup components installed. Choose Check requirements next.")
 
 
+STEPS = (("prerequisites", "Checking requirements"), ("validating", "Checking your game"),
+         ("exefs:", "Preparing game files"), ("generated:", "Preparing game code"),
+         ("build:", "Building the game"), ("ready:", "Finishing setup"))
+
+
+def stage_for(message):
+    """Numbered setup step for a backend log line, or None for plain output."""
+    if "hashing" in message:
+        message = "validating"
+    for number, (prefix, title) in enumerate(STEPS, 1):
+        if prefix in message:
+            return number, title
+    return None
+
+
 def stage_log(message):
     if message.startswith("private-tools: "):
         emit("stage",message.removeprefix("private-tools: "),stage="tools")
         return
-    mapping = (("validating", "Checking your game"), ("hashing", "Checking your game"),
-               ("exefs:", "Preparing game files"), ("generated:", "Preparing game code"),
-               ("build:", "Building the game"), ("ready:", "Finishing setup"),
-               ("prerequisites", "Checking requirements"))
-    for prefix, title in mapping:
-        if prefix in message:
-            emit("stage", title, stage=title)
-            break
+    found = stage_for(message)
+    if found:
+        number, title = found
+        emit("stage", f"Step {number} of {len(STEPS)}: {title}", stage=title, step=number, steps=len(STEPS))
     emit("log", message)
+
+
+RECOVERY = (
+    # (substrings of the backend detail, user sentence, next step for the window)
+    (("updates/bundles unsupported", "Expected exactly one base-game program"),
+     "This NSP has an update or is not the base game. Use the base game only, then Prepare again.", "inputs"),
+    (("Unsupported ExeFS module set", "not a supported", "unsupported version", "supported version"),
+     "This dump is not the supported game version. Use the unmodified base game.", "inputs"),
+    (("Cannot decrypt", "decryption key is missing", "Keys file is malformed", "check dump and keys", "check your own dump and keys"),
+     "Your prod.keys cannot open this dump. Use the keys from the same console.", "inputs"),
+    (("game or key file moved", "Supply an existing .nsp", "Choose your NSP and prod.keys"),
+     "Your game or key file moved. Pick it again, then Prepare.", "inputs"),
+    (("Private tools are missing", "Private tool certificate changed", "Private tools are not ready",
+      "Private Python package identity", "Private tools need verification", "Private toolchain"),
+     "Private tools are not installed for this kit yet. Choose Install (about 260 MB, no administrator access).", "install"),
+    (("Your game is running", "Close it before"),
+     "Your game is running. Close it, then try again.", "close"),
+    (("No verified prepared game",),
+     "No prepared game yet. Choose Prepare.", "prepare"),
+    (("build.py", "Build succeeded without", "compil", "ninja", "cmake", "CMake"),
+     "The build did not finish. Open Advanced, Details for the error, then Retry.", "prepare"),
+    (("cancelled", "Cancelled"),
+     "Cancelled. Nothing was changed; choose Prepare to continue.", "prepare"),
+)
+
+
+def recovery(detail):
+    """One plain sentence and the window step it belongs to."""
+    for needles, message, step in RECOVERY:
+        if any(needle in detail for needle in needles):
+            return message, step
+    line = detail.strip().splitlines()[0][:160] if detail.strip() else "unknown error"
+    return "Setup did not finish: " + line.rstrip(".") + ". Fix that, then Retry.", "prepare"
 
 
 def checked_ready(data):
@@ -87,11 +131,11 @@ def checked_ready(data):
     marker = first_run.read_json(data / "last-success.json")
     exe = data / "play/hwder.exe"
     if marker.get("schema") != first_run.SCHEMA or not exe.is_file() or first_run.file_hash(exe) != marker.get("exe_sha256"):
-        raise ValueError("No verified prepared game. Choose Prepare game first.")
+        raise ValueError("No verified prepared game. Choose Prepare first.")
     config = first_run.read_json(data / "setup-inputs.json")
     nsp, keys = Path(config.get("nsp", "")), Path(config.get("keys", ""))
     if not nsp.is_file() or not keys.is_file():
-        raise ValueError("Your original game or key file moved. Browse to it and prepare again.")
+        raise ValueError("Your game or key file moved. Pick it again, then Prepare.")
     return exe, nsp, keys
 
 
@@ -239,7 +283,7 @@ def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=Non
     with backend.setup_lock(data):
         existing = data / "play/hwder.exe"
         if existing.is_file() and (running_game(data, existing) or discovered_game(existing)):
-            raise ValueError("Your game is running. Close it before preparing again.")
+            raise ValueError("Your game is running. Close it, then try again.")
         exe = backend.prepare(first_run.ROOT, data, nsp, keys, max(1, min(8, os.cpu_count() or 1)),
                               toolchain, before_publish=before_publish)
         # The original backend owns all extraction/build/publication/certification and the host lock.
@@ -361,7 +405,7 @@ def main():
             components(args.data)
         elif args.action == "check":
             first_run.check_prerequisites(first_run.ROOT,args.managed_toolchain)
-            emit("checked", "Requirements ready. Choose your game and key, then Prepare game.")
+            emit("checked", "Requirements ready. Private tools and this kit check out.")
             try:
                 exe, _, _ = checked_ready(args.data)
                 emit("ready_available", "Your verified game is ready to play.", exe=str(exe))
@@ -379,18 +423,16 @@ def main():
         return 0
     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, struct.error) as error:
         detail = str(error)
-        if args.managed_toolchain and any(word in detail for word in ("Private","private","CMake","Ninja","clang")):
-            recovery = "Choose Install private tools, then Check requirements again."
-        elif "Install Python dependencies" in detail:
-            recovery = "Choose Install setup components, then Check requirements again."
+        if "Install Python dependencies" in detail:
+            message, step = "Choose Install setup components, then Check requirements again.", "install"
         elif "pinned third-party" in detail:
-            recovery = "Extract the complete release kit, including its source folder, then retry."
-        elif any(word in detail for word in ("Visual Studio", "Windows SDK", "CMake", "Ninja", "MSVC", "clang-cl")):
-            recovery = "Choose C++ Build Tools for the required components, then Check requirements again."
+            message, step = "Extract the complete release kit, including its source folder, then Retry.", "prepare"
+        elif not args.managed_toolchain and any(word in detail for word in ("Visual Studio", "Windows SDK", "CMake", "Ninja", "MSVC", "clang-cl")):
+            message, step = "Choose C++ Build Tools for the required components, then Check requirements again.", "install"
         else:
-            recovery = "Setup could not finish. Check the details, correct the problem and retry."
+            message, step = recovery(detail)
         emit("log", detail)
-        emit("failed", recovery + " Saves/settings are retained; retry to verify the playable version.")
+        emit("failed", message, next=step)
         return 1
 
 
