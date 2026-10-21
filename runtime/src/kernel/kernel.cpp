@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "sync.h"
+#include "debug_flags.h"
 
 Ctx* hw_ctx_new(u64 stack_top);
 void hw_ctx_bind(Ctx* c);
@@ -426,7 +427,7 @@ Result wait_synchronization(const Handle* handles, s32 count, s64 timeout_ns, s3
     Result r = wait_synchronization_impl(handles, count, timeout_ns, out_index);
     QueryPerformanceCounter(&b);
     double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
-    static const bool trace = getenv("HWDER_WAIT_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::WaitTrace);
     if (trace && ms > 150.0) {
         ObjectPtr o = g_handles.get(handles[0]);
         hw_log("kernel: wait on %d handle(s) [0x%x %s %p%s] took %.0f ms (timeout %lld ms, result 0x%x, index %d)", count,
