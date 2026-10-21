@@ -122,7 +122,6 @@ void load() {
                 i = j + 1;
             }
         }
-        else if (k == "interp_hz") g_video.interp_hz = atoi(v);
         else if (k == "nsp_path" || k == "keys_path" || k == "save_dir" || k == "save_copy_from") {
             std::string path = v;  // UTF-8, as written by save()
             while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
@@ -137,9 +136,8 @@ void load() {
     fclose(f);
     if (version < 2) {
         // v1 auto-enabled the 60 Hz monitor switch on non-60-multiple panels, so a saved 1 was most likely that
-        // default rather than a choice. Interpolation defaulted on in some test builds. Both are opt-in now.
+        // default rather than a choice. It is opt-in now.
         g_video.display_60hz = false;
-        g_video.interp_hz = 0;
         save();
     }
     apply_env();
@@ -148,9 +146,9 @@ void load() {
 void save() {
     FILE* f = fopen(kFile, "w");
     if (!f) return;
-    fprintf(f, "version=%d\nvsync=%d\naniso=%d\nwindow_w=%d\nwindow_h=%d\nborderless=%d\nres_scale=%.3f\nunlocked_res=%d\nshow_fps=%d\ndisplay_60hz=%d\ninterp_hz=%d\nultrawide=%d\n",
+    fprintf(f, "version=%d\nvsync=%d\naniso=%d\nwindow_w=%d\nwindow_h=%d\nborderless=%d\nres_scale=%.3f\nunlocked_res=%d\nshow_fps=%d\ndisplay_60hz=%d\nultrawide=%d\n",
             kVersion, (int)g_video.vsync, g_video.aniso, g_video.window_w, g_video.window_h, (int)g_video.borderless,
-            g_video.res_scale, (int)g_video.unlocked_res, (int)g_video.show_fps, (int)g_video.display_60hz, g_video.interp_hz, (int)g_video.ultrawide);
+            g_video.res_scale, (int)g_video.unlocked_res, (int)g_video.show_fps, (int)g_video.display_60hz, (int)g_video.ultrawide);
     fprintf(f, "volume=%d\nmute=%d\nmute_background=%d\nhold_view_menu=%d\nrumble=%d\nbackground_pad=%d\nmenu_scale=%d\nasync_shaders=%d\n",
             g_audio.volume, (int)g_audio.mute, (int)g_audio.mute_background, (int)g_input.hold_view_menu, (int)g_input.rumble,
             (int)g_input.background_pad, g_video.menu_scale, (int)g_debug.async_shaders);

@@ -1,9 +1,10 @@
-# Experimental game-drawn 120 Hz
+# Game-drawn 120 fps
 
-Hyrule Warriors advances logic at 60 ticks per second, tied to presented frames. The experimental
-`HWDER_GAME_INTERP=1` mode redraws the scene once more per battle tick with a halfway camera, then
+Hyrule Warriors advances logic at 60 ticks per second, tied to presented frames. The 120 fps mode
+(Settings > Display, or `HWDER_GAME_INTERP=1`) redraws the scene once more per battle tick with a halfway camera, then
 draws the original tick. The game does not run its Update jobs again for the extra frame.
-Native 60 remains the default. The measured loop and research history are in `docs/frame-loop.md`.
+Native 60 remains the default. The jagged-flash fix (whole-block object blending) is merged and playtested;
+a slight ghost on very fast limbs remains. The measured loop and research history are in `docs/frame-loop.md`.
 
 ## Configuration and pacing
 
@@ -26,10 +27,8 @@ into a menu. There is no 100 ms freshness grace. `HWDER_FPS` and `HWDER_FORCE_IN
 while this mode controls presentation. With it off, existing native defaults and diagnostic
 environment overrides retain their previous behavior.
 
-The old renderer replay mode (`HWDER_INTERP`, optionally `HWDER_INTERP_MODE=camera`) remains a separate
-experimental fallback. Game-drawn interpolation disables that replay output even if its environment
-variable is also set; combining both would add extra presents and alter logic speed. The saved
-`interp_hz` option still does not enable the legacy path while `kInterpEnabled` is false.
+The old renderer replay interpolation (`HWDER_INTERP`, `HWDER_INTERP_MODE=camera`, the `interp_hz`
+setting) has been removed; game-drawn interpolation is the only high frame rate path.
 
 ## What the extra frame interpolates
 
@@ -47,7 +46,7 @@ Matching uses model draw keys, nearby first transforms and the closest whole blo
 grid is chosen by row orthogonality. This is approximate linear matrix interpolation, not rotation slerp
 or persistent object identity; very fast moves (over 60 units a tick), crowds of identical poses and
 layouts outside the recognized heuristics stay at 60 Hz, and a slight ghost remains on fast limbs.
-`HWDER_GI_OBJ_MODE=strict` or `legacy` selects the tighter or the original per-bone matching,
+The earlier strict and per-bone (legacy) matching modes were removed with the fix.
 `HWDER_GI_OBJ_TRACE=1` logs the blocks near the camera target, and `HWDER_GI_NO_OBJECTS=1` disables
 object interpolation for comparison.
 
@@ -70,5 +69,6 @@ play and ultrawide side bands also need checking after renderer integration. His
 measurements document earlier owner builds, not acceptance of every later combination.
 
 `HWDER_GI_LOG=1` logs tick timing and extra-frame skip reasons. `HWDER_GI_LOG_MS` selects the diagnostic
-report interval (default 5000 ms); `HWDER_FRAME_PROBE`, `HWDER_DRAW_WRITES`, `HWDER_DRAW_TWICE` and
-`HWDER_CBUF_DUMP` are research switches described in `docs/frame-loop.md`, not required configuration.
+report interval (default 5000 ms). The research switches described in `docs/frame-loop.md`
+(`HWDER_FRAME_PROBE`, `HWDER_DRAW_WRITES`, `HWDER_DRAW_TWICE`, `HWDER_CBUF_DUMP`, `HWDER_CAM_LOG`) are
+historical and no longer in the code.

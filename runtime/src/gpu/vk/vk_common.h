@@ -241,7 +241,6 @@ public:
     void apply_scale(float sx, float sy);  // change the internal resolution scale: scaled targets are recreated on next use
     static bool scalable(const ImageInfo& info);
     static bool scale_stale(const Image* img);  // physical size differs from what the current scale gives
-    Image* make_shadow(Image* src);  // unlinked twin of src (same size/format/scale) for frame-interpolation replays
     void destroy(Image* img, bool count = true);
     void alloc_image(Image* img);    // VkImage + memory + initial layout/clear for img->info/scale
     void validate(Image* img);              // re-upload if the CPU wrote it (cheap when nothing changed)

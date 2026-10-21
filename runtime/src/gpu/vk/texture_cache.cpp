@@ -657,21 +657,6 @@ void TextureCache::apply_scale(float sx, float sy) {
     hw_log("vk: internal resolution scale -> %.3fx x %.3fx (%zu render target pages to recreate on next use)", sx, sy, stale);
 }
 
-Image* TextureCache::make_shadow(Image* src) {
-    Image* img = new Image;
-    img->info = src->info;
-    img->addr = src->addr;
-    img->guest_size = 0;  // never linked into the page map
-    img->readable = 0;
-    img->aspect = src->aspect;
-    img->scale = src->scale;
-    img->scale_y = src->scale_y;
-    img->level_offset[0] = 0;
-    alloc_image(img);
-    img->gpu_modified = true;
-    return img;
-}
-
 Image* TextureCache::create(u64 addr, const ImageInfo& info) {
     n_creates++;
     generation++;
