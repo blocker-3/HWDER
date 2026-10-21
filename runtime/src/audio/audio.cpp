@@ -17,6 +17,7 @@
 
 #include "gpu/settings.h"
 #include "service/common.h"
+#include "debug_flags.h"
 
 #pragma comment(lib, "ole32.lib")
 
@@ -73,7 +74,7 @@ static float output_gain() {
 
 static void wasapi_thread() {
     SetThreadDescription(GetCurrentThread(), L"HWDER audio out");
-    if (getenv("HWDER_MUTE")) {  // test runs: never open the output device
+    if (debug::flag(debug::Mute)) {  // test runs: never open the output device
         hw_log("audio: muted (HWDER_MUTE) - output disabled");
         for (;;) {
             s16 sink[1024];
@@ -125,7 +126,7 @@ static void wasapi_thread() {
             if (FAILED(render->GetBuffer(n, &p))) break;
             u32 got = g_ring.pop((s16*)p, n);
             if (got < n) memset(p + got * 4, 0, (n - got) * 4);
-            static const bool mute = getenv("HWDER_MUTE") != nullptr;  // silent output (test runs)
+            static const bool mute = debug::flag(debug::Mute);  // silent output (test runs)
             const float gain = output_gain();
             if (mute || gain <= 0.0f) {
                 memset(p, 0, (size_t)n * 4);
