@@ -147,7 +147,7 @@ public:
     }
 };
 
-constexpr u32 kAppletController = 0x0B;
+constexpr u32 kAppletController = 0x0C;  // AppletId LibraryAppletController (0x0B is the cabinet applet)
 
 // Library applets complete at once. The controller applet (nn::hid::ShowControllerSupport, opened when the
 // player picks 2P) answers with the players the host has: switchbrew "Controller Applet".
