@@ -14,4 +14,5 @@ else()
 endif()
 add_test(NAME recompiler_synthetic
     COMMAND "${Python3_EXECUTABLE}" -B "${SYNTHETIC_SCRIPT}" --library "$<TARGET_FILE:recompiler_synthetic>")
-add_custom_target(synthetic_tests DEPENDS recompiler_synthetic pipeline_warmup_cache_test pipeline_catalog_test)
+add_custom_target(synthetic_tests DEPENDS recompiler_synthetic pipeline_warmup_cache_test pipeline_catalog_test
+    save_folder_selection_test)

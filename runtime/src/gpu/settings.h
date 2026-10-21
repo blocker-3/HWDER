@@ -48,6 +48,7 @@ struct Input {
     int deadzone_r = 27;
     bool invert_lx = false, invert_ly = false, invert_rx = false, invert_ry = false;
     bool motion = true;          // pass the controller's gyro and accelerometer to the game
+    int keyboard_slot = 0;       // 0 = lowest slot without a controller, 1..4 = that player, -1 = off
     int remap[kPadFamilies][kRemapSlots];  // host button (hid::HostButton) per Switch button, -1 = unbound
     Input();
 };

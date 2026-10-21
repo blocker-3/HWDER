@@ -34,9 +34,13 @@ bool g_wait_release = false;
 std::mutex g_raw_m;
 RawPad g_raw;  // the HID thread writes it each poll, the overlay reads it
 
-// Rumble the game asked for (from its service threads), applied on the HID thread.
-std::atomic<float> g_rumble_low{0.0f}, g_rumble_high{0.0f};
+// Rumble the game asked for per player slot (from its service threads), applied on the HID thread.
+std::atomic<float> g_rumble_low[kPlayerSlots], g_rumble_high[kPlayerSlots];
 std::atomic<u64> g_preview_until{0};  // GetTickCount64() until which preview_rumble's pulse runs
+
+// Slots with a controller or the keyboard, and the device names, for the controller applet and the menu.
+std::atomic<u32> g_connected_mask{0};
+char g_slot_names[kPlayerSlots][96] = {};  // under g_raw_m
 
 constexpr s16 kTriggerThreshold = 8192;  // ZL/ZR press point, 25% of the travel
 constexpr float kGravity = 9.80665f;
@@ -72,29 +76,33 @@ int family_of(int type) {
 // menu. The game only sees the tap once the button is released, held for long enough that a 60 Hz game
 // frame samples it.
 constexpr u64 kMenuHoldMs = 500, kMinusTapMs = 60;
-u64 g_view_down_at = 0;
-bool g_view_held = false;
-u64 g_minus_until = 0;
+u64 g_view_down_at[kPlayerSlots] = {};
+bool g_view_held[kPlayerSlots] = {};
+u64 g_minus_until[kPlayerSlots] = {};
 
-void update_view_button(bool down, u64 tap_bits, u64& buttons) {
+// Per slot: any player's View hold opens the menu.
+void update_view_button(int slot, bool down, u64 tap_bits, u64& buttons) {
+    u64& down_at = g_view_down_at[slot];
+    bool& held = g_view_held[slot];
+    u64& minus_until = g_minus_until[slot];
     if (!settings::input().hold_view_menu) {
         if (down) buttons |= tap_bits;
-        g_view_down_at = 0;
+        down_at = 0;
         return;
     }
     const u64 now = GetTickCount64();
     if (down) {
-        if (!g_view_down_at) g_view_down_at = now;
-        if (!g_view_held && now - g_view_down_at >= kMenuHoldMs) {
-            g_view_held = true;
+        if (!down_at) down_at = now;
+        if (!held && now - down_at >= kMenuHoldMs) {
+            held = true;
             g_menu_request = true;
         }
-    } else if (g_view_down_at) {
-        if (!g_view_held) g_minus_until = now + kMinusTapMs;
-        g_view_down_at = 0;
-        g_view_held = false;
+    } else if (down_at) {
+        if (!held) minus_until = now + kMinusTapMs;
+        down_at = 0;
+        held = false;
     }
-    if (now < g_minus_until) buttons |= tap_bits;
+    if (now < minus_until) buttons |= tap_bits;
 }
 
 s16 clamp16(int v) { return (s16)std::clamp(v, -kStickMax, kStickMax); }
@@ -105,7 +113,8 @@ using XInputSetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*);
 XInputGetStateFn g_get_state = nullptr;
 XInputSetStateFn g_set_state = nullptr;
 bool g_xinput_loaded = false;
-int g_active_pad = -1;
+int g_xi_user[kPlayerSlots] = {-1, -1, -1, -1};  // XInput user index per player slot (-1 = none)
+u16 g_xi_sent[kPlayerSlots][2] = {};
 u32 g_probe_counter = 0;
 bool g_pad_present[4] = {true, true, true, true};
 
@@ -126,12 +135,14 @@ void load_xinput() {
     hw_log("hid: XInput not available - keyboard only");
 }
 
-void poll_xinput(RawPad& raw) {
+// Present XInput pads take the player slots in user-index order (user 1 is player 1, a gap closes up).
+void poll_xinput(RawPad raws[kPlayerSlots]) {
     load_xinput();
+    for (int& u : g_xi_user) u = -1;
     if (!g_get_state) return;
     // Disconnected pads are expensive to query; re-probe them only every ~0.5 s.
     bool probe = (++g_probe_counter % 100) == 0;
-    g_active_pad = -1;
+    int slot = 0;
     for (DWORD i = 0; i < 4; i++) {
         if (!g_pad_present[i] && !probe) continue;
         XINPUT_STATE xs;
@@ -140,8 +151,9 @@ void poll_xinput(RawPad& raw) {
             continue;
         }
         g_pad_present[i] = true;
-        if (g_active_pad >= 0) continue;
-        g_active_pad = (int)i;
+        if (slot >= kPlayerSlots) continue;
+        RawPad& raw = raws[slot];
+        g_xi_user[slot++] = (int)i;
         const XINPUT_GAMEPAD& g = xs.Gamepad;
         static const std::pair<WORD, int> map[] = {
             {XINPUT_GAMEPAD_A, kHostSouth}, {XINPUT_GAMEPAD_B, kHostEast}, {XINPUT_GAMEPAD_X, kHostWest},
@@ -173,16 +185,25 @@ void poll_xinput(RawPad& raw) {
 struct SdlPad {
     SDL_Gamepad* gp = nullptr;
     SDL_JoystickID id = 0;
-    u64 last_used = 0;  // tick of the last button press or big stick move: the most recent pad is active
+    int slot = -1;      // player slot (-1: more pads than slots)
+    u64 last_used = 0;  // tick of the last button press or big stick move: the most recent pad is shown in the menu
     u32 prev_buttons = 0;
     bool gyro = false, accel = false, rumble = false;
     bool sensors_on = false;
+    u16 rumble_sent[2] = {0, 0};
+    u64 rumble_at = 0;
 };
 bool g_sdl_tried = false, g_sdl_ok = false;
 std::vector<SdlPad> g_pads;
-SDL_JoystickID g_rumble_pad = 0;
-u16 g_rumble_sent[2] = {0, 0};
-u64 g_rumble_at = 0;
+
+int free_slot() {
+    for (int s = 0; s < kPlayerSlots; s++) {
+        bool used = false;
+        for (const SdlPad& p : g_pads) used |= p.slot == s;
+        if (!used) return s;
+    }
+    return -1;
+}
 
 void sdl_open(SDL_JoystickID id) {
     for (const SdlPad& p : g_pads)
@@ -195,13 +216,14 @@ void sdl_open(SDL_JoystickID id) {
     SdlPad p;
     p.gp = gp;
     p.id = id;
+    p.slot = free_slot();
     p.gyro = SDL_GamepadHasSensor(gp, SDL_SENSOR_GYRO);
     p.accel = SDL_GamepadHasSensor(gp, SDL_SENSOR_ACCEL);
     p.rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(gp), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     const char* name = SDL_GetGamepadName(gp);
-    hw_log("hid: controller connected: %s (%s, vid %04x pid %04x%s%s)", name ? name : "?",
+    hw_log("hid: controller connected: %s (%s, vid %04x pid %04x%s%s) -> player %d", name ? name : "?",
            pad_type_name(SDL_GetGamepadType(gp)), SDL_GetGamepadVendor(gp), SDL_GetGamepadProduct(gp),
-           p.gyro && p.accel ? ", gyro" : "", p.rumble ? ", rumble" : "");
+           p.gyro && p.accel ? ", gyro" : "", p.rumble ? ", rumble" : "", p.slot + 1);
     g_pads.push_back(p);
 }
 
@@ -209,7 +231,8 @@ void sdl_close(SDL_JoystickID id) {
     for (size_t i = 0; i < g_pads.size(); i++) {
         if (g_pads[i].id != id) continue;
         const char* name = SDL_GetGamepadName(g_pads[i].gp);
-        hw_log("hid: controller disconnected: %s", name ? name : "?");
+        hw_log("hid: controller disconnected: %s (player %d)", name ? name : "?", g_pads[i].slot + 1);
+        SDL_RumbleGamepad(g_pads[i].gp, 0, 0, 0);
         SDL_CloseGamepad(g_pads[i].gp);
         g_pads.erase(g_pads.begin() + i);
         return;
@@ -237,9 +260,30 @@ bool sdl_init() {
     return true;
 }
 
-// Pumps SDL (hot-plug included), picks the most recently used pad and fills `raw` from it. `motion` gets
-// its six-axis state in the Switch convention.
-SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion) {
+// Reads one pad's state into `raw`.
+void sdl_read(SdlPad& p, u32 buttons, RawPad& raw) {
+    SDL_Gamepad* gp = p.gp;
+    raw.connected = true;
+    raw.sdl = true;
+    raw.buttons = buttons;
+    raw.lx = clamp16(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX));
+    raw.ly = clamp16(-(int)SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY));  // SDL: +y = down
+    raw.rx = clamp16(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX));
+    raw.ry = clamp16(-(int)SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY));
+    raw.lt = std::max<s16>(0, SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+    raw.rt = std::max<s16>(0, SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+    raw.type = SDL_GetGamepadType(gp);
+    raw.family = family_of(raw.type);
+    raw.has_gyro = p.gyro && p.accel;
+    raw.has_rumble = p.rumble;
+    const char* name = SDL_GetGamepadName(gp);
+    snprintf(raw.name, sizeof(raw.name), "%s", name ? name : "Controller");
+}
+
+// Pumps SDL (hot-plug included), fills each player slot's `raws` entry from its pad and `menu` from the most
+// recently used pad. `motion` gets player 1's six-axis state in the Switch convention. Returns false while no
+// pad is open.
+bool sdl_poll(bool want_sensors, RawPad raws[kPlayerSlots], RawPad& menu, MotionInput& motion) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) sdl_open(e.gdevice.which);
@@ -264,31 +308,21 @@ SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion) {
             moved |= std::abs((int)SDL_GetGamepadAxis(p.gp, a)) > 20000;
         if ((b & ~p.prev_buttons) || moved) p.last_used = now;
         p.prev_buttons = b;
+        if (p.slot >= 0) sdl_read(p, b, raws[p.slot]);
         if (!best || p.last_used > best->last_used) {
             best = &p;
             best_buttons = b;
         }
     }
-    if (!best) return nullptr;
-    SDL_Gamepad* gp = best->gp;
-    raw.connected = true;
-    raw.sdl = true;
-    raw.buttons = best_buttons;
-    raw.lx = clamp16(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX));
-    raw.ly = clamp16(-(int)SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY));  // SDL: +y = down
-    raw.rx = clamp16(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX));
-    raw.ry = clamp16(-(int)SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY));
-    raw.lt = std::max<s16>(0, SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
-    raw.rt = std::max<s16>(0, SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
-    raw.type = SDL_GetGamepadType(gp);
-    raw.family = family_of(raw.type);
-    raw.has_gyro = best->gyro && best->accel;
-    raw.has_rumble = best->rumble;
-    const char* name = SDL_GetGamepadName(gp);
-    snprintf(raw.name, sizeof(raw.name), "%s", name ? name : "Controller");
+    if (!best) return false;
+    sdl_read(*best, best_buttons, menu);
 
+    SdlPad* first = nullptr;  // player 1's pad drives the six-axis sensor
+    for (SdlPad& p : g_pads)
+        if (p.slot == 0) first = &p;
+    SDL_Gamepad* gp = first ? first->gp : nullptr;
     float a[3], g[3];
-    if (want_sensors && raw.has_gyro && SDL_GetGamepadSensorData(gp, SDL_SENSOR_ACCEL, a, 3) &&
+    if (want_sensors && first && first->gyro && first->accel && SDL_GetGamepadSensorData(gp, SDL_SENSOR_ACCEL, a, 3) &&
         SDL_GetGamepadSensorData(gp, SDL_SENSOR_GYRO, g, 3)) {
         // SDL: x right, y up, z towards the player; m/s^2 and rad/s. Switch: gravity reads -1 on z when
         // the pad lies flat, y points away from the player; g and rotations/s.
@@ -300,48 +334,48 @@ SdlPad* sdl_poll(bool want_sensors, RawPad& raw, MotionInput& motion) {
         motion.gyro[1] = -g[2] / kTwoPi;
         motion.gyro[2] = g[1] / kTwoPi;
     }
-    return best;
+    return true;
 }
 
 // ------------------------------------------------------------------ rumble
-void apply_rumble(SdlPad* active) {
+// Each slot's pad gets the amplitude the game sent for its npad. The preview pulse goes to every pad.
+void apply_rumble(bool sdl_pads) {
     const settings::Input& cfg = settings::input();
     const float k = cfg.rumble ? cfg.rumble_strength / 100.0f : 0.0f;
-    const bool preview = GetTickCount64() < g_preview_until.load();
-    const u16 lo = (u16)((preview ? 1.0f : std::clamp(g_rumble_low.load(), 0.0f, 1.0f)) * k * 65535.0f);
-    const u16 hi = (u16)((preview ? 1.0f : std::clamp(g_rumble_high.load(), 0.0f, 1.0f)) * k * 65535.0f);
-    if (g_sdl_ok) {
-        const SDL_JoystickID id = active ? active->id : 0;
-        if (id != g_rumble_pad) {
-            for (SdlPad& p : g_pads)
-                if (p.id == g_rumble_pad) SDL_RumbleGamepad(p.gp, 0, 0, 0);
-            g_rumble_pad = id;
-            g_rumble_sent[0] = g_rumble_sent[1] = 0;
-            g_rumble_at = 0;
-        }
-        if (active) {
-            if (!active->rumble) return;
-            // SDL rumble runs for a set time: refresh it while the game keeps it on.
-            const u64 now = GetTickCount64();
-            // While the slider drags, send a new preview strength at most every 50 ms.
-            if (preview && now - g_rumble_at < 50) return;
-            if (lo != g_rumble_sent[0] || hi != g_rumble_sent[1] || ((lo || hi) && now - g_rumble_at > 1000)) {
-                SDL_RumbleGamepad(active->gp, lo, hi, (lo || hi) ? 2000 : 0);
-                g_rumble_sent[0] = lo;
-                g_rumble_sent[1] = hi;
-                g_rumble_at = now;
-            }
-            return;
-        }
-        // No SDL pad open: the XInput fallback pad (poll_host_input), if any, rumbles below.
+    const u64 now = GetTickCount64();
+    const bool preview = now < g_preview_until.load();
+    u16 lo[kPlayerSlots], hi[kPlayerSlots];
+    for (int s = 0; s < kPlayerSlots; s++) {
+        lo[s] = (u16)((preview ? 1.0f : std::clamp(g_rumble_low[s].load(), 0.0f, 1.0f)) * k * 65535.0f);
+        hi[s] = (u16)((preview ? 1.0f : std::clamp(g_rumble_high[s].load(), 0.0f, 1.0f)) * k * 65535.0f);
     }
-    if (!g_set_state || g_active_pad < 0 || (lo == g_rumble_sent[0] && hi == g_rumble_sent[1])) return;
-    XINPUT_VIBRATION v;
-    v.wLeftMotorSpeed = lo;
-    v.wRightMotorSpeed = hi;
-    g_set_state((DWORD)g_active_pad, &v);
-    g_rumble_sent[0] = lo;
-    g_rumble_sent[1] = hi;
+    if (sdl_pads) {
+        for (SdlPad& p : g_pads) {
+            if (p.slot < 0 || !p.rumble) continue;
+            const u16 l = lo[p.slot], h = hi[p.slot];
+            // SDL rumble runs for a set time: refresh it while the game keeps it on.
+            // While the slider drags, send a new preview strength at most every 50 ms.
+            if (preview && now - p.rumble_at < 50) continue;
+            if (l != p.rumble_sent[0] || h != p.rumble_sent[1] || ((l || h) && now - p.rumble_at > 1000)) {
+                SDL_RumbleGamepad(p.gp, l, h, (l || h) ? 2000 : 0);
+                p.rumble_sent[0] = l;
+                p.rumble_sent[1] = h;
+                p.rumble_at = now;
+            }
+        }
+        return;
+    }
+    // No SDL pad open: the XInput fallback pads (poll_host_input).
+    if (!g_set_state) return;
+    for (int s = 0; s < kPlayerSlots; s++) {
+        if (g_xi_user[s] < 0 || (lo[s] == g_xi_sent[s][0] && hi[s] == g_xi_sent[s][1])) continue;
+        XINPUT_VIBRATION v;
+        v.wLeftMotorSpeed = lo[s];
+        v.wRightMotorSpeed = hi[s];
+        g_set_state((DWORD)g_xi_user[s], &v);
+        g_xi_sent[s][0] = lo[s];
+        g_xi_sent[s][1] = hi[s];
+    }
 }
 
 // Radial deadzone rescaled so the stick still reaches full deflection; -1..1 per axis.
@@ -460,9 +494,48 @@ const char* host_button_name(int button, int type) {
 }
 
 // ------------------------------------------------------------------ polling
+// Keyboard keys to Switch input, merged into one slot's pad.
+void poll_keyboard(PadInput& s) {
+    // WASD move, arrows camera, K/J/I/L = A/B/X/Y (Enter = A, Backspace = B), Q/E = L/R, U/O = ZL/ZR,
+    // Space/Tab = +/-, 1-4 = D-pad, Z/C = stick clicks.
+    if (key('W')) s.ly = kStickMax;
+    if (key('S')) s.ly = -kStickMax;
+    if (key('A')) s.lx = -kStickMax;
+    if (key('D')) s.lx = kStickMax;
+    if (key(VK_UP)) s.ry = kStickMax;
+    if (key(VK_DOWN)) s.ry = -kStickMax;
+    if (key(VK_LEFT)) s.rx = -kStickMax;
+    if (key(VK_RIGHT)) s.rx = kStickMax;
+    if (key('K') || key(VK_RETURN)) s.buttons |= kBtnA;
+    if (key('J') || key(VK_BACK)) s.buttons |= kBtnB;
+    if (key('I')) s.buttons |= kBtnX;
+    if (key('L')) s.buttons |= kBtnY;
+    if (key('Q')) s.buttons |= kBtnL;
+    if (key('E')) s.buttons |= kBtnR;
+    if (key('U')) s.buttons |= kBtnZL;
+    if (key('O')) s.buttons |= kBtnZR;
+    if (key(VK_SPACE)) s.buttons |= kBtnPlus;
+    if (key(VK_TAB)) s.buttons |= kBtnMinus;
+    if (key('Z')) s.buttons |= kBtnStickL;
+    if (key('C')) s.buttons |= kBtnStickR;
+    if (key('1')) s.buttons |= kBtnUp;
+    if (key('2')) s.buttons |= kBtnDown;
+    if (key('3')) s.buttons |= kBtnLeft;
+    if (key('4')) s.buttons |= kBtnRight;
+}
+
+// The slot the keyboard plays in (Settings > Input > Keyboard player), -1 for none.
+int keyboard_slot(const RawPad raws[kPlayerSlots]) {
+    const int want = settings::input().keyboard_slot;
+    if (want < 0) return -1;
+    if (want >= 1 && want <= kPlayerSlots) return want - 1;
+    for (int s = 0; s < kPlayerSlots; s++)
+        if (!raws[s].connected) return s;
+    return -1;
+}
+
 void poll_host_input(HostInput& out) {
     out = {};
-    PadInput& s = out.pad;
     const settings::Input& cfg = settings::input();
 
     if (!g_sdl_tried) {
@@ -473,89 +546,93 @@ void poll_host_input(HostInput& out) {
     GetWindowThreadProcessId(GetForegroundWindow(), &fg_pid);
     const bool focused = fg_pid == GetCurrentProcessId();
 
-    RawPad raw;
-    SdlPad* active = nullptr;
+    RawPad raws[kPlayerSlots];
+    RawPad menu;
+    bool sdl_pads = false;
     // With no SDL pad open, XInput too: SDL can miss a pad paired while the game runs (no hot-plug event
     // arrives), while XInput sees an Xbox pad as soon as Windows connects it.
-    if (g_sdl_ok) active = sdl_poll(cfg.motion, raw, out.motion);
-    if (!active) poll_xinput(raw);
-    apply_rumble(active);
+    if (g_sdl_ok) sdl_pads = sdl_poll(cfg.motion, raws, menu, out.motion);
+    if (!sdl_pads) {
+        poll_xinput(raws);
+        menu = raws[0];
+    }
+    apply_rumble(sdl_pads);
     if (!focused && !cfg.background_pad) {
-        // Keep the pad's identity for the menu, drop its input.
-        raw.buttons = 0;
-        raw.lx = raw.ly = raw.rx = raw.ry = raw.lt = raw.rt = 0;
+        // Keep the pads' identity for the menu, drop their input.
+        auto quiet = [](RawPad& r) {
+            r.buttons = 0;
+            r.lx = r.ly = r.rx = r.ry = r.lt = r.rt = 0;
+        };
+        quiet(menu);
+        for (RawPad& r : raws) quiet(r);
         out.motion = {};
     }
+    const int kb = keyboard_slot(raws);
+    u32 mask = 0;
     {
         std::lock_guard<std::mutex> l(g_raw_m);
-        g_raw = raw;
+        g_raw = menu;
+        for (int s = 0; s < kPlayerSlots; s++) {
+            if (raws[s].connected) snprintf(g_slot_names[s], sizeof(g_slot_names[s]), "%s", raws[s].name);
+            else if (s == kb) snprintf(g_slot_names[s], sizeof(g_slot_names[s]), "Keyboard");
+            else g_slot_names[s][0] = 0;
+        }
     }
 
-    // Buttons through this controller family's remap table. Whatever View is bound to waits for the
-    // View hold check (a hold opens the menu instead).
-    const int* map = cfg.remap[raw.family];
-    u64 tap_bits = 0;
-    for (int i = 0; i < settings::kRemapSlots; i++) {
-        const int hb = map[i];
-        if (hb < 0 || hb >= kHostButtonCount) continue;
-        if (hb == kHostBack) tap_bits |= kSlotBits[i];
-        else if (raw.buttons & (1u << hb)) s.buttons |= kSlotBits[i];
-    }
-    update_view_button((raw.buttons >> kHostBack) & 1, tap_bits, s.buttons);
+    for (int slot = 0; slot < kPlayerSlots; slot++) {
+        const RawPad& raw = raws[slot];
+        PadInput& s = out.pads[slot];
+        out.connected[slot] = raw.connected || slot == kb;
+        if (out.connected[slot]) mask |= 1u << slot;
 
-    float lx, ly, rx, ry;
-    deadzone(raw.lx, raw.ly, cfg.deadzone_l, lx, ly);
-    deadzone(raw.rx, raw.ry, cfg.deadzone_r, rx, ry);
-    s.lx = to_axis(cfg.invert_lx ? -lx : lx);
-    s.ly = to_axis(cfg.invert_ly ? -ly : ly);
-    s.rx = to_axis(cfg.invert_rx ? -rx : rx);
-    s.ry = to_axis(cfg.invert_ry ? -ry : ry);
+        // Buttons through this controller family's remap table. Whatever View is bound to waits for the
+        // View hold check (a hold opens the menu instead).
+        const int* map = cfg.remap[raw.family];
+        u64 tap_bits = 0;
+        for (int i = 0; i < settings::kRemapSlots; i++) {
+            const int hb = map[i];
+            if (hb < 0 || hb >= kHostButtonCount) continue;
+            if (hb == kHostBack) tap_bits |= kSlotBits[i];
+            else if (raw.buttons & (1u << hb)) s.buttons |= kSlotBits[i];
+        }
+        update_view_button(slot, (raw.buttons >> kHostBack) & 1, tap_bits, s.buttons);
+
+        float lx, ly, rx, ry;
+        deadzone(raw.lx, raw.ly, cfg.deadzone_l, lx, ly);
+        deadzone(raw.rx, raw.ry, cfg.deadzone_r, rx, ry);
+        s.lx = to_axis(cfg.invert_lx ? -lx : lx);
+        s.ly = to_axis(cfg.invert_ly ? -ly : ly);
+        s.rx = to_axis(cfg.invert_rx ? -rx : rx);
+        s.ry = to_axis(cfg.invert_ry ? -ry : ry);
+
+        if (focused && slot == kb) poll_keyboard(s);
+
+        const s32 t = kStickMax / 2;
+        if (s.lx < -t) s.buttons |= kBtnStickLLeft;
+        if (s.lx > t) s.buttons |= kBtnStickLRight;
+        if (s.ly > t) s.buttons |= kBtnStickLUp;
+        if (s.ly < -t) s.buttons |= kBtnStickLDown;
+        if (s.rx < -t) s.buttons |= kBtnStickRLeft;
+        if (s.rx > t) s.buttons |= kBtnStickRRight;
+        if (s.ry > t) s.buttons |= kBtnStickRUp;
+        if (s.ry < -t) s.buttons |= kBtnStickRDown;
+    }
     if (!cfg.motion) out.motion = {};
+    g_connected_mask = mask;
 
-    if (focused) {
-        // WASD move, arrows camera, K/J/I/L = A/B/X/Y (Enter = A, Backspace = B), Q/E = L/R, U/O = ZL/ZR,
-        // Space/Tab = +/-, 1-4 = D-pad, Z/C = stick clicks.
-        if (key('W')) s.ly = kStickMax;
-        if (key('S')) s.ly = -kStickMax;
-        if (key('A')) s.lx = -kStickMax;
-        if (key('D')) s.lx = kStickMax;
-        if (key(VK_UP)) s.ry = kStickMax;
-        if (key(VK_DOWN)) s.ry = -kStickMax;
-        if (key(VK_LEFT)) s.rx = -kStickMax;
-        if (key(VK_RIGHT)) s.rx = kStickMax;
-        if (key('K') || key(VK_RETURN)) s.buttons |= kBtnA;
-        if (key('J') || key(VK_BACK)) s.buttons |= kBtnB;
-        if (key('I')) s.buttons |= kBtnX;
-        if (key('L')) s.buttons |= kBtnY;
-        if (key('Q')) s.buttons |= kBtnL;
-        if (key('E')) s.buttons |= kBtnR;
-        if (key('U')) s.buttons |= kBtnZL;
-        if (key('O')) s.buttons |= kBtnZR;
-        if (key(VK_SPACE)) s.buttons |= kBtnPlus;
-        if (key(VK_TAB)) s.buttons |= kBtnMinus;
-        if (key('Z')) s.buttons |= kBtnStickL;
-        if (key('C')) s.buttons |= kBtnStickR;
-        if (key('1')) s.buttons |= kBtnUp;
-        if (key('2')) s.buttons |= kBtnDown;
-        if (key('3')) s.buttons |= kBtnLeft;
-        if (key('4')) s.buttons |= kBtnRight;
-    }
-
-    const s32 t = kStickMax / 2;
-    if (s.lx < -t) s.buttons |= kBtnStickLLeft;
-    if (s.lx > t) s.buttons |= kBtnStickLRight;
-    if (s.ly > t) s.buttons |= kBtnStickLUp;
-    if (s.ly < -t) s.buttons |= kBtnStickLDown;
-    if (s.rx < -t) s.buttons |= kBtnStickRLeft;
-    if (s.rx > t) s.buttons |= kBtnStickRRight;
-    if (s.ry > t) s.buttons |= kBtnStickRUp;
-    if (s.ry < -t) s.buttons |= kBtnStickRDown;
-
+    // The in-game menu blocks every player's input, then waits for all buttons to be released.
+    bool any_button = false;
+    for (const PadInput& p : out.pads) any_button |= p.buttons != 0;
+    auto silence = [&] {
+        for (PadInput& p : out.pads) p = {};
+        out.motion = {};
+        out.touch = {};
+    };
     if (g_blocked) {
-        out = {};
+        silence();
         g_wait_release = true;
     } else if (g_wait_release) {
-        if (s.buttons) out = {};
+        if (any_button) silence();
         else g_wait_release = false;
     }
 }
@@ -570,9 +647,20 @@ bool take_menu_request() { return g_menu_request.exchange(false); }
 
 void preview_rumble() { g_preview_until = GetTickCount64() + 250; }
 
-void set_rumble(float low, float high) {
-    g_rumble_low = low;
-    g_rumble_high = high;
+void set_rumble(int slot, float low, float high) {
+    if (slot < 0 || slot >= kPlayerSlots) return;
+    g_rumble_low[slot] = low;
+    g_rumble_high[slot] = high;
+}
+
+u32 connected_slots() { return g_connected_mask.load(); }
+
+void slot_name(int slot, char* out, size_t n) {
+    if (!n) return;
+    out[0] = 0;
+    if (slot < 0 || slot >= kPlayerSlots) return;
+    std::lock_guard<std::mutex> l(g_raw_m);
+    snprintf(out, n, "%s", g_slot_names[slot]);
 }
 
 }  // namespace hid
