@@ -954,7 +954,8 @@ private:
     u64 obj_tag_ = 0;
     struct ObjStats {
         u64 draws = 0, matched = 0, blended = 0, mats = 0, jumps = 0, ticks = 0;
-        u64 ambiguous = 0, offsets = 0, move = 0, rigid = 0, rotation = 0;  // strict: blocks left at tick n, by reason
+        u64 ambiguous = 0, offsets = 0, move = 0, rigid = 0, rotation = 0;  // strict/relaxed: blocks left at tick n, by reason
+        u64 skin_matched = 0, skin_blended = 0;  // strict/relaxed: blocks of 8+ matrices (bone palettes)
         double ms = 0;
     } obj_st_;
     void obj_frame_begin(u64 tag);
@@ -2320,21 +2321,34 @@ static bool is_world_3x4(const float* m) {
     return true;
 }
 
-// HWDER_GI_OBJ_MODE=legacy: the original per-bone matching (nearest-other-bone fallback, partial
-// blocks). Default strict: a c3 block is blended whole or not at all (obj_transforms).
-static bool obj_legacy() {
-    static const bool legacy = [] {
+// HWDER_GI_OBJ_MODE: how stage c pairs and blends c3 blocks.
+//   strict (default) - a block is blended whole or not at all, under tight per-bone limits.
+//   relaxed          - also whole-or-nothing, with limits a running/attacking skeleton passes.
+//   legacy           - the original per-bone matching (nearest-other-bone fallback, partial blocks).
+enum class ObjMode { Strict, Relaxed, Legacy };
+static ObjMode obj_mode() {
+    static const ObjMode mode = [] {
         const char* m = getenv("HWDER_GI_OBJ_MODE");
-        return m && _stricmp(m, "legacy") == 0;
+        if (m && _stricmp(m, "legacy") == 0) return ObjMode::Legacy;
+        if (m && _stricmp(m, "relaxed") == 0) return ObjMode::Relaxed;
+        return ObjMode::Strict;
     }();
-    return legacy;
+    return mode;
 }
+static bool obj_legacy() { return obj_mode() == ObjMode::Legacy; }
 
-// Strict limits (world units): order pairing, one bone's move per tick, and how far a bone's move may
-// differ from the block's first bone (the block must move roughly rigidly).
-constexpr float kObjOrderMatch = 4.0f;
-constexpr float kObjStrictMove = 20.0f;
-constexpr float kObjRigid = 4.0f;
+// Whole-block limits (world units). order: an order pairing's first-transform distance. move: one
+// bone's move per tick. rigid: how far a bone's move may differ from the block's first bone (relaxed:
+// a quarter of the block's extent, at least `rigid` and at most kObjMaxMove / 2). min_cos: the
+// smallest cosine between a bone's prev and current rows (0.5 is ~60 degrees, 0 is 90).
+struct ObjLimits {
+    float order, move, rigid, min_cos;
+    bool extent_rigid;
+};
+static const ObjLimits& obj_limits() {
+    static const ObjLimits strict{4.0f, 20.0f, 4.0f, 0.5f, false}, relaxed{4.0f, 40.0f, 12.0f, 0.0f, true};
+    return obj_mode() == ObjMode::Relaxed ? relaxed : strict;
+}
 
 static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
     for (u64 i = 0; i + 12 <= nf; i += 4)
@@ -2361,11 +2375,13 @@ void VkRenderer::obj_frame_begin(u64 tag) {
     if ((tag & 1) && ++frames % 600 == 0) {
         hw_log("gi: stage c over 600 extra frames (%s): %llu c3 blocks, %llu matched the previous frame, %llu blended "
                "(%llu matrices), %llu matrices jumped too far; left at tick n: %llu ambiguous, %llu offsets, %llu move, "
-               "%llu rigid, %llu rotation; cost %.2f ms per tick", obj_legacy() ? "legacy" : "strict",
+               "%llu rigid, %llu rotation; skinned (8+ matrices) %llu matched, %llu blended; cost %.2f ms per tick",
+               obj_mode() == ObjMode::Legacy ? "legacy" : obj_mode() == ObjMode::Relaxed ? "relaxed" : "strict",
                (unsigned long long)obj_st_.draws, (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended,
                (unsigned long long)obj_st_.mats, (unsigned long long)obj_st_.jumps, (unsigned long long)obj_st_.ambiguous,
                (unsigned long long)obj_st_.offsets, (unsigned long long)obj_st_.move, (unsigned long long)obj_st_.rigid,
-               (unsigned long long)obj_st_.rotation, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
+               (unsigned long long)obj_st_.rotation, (unsigned long long)obj_st_.skin_matched,
+               (unsigned long long)obj_st_.skin_blended, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
         obj_st_ = ObjStats{};
     }
 }
@@ -2415,10 +2431,10 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         return (e.pos[0] - pb[0]) * (e.pos[0] - pb[0]) + (e.pos[1] - pb[1]) * (e.pos[1] - pb[1]) + (e.pos[2] - pb[2]) * (e.pos[2] - pb[2]);
     };
     if (!obj_legacy()) {
-        // Strict: blend the whole block or leave it byte-identical to tick n. A skinned mesh with some
+        // Strict / relaxed: blend the whole block or leave it byte-identical to tick n. A skinned mesh with some
         // bones blended and others not (or blended toward another enemy's bones) stretches across the gap.
         int best = -1;
-        if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= kObjOrderMatch * kObjOrderMatch) {
+        if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= obj_limits().order * obj_limits().order) {
             best = (int)occ;
         } else {
             size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
@@ -2444,38 +2460,61 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         obj_st_.matched++;
         const float* a = (const float*)(obj_prev_.arena.data() + prevs[best].off);
         float* b = (float*)data;
-        // The same offsets must hold transforms in both blocks; collect the matrices to blend.
-        u16 mats[1024 / 12 + 1];
-        u32 nm = 0;
+        // The same offsets must hold transforms in both blocks; collect the matrices to blend. Strict
+        // compares every 16-byte offset that looks like a transform (misaligned windows inside a bone
+        // palette included, whose edges depend on neighbouring data); relaxed compares the matrices
+        // themselves (non-overlapping, scanned from the first hit).
+        const ObjLimits& lim = obj_limits();
+        const bool relaxed = obj_mode() == ObjMode::Relaxed;
+        u16 mats[1024 / 12 + 1], amats[1024 / 12 + 1];
+        u32 nm = 0, na = 0;
+        bool same = true;
         for (u64 i = 0; i + 12 <= nf; i += 4) {
-            const bool tb = is_world_3x4(b + i);
-            if (tb != is_world_3x4(a + i)) {
-                obj_st_.offsets++;
-                return;
-            }
+            const bool tb = is_world_3x4(b + i), ta = is_world_3x4(a + i);
             if (tb && (nm == 0 || i >= mats[nm - 1] + 12u)) mats[nm++] = (u16)i;
+            if (relaxed) {
+                if (ta && (na == 0 || i >= amats[na - 1] + 12u)) amats[na++] = (u16)i;
+            } else if (tb != ta) {
+                same = false;
+            }
+        }
+        if (relaxed) same = na == nm && memcmp(amats, mats, nm * sizeof(u16)) == 0;
+        if (nm >= 8) obj_st_.skin_matched++;
+        if (!same) {
+            obj_st_.offsets++;
+            return;
         }
         if (nm == 0) return;
         const float m0[3] = {b[mats[0] + 3] - a[mats[0] + 3], b[mats[0] + 7] - a[mats[0] + 7], b[mats[0] + 11] - a[mats[0] + 11]};
+        float rigid = lim.rigid;
+        if (lim.extent_rigid) {  // limbs and weapons of a large skeleton swing further from its first bone
+            float ext2 = 0.0f;
+            for (u32 n = 1; n < nm; n++) {
+                const float* y = b + mats[n];
+                const float dx = y[3] - b[mats[0] + 3], dy = y[7] - b[mats[0] + 7], dz = y[11] - b[mats[0] + 11];
+                ext2 = std::max(ext2, dx * dx + dy * dy + dz * dz);
+            }
+            rigid = std::clamp(0.25f * std::sqrt(ext2), lim.rigid, kObjMaxMove * 0.5f);
+        }
         for (u32 n = 0; n < nm; n++) {
             const float* x = a + mats[n];
             const float* y = b + mats[n];
             const float mv[3] = {y[3] - x[3], y[7] - x[7], y[11] - x[11]};
-            if (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] > kObjStrictMove * kObjStrictMove) {
+            if (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] > lim.move * lim.move) {
                 obj_st_.move++;
                 return;
             }
             const float r0 = mv[0] - m0[0], r1 = mv[1] - m0[1], r2 = mv[2] - m0[2];
-            if (r0 * r0 + r1 * r1 + r2 * r2 > kObjRigid * kObjRigid) {
+            if (r0 * r0 + r1 * r1 + r2 * r2 > rigid * rigid) {
                 obj_st_.rigid++;
                 return;
             }
-            for (int r = 0; r < 3; r++) {  // each row turned by at most ~60 degrees (cos >= 0.5)
+            for (int r = 0; r < 3; r++) {  // each row turned by at most acos(min_cos)
                 const float* p = x + r * 4;
                 const float* q = y + r * 4;
                 const float dot = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
                 const float np = p[0] * p[0] + p[1] * p[1] + p[2] * p[2], nq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
-                if (!(dot > 0.0f && dot * dot >= 0.25f * np * nq)) {
+                if (!(dot > 0.0f && dot * dot >= lim.min_cos * lim.min_cos * np * nq)) {
                     obj_st_.rotation++;
                     return;
                 }
@@ -2488,6 +2527,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         }
         obj_st_.mats += nm;
         obj_st_.blended++;
+        if (nm >= 8) obj_st_.skin_blended++;
         return;
     }
     int best = -1;
