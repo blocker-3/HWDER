@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include "interp/interp.h"
+#include "debug_flags.h"
 
 extern "C" void hw_log_backtrace(const char* tag);
 
@@ -222,7 +223,7 @@ static void dump_msg(const char* tag, const u8* msg) {
 }
 
 Result send_sync_request(Handle h, u8* msg) {
-    static const char* dump_filter = getenv("HWDER_IPC_DUMP");
+    static const char* dump_filter = debug::str(debug::IpcDump);
     auto sess = g_handles.get_as<Session>(h);
     if (!sess) {
         hw_log("ipc: SendSyncRequest on invalid handle 0x%x", h);
@@ -240,7 +241,7 @@ Result send_sync_request(Handle h, u8* msg) {
         return ResultSuccess;
     }
     if (rq.type == 5 || rq.type == 7) {  // Control
-        static const bool trace = getenv("HWDER_IPC_TRACE") != nullptr;
+        static const bool trace = debug::flag(debug::IpcTrace);
         if (trace) hw_log("ipc: control #%u on handle 0x%x (%s, domain=%d)", rq.command, h, sess->service->name().c_str(), sess->dom->active);
         switch (rq.command) {
         case 0:  // ConvertCurrentObjectToDomain
@@ -304,14 +305,14 @@ Result send_sync_request(Handle h, u8* msg) {
         double ms = (d1.QuadPart - d0.QuadPart) * 1000.0 / df.QuadPart;
         if (ms > 10.0) hw_log("ipc: slow: %s command %u took %.0f ms", target->name().c_str(), rq.command, ms);
     }
-    static const bool trace = getenv("HWDER_IPC_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::IpcTrace);
     if (trace) {
         char hex[3 * 16 + 1] = {};
         for (size_t i = 0; i < rs.data.size() && i < 16; i++) snprintf(hex + i * 3, 4, " %02x", rs.data[i]);
         hw_log("ipc: %s #%u -> 0x%x (%zu bytes, %zu objs, %zu handles)%s", target->name().c_str(), rq.command, rs.result,
                rs.data.size(), rs.out_objects.size(), rs.copy_handles.size() + rs.move_handles.size(), hex);
     }
-    static const char* bt_filter = getenv("HWDER_IPC_BT");  // e.g. "IFile#4"
+    static const char* bt_filter = debug::str(debug::IpcBt);  // e.g. "IFile#4"
     if (bt_filter) {
         std::string key = target->name() + "#" + std::to_string(rq.command);
         if (key == bt_filter) hw_log_backtrace(key.c_str());
