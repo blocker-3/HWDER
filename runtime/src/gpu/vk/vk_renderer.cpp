@@ -952,7 +952,11 @@ private:
     std::unordered_map<u64, std::vector<bool>> obj_used_;  // in-between frame: previous blocks already paired
     std::unordered_map<u64, u32> obj_occ_;                  // in-between frame: blocks of each key so far
     u64 obj_tag_ = 0;
-    struct ObjStats { u64 draws = 0, matched = 0, blended = 0, mats = 0, jumps = 0, ticks = 0; double ms = 0; } obj_st_;
+    struct ObjStats {
+        u64 draws = 0, matched = 0, blended = 0, mats = 0, jumps = 0, ticks = 0;
+        u64 ambiguous = 0, offsets = 0, move = 0, rigid = 0, rotation = 0;  // strict: blocks left at tick n, by reason
+        double ms = 0;
+    } obj_st_;
     void obj_frame_begin(u64 tag);
     void obj_transforms(u32 index, u8* data, u64 bytes);
     bool obj_candidate(u32 index, u64 bytes) const {
@@ -2316,6 +2320,22 @@ static bool is_world_3x4(const float* m) {
     return true;
 }
 
+// HWDER_GI_OBJ_MODE=legacy: the original per-bone matching (nearest-other-bone fallback, partial
+// blocks). Default strict: a c3 block is blended whole or not at all (obj_transforms_strict).
+static bool obj_legacy() {
+    static const bool legacy = [] {
+        const char* m = getenv("HWDER_GI_OBJ_MODE");
+        return m && _stricmp(m, "legacy") == 0;
+    }();
+    return legacy;
+}
+
+// Strict limits (world units): order pairing, one bone's move per tick, and how far a bone's move may
+// differ from the block's first bone (the block must move roughly rigidly).
+constexpr float kObjOrderMatch = 4.0f;
+constexpr float kObjStrictMove = 20.0f;
+constexpr float kObjRigid = 4.0f;
+
 static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
     for (u64 i = 0; i + 12 <= nf; i += 4)
         if (is_world_3x4(m + i)) {
@@ -2339,10 +2359,13 @@ void VkRenderer::obj_frame_begin(u64 tag) {
     if (!(tag & 1)) obj_st_.ticks++;
     static u64 frames = 0;
     if ((tag & 1) && ++frames % 600 == 0) {
-        hw_log("gi: stage c over 600 extra frames: %llu c3 blocks, %llu matched the previous frame, %llu blended "
-               "(%llu matrices), %llu matrices jumped too far; cost %.2f ms per tick", (unsigned long long)obj_st_.draws,
-               (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended, (unsigned long long)obj_st_.mats,
-               (unsigned long long)obj_st_.jumps, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
+        hw_log("gi: stage c over 600 extra frames (%s): %llu c3 blocks, %llu matched the previous frame, %llu blended "
+               "(%llu matrices), %llu matrices jumped too far; left at tick n: %llu ambiguous, %llu offsets, %llu move, "
+               "%llu rigid, %llu rotation; cost %.2f ms per tick", obj_legacy() ? "legacy" : "strict",
+               (unsigned long long)obj_st_.draws, (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended,
+               (unsigned long long)obj_st_.mats, (unsigned long long)obj_st_.jumps, (unsigned long long)obj_st_.ambiguous,
+               (unsigned long long)obj_st_.offsets, (unsigned long long)obj_st_.move, (unsigned long long)obj_st_.rigid,
+               (unsigned long long)obj_st_.rotation, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
         obj_st_ = ObjStats{};
     }
 }
@@ -2391,6 +2414,82 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         const ObjEntry& e = prevs[k];
         return (e.pos[0] - pb[0]) * (e.pos[0] - pb[0]) + (e.pos[1] - pb[1]) * (e.pos[1] - pb[1]) + (e.pos[2] - pb[2]) * (e.pos[2] - pb[2]);
     };
+    if (!obj_legacy()) {
+        // Strict: blend the whole block or leave it byte-identical to tick n. A skinned mesh with some
+        // bones blended and others not (or blended toward another enemy's bones) stretches across the gap.
+        int best = -1;
+        if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= kObjOrderMatch * kObjOrderMatch) {
+            best = (int)occ;
+        } else {
+            size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
+            if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+            int cand = -1;
+            float cd = INFINITY, sd = INFINITY;  // best and second-best squared distances
+            for (size_t k = lo; k < hi; k++) {
+                if (used[k] || prevs[k].size != bytes) continue;
+                float d = dist(k);
+                if (d < cd) sd = cd, cd = d, cand = (int)k;
+                else if (d < sd) sd = d;
+            }
+            if (cand >= 0 && cd <= kObjMaxMove * kObjMaxMove) {
+                if (sd <= 4.0f * cd) {  // second within 2x the best distance: a crowd of identical objects
+                    obj_st_.ambiguous++;
+                    return;
+                }
+                best = cand;
+            }
+        }
+        if (best < 0) return;
+        used[best] = true;
+        obj_st_.matched++;
+        const float* a = (const float*)(obj_prev_.arena.data() + prevs[best].off);
+        float* b = (float*)data;
+        // The same offsets must hold transforms in both blocks; collect the matrices to blend.
+        u16 mats[1024 / 12 + 1];
+        u32 nm = 0;
+        for (u64 i = 0; i + 12 <= nf; i += 4) {
+            const bool tb = is_world_3x4(b + i);
+            if (tb != is_world_3x4(a + i)) {
+                obj_st_.offsets++;
+                return;
+            }
+            if (tb && (nm == 0 || i >= mats[nm - 1] + 12u)) mats[nm++] = (u16)i;
+        }
+        if (nm == 0) return;
+        const float m0[3] = {b[mats[0] + 3] - a[mats[0] + 3], b[mats[0] + 7] - a[mats[0] + 7], b[mats[0] + 11] - a[mats[0] + 11]};
+        for (u32 n = 0; n < nm; n++) {
+            const float* x = a + mats[n];
+            const float* y = b + mats[n];
+            const float mv[3] = {y[3] - x[3], y[7] - x[7], y[11] - x[11]};
+            if (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] > kObjStrictMove * kObjStrictMove) {
+                obj_st_.move++;
+                return;
+            }
+            const float r0 = mv[0] - m0[0], r1 = mv[1] - m0[1], r2 = mv[2] - m0[2];
+            if (r0 * r0 + r1 * r1 + r2 * r2 > kObjRigid * kObjRigid) {
+                obj_st_.rigid++;
+                return;
+            }
+            for (int r = 0; r < 3; r++) {  // each row turned by at most ~60 degrees (cos >= 0.5)
+                const float* p = x + r * 4;
+                const float* q = y + r * 4;
+                const float dot = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+                const float np = p[0] * p[0] + p[1] * p[1] + p[2] * p[2], nq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+                if (!(dot > 0.0f && dot * dot >= 0.25f * np * nq)) {
+                    obj_st_.rotation++;
+                    return;
+                }
+            }
+        }
+        for (u32 n = 0; n < nm; n++) {
+            const float* x = a + mats[n];
+            float* y = b + mats[n];
+            for (int k = 0; k < 12; k++) y[k] = x[k] + (y[k] - x[k]) * 0.5f;
+        }
+        obj_st_.mats += nm;
+        obj_st_.blended++;
+        return;
+    }
     int best = -1;
     float bd = kObjMaxMove * kObjMaxMove;
     if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= bd * 0.0625f) {
