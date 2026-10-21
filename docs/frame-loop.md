@@ -234,6 +234,40 @@ Implementation (`vk_renderer.cpp`, `obj_transforms`), on with `HWDER_GAME_INTERP
 * Autoplay battle: ~180-250 c3 blocks per in-between frame, ~100 paired and blended (~2,200 matrices),
   ~80 transforms per frame left unblended for moving too far.
 
+### Whole-block blending (2026-10-21, replaces the per-bone matching above)
+
+The per-bone rules above were the cause of the jagged 120 fps flashes (gone with `HWDER_GI_NO_OBJECTS=1`):
+a skinned mesh with some bones blended, some blended toward another bone or enemy and some left at
+tick n stretches across the gap. `HWDER_GI_OBJ_MODE` now selects:
+
+* `relaxed` (default): each c3 block is blended whole or left byte-identical to tick n.
+  * Pairing: previous-frame blocks of the same key whose first transform is within 2x the nearest (or
+    4 units) are shortlisted; the pair is the one whose whole block is closest. Ambiguous (left alone) if
+    a different block is within 1.25x; a byte-identical second candidate is the same object drawn twice.
+  * Matrices: inside a palette the windows straddling two matrices pass the transform test too, so the
+    48-byte grid is the one whose rows are most orthogonal (camera matrices such as a simple object's
+    viewProj are left out). The palette is the longest unbroken run on that grid and must match the
+    previous frame; other transforms on the grid (ring leftovers past the bones) join only when they
+    pass every check, and are otherwise left alone.
+  * Limits per matrix: move at most 60 units a tick, move within half the block's extent (12-80 units)
+    of the first bone's move, rows turned by under 90 degrees.
+* `strict`: the same whole-block rule with tight limits (first-hit grid, order pairing within 4 units,
+  20 unit moves, 4 unit rigidity, 60 degrees); flash-free but leaves most skeletons at 60 Hz.
+* `legacy`: the per-bone matching above.
+
+The 600-frame `gi: stage c` log line counts blocks left at tick n per reason and bone palettes (8+
+matrices) matched and blended. `HWDER_GI_OBJ_TRACE=1` logs, once a second, the block nearest the camera
+target with its outcome and per-matrix moves, every c3 block within 40 units of the player, and other
+vertex-stage constant buffers holding transforms near him (none found). Max's playtests (2026-10-21):
+no jagged flashes in relaxed; palettes blended in 80-95% of extra frames (Link's in 66 of 66 samples);
+a slight ghost remains on Link's side while running. Raising the move limit to 80 or blending rotations
+along the arc (quaternions) made it worse (odd shapes; black ground flashes) and was reverted.
+
+### Window resize at 120 fps (2026-10-21)
+
+* Jumping while resizing (120 fps only, also on the logo screens): a resize with Unlocked resolution changes the internal scale, and `apply_scale` destroyed every scaled render target at once, including frames queued ahead in the other buffer slots (triple buffering), so the presenter re-uploaded stale guest memory. Rescaled targets are now recreated when the game next renders into them (`texture_cache.cpp`).
+* Picture stretched after a resize (also at 60 fps): the game rebuilds a projection only when its camera's dirty byte (+353) is set, so Fill ultrawide kept the old aspect. `game/widescreen.cpp` remembers the perspective cameras it handled and marks them dirty when the window aspect or the fov setting changes.
+
 ## Ultrawide side bands flashing (Max, 2026-10-19)
 
 Since triple buffering, the side bands of "Fill ultrawide" were blacked out on frames whose full-width

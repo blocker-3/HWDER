@@ -2349,16 +2349,18 @@ static bool is_world_3x4(const float* m) {
 }
 
 // HWDER_GI_OBJ_MODE: how stage c pairs and blends c3 blocks.
-//   strict (default) - a block is blended whole or not at all, under tight per-bone limits.
-//   relaxed          - also whole-or-nothing, with limits a running/attacking skeleton passes.
-//   legacy           - the original per-bone matching (nearest-other-bone fallback, partial blocks).
+//   relaxed (default) - a block is blended whole or not at all, with limits a running/attacking skeleton
+//                       passes (palette grid by orthogonality, pairing by block contents).
+//   strict            - also whole-or-nothing, under tight per-bone limits (most skeletons stay at 60 Hz).
+//   legacy            - the original per-bone matching (nearest-other-bone fallback, partial blocks), which
+//                       produced the jagged flashes at 120 fps.
 enum class ObjMode { Strict, Relaxed, Legacy };
 static ObjMode obj_mode() {
     static const ObjMode mode = [] {
         const char* m = getenv("HWDER_GI_OBJ_MODE");
         if (m && _stricmp(m, "legacy") == 0) return ObjMode::Legacy;
-        if (m && _stricmp(m, "relaxed") == 0) return ObjMode::Relaxed;
-        return ObjMode::Strict;
+        if (m && _stricmp(m, "strict") == 0) return ObjMode::Strict;
+        return ObjMode::Relaxed;
     }();
     return mode;
 }

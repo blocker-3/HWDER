@@ -41,10 +41,15 @@ reject the extra pass. Its original 0x170-byte camera is restored before the rea
 GPU submissions carry the tick and extra-frame tag; subsequent native frames clear that tag, while
 already-queued GPU work retains its classification after a UI toggle. The renderer records owned copies of each real
 draw's vertex-stage c3 transform data and blends matching world/bone matrices in the extra draw's GPU
-copy. Matching uses model draw keys, draw order and nearby positions. This is approximate linear
-matrix interpolation, not rotation slerp or persistent object identity; quick turns, nearby identical
-objects and transform layouts outside the recognized heuristics remain visual limitations.
-`HWDER_GI_NO_OBJECTS=1` disables this object interpolation for comparison.
+copy. A block (a world matrix or a whole bone palette) is blended entirely or left exactly at the newest
+tick: blending only some bones of a skinned mesh stretched it into the giant jagged shapes seen at 120 fps.
+Matching uses model draw keys, nearby first transforms and the closest whole block; the palette's 48-byte
+grid is chosen by row orthogonality. This is approximate linear matrix interpolation, not rotation slerp
+or persistent object identity; very fast moves (over 60 units a tick), crowds of identical poses and
+layouts outside the recognized heuristics stay at 60 Hz, and a slight ghost remains on fast limbs.
+`HWDER_GI_OBJ_MODE=strict` or `legacy` selects the tighter or the original per-bone matching,
+`HWDER_GI_OBJ_TRACE=1` logs the blocks near the camera target, and `HWDER_GI_NO_OBJECTS=1` disables
+object interpolation for comparison.
 
 Triple buffering returns a guest buffer only after rendering and its presentation blit's source read
 finish. Timeouts produce diagnostics and further waits rather than freeing pending storage. Vulkan
