@@ -92,3 +92,15 @@ primary button to the matching step.
 | Anything else | Setup did not finish: <one line>. Fix that, then Retry. | prepare |
 
 Saves and settings are never touched by a failure.
+
+## The kit tracks main
+
+`tools/kit_baseline.txt` holds the full SHA of the `main` commit whose runtime the
+kit is meant to build. `tools/make_setup_dist.py` refuses to package when that
+commit is not an ancestor of the source checkout's HEAD, and records it as
+`baseline` in `setup-manifest.json`. Base-kit project files (`runtime/`, `tools/`,
+`docs/`, top-level files) that the current source no longer tracks are dropped
+from the kit. Bump the baseline whenever the kit branch merges a newer main.
+R5 (`1cd3c11`) was packaged from a branch that predated main's whole-block GI
+blending fix (`171dbef`, `9f0dd02`), so a fresh Prepare rebuilt the jagged
+120 fps flashes; R6 merges main `f9e061a` and adds this guard.

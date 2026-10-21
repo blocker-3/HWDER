@@ -3,11 +3,19 @@
 The existing make_dist private-content rules remain unchanged. Never include a game-linked EXE.
 The base source kit must pass its complete per-entry manifest; current committed project source
 overlays it, while pinned third-party source/notices remain from that verified source kit.
+Project files (runtime/, tools/, docs/ and the top-level files) that the base kit carries but the
+current source no longer tracks are dropped, so a removed file never ships again by accident.
+
+The kit must track main: tools/kit_baseline.txt names the main commit whose runtime the kit is
+expected to build, and packaging refuses when that commit is not an ancestor of the source HEAD.
+Bump the file whenever the kit branch merges a newer main (R5 shipped a kit built from a branch
+that predated main's whole-block GI blending fix, so Prepare rebuilt the jagged 120 fps flashes).
 """
 import argparse
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import zipfile
 
@@ -18,6 +26,39 @@ GNU_OPTIONAL_NOTICES={"runtime-notices/COPYING.winpthreads.txt"}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+BASELINE = "tools/kit_baseline.txt"
+PROJECT_ROOTS = ("runtime", "tools", "docs")
+
+
+def baseline_commit(root):
+    text = (Path(root)/BASELINE).read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", text):
+        raise ValueError("tools/kit_baseline.txt must hold one full 40-hex main commit")
+    return text
+
+
+def git_contains(root, commit):
+    """True when `commit` is reachable from the source checkout's HEAD."""
+    result = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, "HEAD"],
+                            capture_output=True)
+    if result.returncode not in (0, 1):
+        raise ValueError("Cannot verify the kit baseline: " + result.stderr.decode(errors="replace").strip())
+    return result.returncode == 0
+
+
+def require_baseline(root, contains=git_contains):
+    commit = baseline_commit(root)
+    if not contains(root, commit):
+        raise ValueError("Stale kit source: HEAD does not contain the main baseline " + commit[:12]
+                         + " named in " + BASELINE + "; merge main (or update the baseline) before packaging")
+    return commit
+
+
+def project_file(name):
+    p = PurePosixPath(name)
+    return name in make_dist.TOP_FILES or name in make_dist.PUBLIC_SCRIPTS or p.parts[0] in PROJECT_ROOTS
 
 
 def verified_source(path):
@@ -46,8 +87,9 @@ def verified_source(path):
         return result
 
 
-def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist.tracked):
+def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist.tracked, contains=git_contains):
     root, bootstrap, target = Path(root), Path(bootstrap), Path(target)
+    baseline = require_baseline(root, contains)
     cert = json.loads(Path(certificate).read_text(encoding="utf-8-sig"))
     data = bootstrap.read_bytes()
     if cert.get("kind") != "HWDER-codefree-setup-v1" or cert.get("exe_sha256") != digest(data) or not data.startswith(b"MZ"):
@@ -61,8 +103,12 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     if not cert.get("no_game_linkage") or not cert.get("system_imports_only"):
         raise ValueError("Bootstrap link/import review missing")
     files = verified_source(source_kit)
+    current = set(tracked(root))
+    # Base-kit project files the current source no longer tracks must not ship again.
+    for name in [n for n in files if project_file(n) and n not in current]:
+        del files[name]
     # Project roots only; don't recursively sweep this checkout or its private builds/runs.
-    for name in tracked(root):
+    for name in current:
         p = PurePosixPath(name)
         allowed = name in make_dist.TOP_FILES or name in make_dist.PUBLIC_SCRIPTS or (p.parts[0] in ("runtime","tools","docs") and p.suffix.lower() in make_dist.SOURCE_SUFFIXES)
         if not allowed:
@@ -95,7 +141,7 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
         "This local unsigned prototype is not published or a claim of clean-machine support.\n"
     ).encode()
     manifest = {n:digest(b) for n,b in members.items()}
-    members["setup-manifest.json"] = json.dumps({"schema":1,"bootstrap":cert,"files":manifest},indent=2).encode()
+    members["setup-manifest.json"] = json.dumps({"schema":1,"bootstrap":cert,"baseline":baseline,"files":manifest},indent=2).encode()
     target.parent.mkdir(parents=True,exist_ok=True)
     # Exclusive creation: do not replace a previous unique release artifact.
     with target.open("xb") as stream, zipfile.ZipFile(stream,"w",zipfile.ZIP_DEFLATED,compresslevel=6) as z:

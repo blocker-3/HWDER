@@ -34,6 +34,9 @@ class Package(unittest.TestCase):
             "source_sha256":{n:dist.digest((self.root/n).read_bytes()) for n in self.sources},
             "no_game_linkage":True,"system_imports_only":True}
         self.certificate.write_text(json.dumps(self.cert))
+        self.baseline="a"*40
+        (self.root/dist.BASELINE).write_text(self.baseline+chr(10))
+        self.contains=lambda root,commit:commit==self.baseline
 
     def write_kit(self):
         with zipfile.ZipFile(self.kit,"w") as z:
@@ -41,7 +44,31 @@ class Package(unittest.TestCase):
             z.writestr("kit/source-manifest.json",json.dumps({n:dist.digest(b) for n,b in self.files.items()}))
 
     def package(self):
-        return dist.assemble(self.kit,self.exe,self.certificate,self.root,self.root/"release.zip",lambda p:self.sources)
+        return dist.assemble(self.kit,self.exe,self.certificate,self.root,self.root/"release.zip",lambda p:self.sources,self.contains)
+
+    def test_stale_source_without_main_baseline_refused(self):
+        self.contains=lambda root,commit:False
+        with self.assertRaisesRegex(ValueError,"Stale kit source"):self.package()
+        self.assertFalse((self.root/"release.zip").exists())
+
+    def test_baseline_file_must_name_one_full_commit(self):
+        (self.root/dist.BASELINE).write_text("f9e061a"+chr(10))
+        with self.assertRaisesRegex(ValueError,"kit_baseline"):self.package()
+        (self.root/dist.BASELINE).unlink()
+        with self.assertRaises(FileNotFoundError):self.package()
+
+    def test_baseline_recorded_and_untracked_project_files_dropped(self):
+        self.files["runtime/src/interp/frame_probe.cpp"]=b"removed on main";self.files["docs/old.md"]=b"removed on main"
+        self.files["third_party/SDL/src/keep.c"]=b"pinned";self.write_kit()
+        with zipfile.ZipFile(self.package()) as z:
+            names=z.namelist()
+            self.assertNotIn("source/runtime/src/interp/frame_probe.cpp",names)
+            self.assertNotIn("source/docs/old.md",names)
+            self.assertIn("source/third_party/SDL/src/keep.c",names)
+            self.assertIn("source/CMakeLists.txt",names)
+            self.assertNotIn("source/README.md",names)  # in the base kit, not tracked by this fixture
+            self.assertEqual(json.loads(z.read("setup-manifest.json"))["baseline"],self.baseline)
+            self.assertNotIn("source/runtime/src/interp/frame_probe.cpp",json.loads(z.read("source/source-manifest.json")))
 
     def test_exact_one_binary_and_notices_hashes_reopened(self):
         p=self.package()
