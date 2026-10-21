@@ -2600,10 +2600,31 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
             float be = INFINITY;
             for (u32 p = 0; p < 3; p++)  // the most orthogonal grid among those holding (nearly) the most matrices
                 if (cnt[p] && cnt[p] + 2 >= maxc && err[p] / cnt[p] < be) be = err[p] / cnt[p], ph = p;
-            for (u64 i = ph * 4; i + 12 <= nf; i += 12) {
-                const bool tb = is_world_3x4(b + i);
-                if (tb) mats[nm++] = (u16)i;
-                if (tb != is_world_3x4(a + i)) same = false;
+            // The palette is the longest unbroken run of transforms on that grid; it must match the previous
+            // frame. Other transforms on the grid past it are often leftovers in the ring (moving thousands of
+            // units a tick, which no drawn bone does): they join the blend only when they look like part of
+            // the same object in both frames, and are otherwise left alone instead of rejecting the block.
+            u16 grid[1024 / 12 + 1];
+            bool in_a[1024 / 12 + 1];
+            u32 ng = 0, run0 = 0, runn = 0;
+            for (u64 i = ph * 4; i + 12 <= nf; i += 12)
+                if (is_world_3x4(b + i)) grid[ng] = (u16)i, in_a[ng] = is_world_3x4(a + i), ng++;
+            for (u32 k = 0; k < ng;) {
+                u32 e = k + 1;
+                while (e < ng && grid[e] == grid[e - 1] + 12) e++;
+                if (e - k > runn) run0 = k, runn = e - k;
+                k = e;
+            }
+            for (u32 k = run0; k < run0 + runn; k++) {
+                if (!in_a[k]) same = false;
+                mats[nm++] = grid[k];
+            }
+            for (u32 k = 0; k < ng; k++) {
+                if (k >= run0 && k < run0 + runn) continue;
+                const float* x = a + grid[k];
+                const float* y = b + grid[k];
+                const float dx = y[3] - x[3], dy = y[7] - x[7], dz = y[11] - x[11];
+                if (in_a[k] && dx * dx + dy * dy + dz * dz <= lim.move * lim.move) mats[nm++] = grid[k];
             }
         } else {
             for (u64 i = 0; i + 12 <= nf; i += 4) {
