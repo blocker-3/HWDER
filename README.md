@@ -48,7 +48,8 @@ Media Foundation (built into Windows; "N" editions need the Media Feature Pack) 
 
 In game: **F1** opens the options overlay (internal resolution scale, unlocked resolution for
 ultrawide, vsync, borderless, anisotropic filtering, FPS counter, opt-in 60 Hz monitor switch, and
-a save-file cheats tab; frame interpolation is experimental and disabled). **F11** toggles borderless fullscreen. Any XInput controller works;
+a save-file cheats tab). Settings > Display > Frame rate > "120 fps" draws an extra in-between frame per
+battle tick (off by default, switchable while playing; menus stay at 60; see `docs/high-framerate.md`). **F11** toggles borderless fullscreen. Any XInput controller works;
 keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, Q/E = L/R,
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
 
@@ -262,7 +263,9 @@ docs/              design decisions
 log file; `HWDER_MUTE=1` silences audio; `HWDER_RES_SCALE` overrides the resolution scale;
 `HWDER_VALIDATION=1` enables Vulkan validation layers; `HWDER_VK_FRAME_DUMP`, `HWDER_GPU_TRACE`,
 `HWDER_IPC_TRACE`, `HWDER_FS_TRACE` and the other `HWDER_*_TRACE` switches dump the respective
-subsystem's activity to the log.
+subsystem's activity to the log. `HWDER_GAME_INTERP=0/1` overrides the 120 fps setting for tests;
+`HWDER_GI_LOG=1` logs its timing and skip reasons, `HWDER_GI_OBJ_TRACE=1` the object blending near the
+player, and `HWDER_GI_NO_OBJECTS=1` interpolates the camera only (for comparison).
 
 Successful graphics pipelines are recorded with their shader code and binding metadata in
 `pipeline_warmup.bin`. A compatible file prebuilds those recipes on the single pipeline

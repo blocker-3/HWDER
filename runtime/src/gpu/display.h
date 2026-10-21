@@ -44,8 +44,6 @@ bool wait_present_done(u64 ticket, u64 timeout_ns);
 
 // Status shown in the title bar while booting.
 void set_status(const std::string& s);
-// Frame interpolation: pace presents at `hz` (0 = the 60 Hz game grid with swap-interval slots).
-void set_output_hz(double hz);
 void client_size(unsigned* w, unsigned* h);  // current swapchain / window client size (0 if none yet)
 double monitor_hz();
 

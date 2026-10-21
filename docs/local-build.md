@@ -109,8 +109,7 @@ contains translated game code. Its former “only our own work” claim was inco
 
 The project runtime/tooling is under the root MIT license. Third-party notices are retained
 from their own source trees; see `third_party/README.md` (SDL Zlib, ImGui MIT, SPIR-V Headers
-MIT, Vulkan Headers Apache-2.0/MIT). The vendored RenderDoc API header is MIT, with its
-embedded notice retained; the RenderDoc DLL/programs are not bundled. No Python packages, compiler, MSVC redistributables,
+MIT, Vulkan Headers Apache-2.0/MIT). No Python packages, compiler, MSVC redistributables,
 Windows SDK, decryption tools from outside this repository or installer are bundled. Any
 future toolchain bundling needs its own license/distribution review; this workflow does not
 assert a legal guarantee about use of game dumps, keys or local generated output.

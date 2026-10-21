@@ -11,6 +11,7 @@
 // +0x148 vertical fov, +0x14c aspect, +0x158 flags (bit 0: orthographic).
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "gpu/display.h"
@@ -21,6 +22,18 @@ namespace {
 
 constexpr float k169 = 16.0f / 9.0f;
 float g_set = 0.0f;  // the last aspect this hook wrote (to undo it when the option is turned off)
+
+// Perspective cameras this hook has built a projection for (guest addresses, most recent kept). The game
+// rebuilds a projection only when its parameters change (Camera::Update checks the dirty byte +353), so a
+// window resize alone would leave the old aspect in place: hw_widescreen_tick marks these dirty instead.
+u64 g_cams[8];
+u32 g_ncams = 0;
+
+void remember(u64 addr) {
+    for (u32 i = 0; i < std::min(g_ncams, 8u); i++)
+        if (g_cams[i] == addr) return;
+    g_cams[g_ncams++ % 8] = addr;
+}
 
 // The window's aspect when filling an ultrawide screen, else 0.
 float wide_aspect() {
@@ -37,11 +50,37 @@ float wide_aspect() {
 
 extern "C" void f_100057cee0_orig(Ctx* c);
 
+// Once per frame (game thread, interp/camera.cpp's render-camera copy): when the window's aspect or the fov
+// setting changed, ask the remembered cameras to rebuild their projection on their next update. A camera
+// is only touched while it still looks like one this hook handled (perspective, our or a 16:9 aspect).
+extern "C" void hw_widescreen_tick() {
+    static float last_wa = -1.0f, last_fov = -1.0f;
+    const float wa = wide_aspect(), fov = (float)settings::video().fov;
+    if (wa == last_wa && fov == last_fov) return;
+    const bool first = last_wa < 0.0f;
+    last_wa = wa, last_fov = fov;
+    if (first) return;
+    u32 n = 0;
+    for (u32 i = 0; i < std::min(g_ncams, 8u); i++) {
+        u8* cam = GUESTP(u8, g_cams[i]);
+        if (!cam) continue;
+        u32 flags;
+        float aspect;
+        memcpy(&flags, cam + 0x158, 4);
+        memcpy(&aspect, cam + 0x14c, 4);
+        if ((flags & 1) || !(aspect == g_set || std::fabs(aspect - k169) < 0.01f)) continue;
+        cam[353] = 1;  // projection dirty
+        n++;
+    }
+    hw_log("widescreen: window aspect %.3f, fov %.0f: projection rebuild requested for %u cameras", wa, fov, n);
+}
+
 extern "C" void f_100057cee0(Ctx* c) {
     u8* cam = GUESTP(u8, c->x[0]);
     u32 flags;
     memcpy(&flags, cam + 0x158, 4);
     if (!(flags & 1)) {  // perspective
+        remember(c->x[0]);
         float aspect;
         memcpy(&aspect, cam + 0x14c, 4);
         float wa = wide_aspect();
