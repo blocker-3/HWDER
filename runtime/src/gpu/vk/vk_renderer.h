@@ -339,16 +339,16 @@ struct Framebuffer {
     }
 };
 
-// Shared across the renderer's units (defined where the comment says).
+// Shared across the renderer's units (defined in the unit the comment names).
 extern const char* kPipelineCacheFile;  // vk_pipelines.cpp
-double prof_flush();                    // vk_renderer.cpp
-bool drawlog_active();                  // vk_renderer.cpp
-extern FILE* g_drawlog;                 // vk_renderer.cpp
-extern const u64 g_start_ms;            // vk_renderer.cpp
-void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt);  // vk_renderer.cpp
+double prof_flush();                    // vk_debug.cpp
+bool drawlog_active();                  // vk_debug.cpp
+extern FILE* g_drawlog;                 // vk_debug.cpp
+extern const u64 g_start_ms;            // vk_debug.cpp
+void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt);  // vk_debug.cpp
 void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const char* path,
-                     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);  // vk_renderer.cpp
-void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir);  // vk_renderer.cpp
+                     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);  // vk_debug.cpp
+void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir);  // vk_debug.cpp
 
 class VkRenderer final : public Renderer {
 public:
