@@ -971,6 +971,19 @@ private:
     ObjTraceRec obj_tr_skin_, obj_tr_any_;
     float obj_at_[3] = {}, obj_eye_[3] = {};
     bool obj_cam_ = false;
+    // Also: every c3 block of the frame within kObjNear of the player (the previous frame's bone palette
+    // nearest the camera target), and other vertex-stage constant buffers holding transforms near him.
+    struct ObjNear {
+        u64 key;
+        u32 bytes, nm;
+        u8 outcome;
+        float d;
+    };
+    std::vector<ObjNear> obj_near_cur_, obj_near_last_;
+    float obj_link_[3] = {}, obj_link_next_[3] = {}, obj_link_next_d_ = INFINITY;
+    bool obj_link_ok_ = false;
+    struct CbufCensus { u32 blocks = 0, with_tf = 0, close = 0; } obj_cb_[18];
+    void obj_cbuf_census(u32 index, const u8* data, u64 bytes);
     void obj_trace_log();
     void obj_frame_begin(u64 tag);
     void obj_transforms(u32 index, u8* data, u64 bytes);
@@ -2353,7 +2366,7 @@ static bool obj_legacy() { return obj_mode() == ObjMode::Legacy; }
 
 // Whole-block limits (world units). order: an order pairing's first-transform distance. move: one
 // bone's move per tick. rigid: how far a bone's move may differ from the block's first bone (relaxed:
-// a quarter of the block's extent, at least `rigid` and at most kObjMaxMove / 2). min_cos: the
+// half the block's extent, at least `rigid` and at most kObjMaxMove). min_cos: the
 // smallest cosine between a bone's prev and current rows (0.5 is ~60 degrees, 0 is 90).
 struct ObjLimits {
     float order, move, rigid, min_cos;
@@ -2385,6 +2398,7 @@ static const char* const kObjOutcomes[] = {"no previous frame", "no transform", 
                                            "unpaired",          "ambiguous",      "offsets",
                                            "move",              "rigid",          "rotation",
                                            "blended"};
+constexpr float kObjNear = 40.0f;  // HWDER_GI_OBJ_TRACE: blocks this close to the player are listed (world units)
 enum ObjOutcome : u8 { kOutNoPrev, kOutNoTransform, kOutNoKey, kOutUnpaired, kOutAmbiguous, kOutOffsets, kOutMove, kOutRigid, kOutRotation, kOutBlended };
 
 void VkRenderer::obj_trace_log() {
@@ -2412,6 +2426,44 @@ void VkRenderer::obj_trace_log() {
                r->fail_n == ~0u ? -1 : (int)r->fail_n, moves.c_str());
         r->valid = false;
     }
+    std::string nearby;
+    char tmp[96];
+    for (const ObjNear& n : obj_near_last_) {
+        snprintf(tmp, sizeof tmp, "%s%04llx/%u B/%u m/%.1f: %s", nearby.empty() ? "" : "; ", (unsigned long long)(n.key & 0xFFFF), n.bytes, n.nm,
+                 n.d, kObjOutcomes[n.outcome]);
+        nearby += tmp;
+    }
+    hw_log("gi: trace c3 blocks within %.0f of the player last frame (%zu): %s", kObjNear, obj_near_last_.size(), nearby.c_str());
+    std::string cb;
+    for (u32 i = 0; i < 18; i++) {
+        if (!obj_cb_[i].blocks) continue;
+        snprintf(tmp, sizeof tmp, "%sc%u: %u blocks, %u with transforms, %u near the player", cb.empty() ? "" : "; ", i, obj_cb_[i].blocks,
+                 obj_cb_[i].with_tf, obj_cb_[i].close);
+        cb += tmp;
+        obj_cb_[i] = CbufCensus{};
+    }
+    hw_log("gi: trace other vertex constant buffers in extra frames over the last second: %s", cb.empty() ? "none" : cb.c_str());
+}
+
+// HWDER_GI_OBJ_TRACE: vertex-stage constant buffers other than c3 in in-between frames - do any hold world
+// transforms near the player (which stage c would not blend)?
+void VkRenderer::obj_cbuf_census(u32 index, const u8* data, u64 bytes) {
+    if (index >= 18) return;
+    CbufCensus& c = obj_cb_[index];
+    c.blocks++;
+    const float* m = (const float*)data;
+    bool tf = false, close = false;
+    for (u64 i = 0; i + 12 <= bytes / 4; i += 4) {
+        if (!is_world_3x4(m + i)) continue;
+        tf = true;
+        const float dx = m[i + 3] - obj_link_[0], dy = m[i + 7] - obj_link_[1], dz = m[i + 11] - obj_link_[2];
+        if (obj_link_ok_ && dx * dx + dy * dy + dz * dz < kObjNear * kObjNear) {
+            close = true;
+            break;
+        }
+    }
+    c.with_tf += tf;
+    c.close += close;
 }
 
 void VkRenderer::obj_frame_begin(u64 tag) {
@@ -2428,6 +2480,11 @@ void VkRenderer::obj_frame_begin(u64 tag) {
     if (!(tag & 1)) obj_st_.ticks++;
     static const bool trace = getenv("HWDER_GI_OBJ_TRACE") != nullptr;
     if (trace && (tag & 1)) {
+        obj_near_last_.swap(obj_near_cur_);
+        obj_near_cur_.clear();
+        obj_link_ok_ = obj_link_next_d_ < INFINITY;
+        if (obj_link_ok_) memcpy(obj_link_, obj_link_next_, 12);
+        obj_link_next_d_ = INFINITY;
         obj_trace_log();
         interp::CamSnap cs[1];
         obj_cam_ = interp::snapshots(cs, 1) == 1;
@@ -2500,6 +2557,12 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
             if (!obj_first_pos(b, bytes / 4, p)) return;
             const float rel[3] = {p[0] - r->obj_at_[0], p[1] - r->obj_at_[1], p[2] - r->obj_at_[2]};
             const float d = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+            if (bytes >= 1024 && d < r->obj_link_next_d_) r->obj_link_next_d_ = d, memcpy(r->obj_link_next_, p, 12);
+            if (r->obj_link_ok_ && r->obj_near_cur_.size() < 32) {
+                const float lx = p[0] - r->obj_link_[0], ly = p[1] - r->obj_link_[1], lz = p[2] - r->obj_link_[2];
+                const float ld = std::sqrt(lx * lx + ly * ly + lz * lz);
+                if (ld < kObjNear) r->obj_near_cur_.push_back({r->cur_draw_key_, (u32)bytes, mats ? nm : 0, outcome, ld});
+            }
             for (ObjTraceRec* t : {&r->obj_tr_any_, bytes >= 1024 ? &r->obj_tr_skin_ : nullptr}) {
                 if (!t || (t->valid && t->d_at <= d)) continue;
                 t->valid = true;
@@ -2543,27 +2606,53 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         // Strict / relaxed: blend the whole block or leave it byte-identical to tick n. A skinned mesh with some
         // bones blended and others not (or blended toward another enemy's bones) stretches across the gap.
         int best = -1;
-        if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= obj_limits().order * obj_limits().order) {
+        if (obj_mode() == ObjMode::Relaxed) {
+            // Relaxed: the nearest first transforms only shortlist candidates. The same model is often drawn
+            // twice from one spot with different poses, so the pair is the shortlisted block whose whole
+            // contents are closest; still ambiguous when a different block is nearly as close.
+            size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
+            if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+            float cd = INFINITY;
+            for (size_t k = lo; k < hi; k++)
+                if (!used[k] && prevs[k].size == bytes) cd = std::min(cd, dist(k));
+            if (cd > kObjMaxMove * kObjMaxMove) return;
+            const float* bb = (const float*)data;
+            const float lim2 = std::max(4.0f * cd, 16.0f);
+            int c1 = -1, c2 = -1;
+            float l1 = INFINITY, l2 = INFINITY;
+            for (size_t k = lo; k < hi; k++) {
+                if (used[k] || prevs[k].size != bytes || dist(k) > lim2) continue;
+                const float* x = (const float*)(obj_prev_.arena.data() + prevs[k].off);
+                float s = 0.0f;
+                for (u64 i = 0; i < nf; i++) s += std::fabs(x[i] - bb[i]);
+                if (s < l1) l2 = l1, c2 = c1, l1 = s, c1 = (int)k;
+                else if (s < l2) l2 = s, c2 = (int)k;
+            }
+            tr.pair_d = std::sqrt(cd), tr.second_d = c2 >= 0 ? l2 / std::max(l1, 1e-6f) : -1.0f;  // second: content ratio
+            const bool dup = c2 >= 0 && !memcmp(obj_prev_.arena.data() + prevs[c1].off, obj_prev_.arena.data() + prevs[c2].off, bytes);
+            if (c2 >= 0 && l2 <= 1.25f * l1 && !dup) {
+                obj_st_.ambiguous++;
+                tr.outcome = kOutAmbiguous;
+                return;
+            }
+            best = c1;
+        } else if (occ < prevs.size() && !used[occ] && prevs[occ].size == bytes && dist(occ) <= obj_limits().order * obj_limits().order) {
             best = (int)occ;
             tr.pair_d = std::sqrt(dist(occ));
         } else {
             size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
             if (prevs.size() <= 96) lo = 0, hi = prevs.size();
-            int cand = -1, cand2 = -1;
+            int cand = -1;
             float cd = INFINITY, sd = INFINITY;  // best and second-best squared distances
             for (size_t k = lo; k < hi; k++) {
                 if (used[k] || prevs[k].size != bytes) continue;
                 float d = dist(k);
-                if (d < cd) sd = cd, cand2 = cand, cd = d, cand = (int)k;
-                else if (d < sd) sd = d, cand2 = (int)k;
+                if (d < cd) sd = cd, cd = d, cand = (int)k;
+                else if (d < sd) sd = d;
             }
             if (cand >= 0) tr.pair_d = std::sqrt(cd), tr.second_d = std::sqrt(sd);
-            // Relaxed: a second candidate byte-identical to the best is the same object drawn twice (another
-            // pass with the same program and buffers), not a crowd: either gives the same blend.
-            const bool dup = obj_mode() == ObjMode::Relaxed && cand2 >= 0 &&
-                             !memcmp(obj_prev_.arena.data() + prevs[cand].off, obj_prev_.arena.data() + prevs[cand2].off, bytes);
             if (cand >= 0 && cd <= kObjMaxMove * kObjMaxMove) {
-                if (sd <= 4.0f * cd && !dup) {  // second within 2x the best distance: a crowd of identical objects
+                if (sd <= 4.0f * cd) {  // second within 2x the best distance: a crowd of identical objects
                     obj_st_.ambiguous++;
                     tr.outcome = kOutAmbiguous;
                     return;
@@ -2587,6 +2676,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         const ObjLimits& lim = obj_limits();
         const bool relaxed = obj_mode() == ObjMode::Relaxed;
         bool same = true;
+        u32 nrun = ~0u;  // relaxed: mats[nrun..] are extras past the palette run, dropped (not blended) when a check fails
         if (relaxed) {
             u32 cnt[3] = {};
             float err[3] = {};
@@ -2619,6 +2709,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
                 if (!in_a[k]) same = false;
                 mats[nm++] = grid[k];
             }
+            nrun = nm;
             for (u32 k = 0; k < ng; k++) {
                 if (k >= run0 && k < run0 + runn) continue;
                 const float* x = a + grid[k];
@@ -2650,12 +2741,25 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
                 const float dx = y[3] - b[mats[0] + 3], dy = y[7] - b[mats[0] + 7], dz = y[11] - b[mats[0] + 11];
                 ext2 = std::max(ext2, dx * dx + dy * dy + dz * dz);
             }
-            rigid = std::clamp(0.25f * std::sqrt(ext2), lim.rigid, kObjMaxMove * 0.5f);
+            rigid = std::clamp(0.5f * std::sqrt(ext2), lim.rigid, kObjMaxMove);
         }
         for (u32 n = 0; n < nm; n++) {
             const float* x = a + mats[n];
             const float* y = b + mats[n];
             const float mv[3] = {y[3] - x[3], y[7] - x[7], y[11] - x[11]};
+            if (n >= nrun) {  // an extra: keep it only if it passes every check, never reject the block for it
+                const float r0 = mv[0] - m0[0], r1 = mv[1] - m0[1], r2 = mv[2] - m0[2];
+                bool ok = mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] <= lim.move * lim.move &&
+                          r0 * r0 + r1 * r1 + r2 * r2 <= rigid * rigid;
+                for (int r = 0; r < 3 && ok; r++) {
+                    const float* p = x + r * 4;
+                    const float* q = y + r * 4;
+                    const float dot = p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+                    ok = dot > 0.0f;
+                }
+                if (!ok) mats[n--] = mats[--nm];
+                continue;
+            }
             if (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] > lim.move * lim.move) {
                 obj_st_.move++;
                 tr.outcome = kOutMove, tr.fail_n = n;
@@ -2865,6 +2969,12 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);
+            static const bool census = getenv("HWDER_GI_OBJ_TRACE") != nullptr;
+            if (census && cur_stage_ == 0 && c.index != 3 && n >= 48 && n <= 4096 && (gpu::exec_gi_tag() & 1)) {
+                alignas(16) u8 tmp[4096];
+                mm_->read(va, tmp, n);  // the staging slice is write-combined: read the guest copy instead
+                obj_cbuf_census(c.index, tmp, n);
+            }
         } else {
             memset(s.ptr, 0, bytes);
         }
