@@ -2360,8 +2360,16 @@ struct ObjLimits {
     bool extent_rigid;
 };
 static const ObjLimits& obj_limits() {
-    static const ObjLimits strict{4.0f, 20.0f, 4.0f, 0.5f, false}, relaxed{4.0f, 40.0f, 12.0f, 0.0f, true};
+    static const ObjLimits strict{4.0f, 20.0f, 4.0f, 0.5f, false}, relaxed{4.0f, 60.0f, 12.0f, 0.0f, true};
     return obj_mode() == ObjMode::Relaxed ? relaxed : strict;
+}
+
+// How far a 3x4's rotation rows are from orthogonal: the sum of their squared pairwise cosines.
+static float obj_ortho_err(const float* m) {
+    auto dot = [&](int r, int s) { return m[r * 4] * m[s * 4] + m[r * 4 + 1] * m[s * 4 + 1] + m[r * 4 + 2] * m[s * 4 + 2]; };
+    const float n0 = dot(0, 0), n1 = dot(1, 1), n2 = dot(2, 2);
+    const float d01 = dot(0, 1), d02 = dot(0, 2), d12 = dot(1, 2);
+    return d01 * d01 / (n0 * n1) + d02 * d02 / (n0 * n2) + d12 * d12 / (n1 * n2);
 }
 
 static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
@@ -2541,17 +2549,21 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         } else {
             size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
             if (prevs.size() <= 96) lo = 0, hi = prevs.size();
-            int cand = -1;
+            int cand = -1, cand2 = -1;
             float cd = INFINITY, sd = INFINITY;  // best and second-best squared distances
             for (size_t k = lo; k < hi; k++) {
                 if (used[k] || prevs[k].size != bytes) continue;
                 float d = dist(k);
-                if (d < cd) sd = cd, cd = d, cand = (int)k;
-                else if (d < sd) sd = d;
+                if (d < cd) sd = cd, cand2 = cand, cd = d, cand = (int)k;
+                else if (d < sd) sd = d, cand2 = (int)k;
             }
             if (cand >= 0) tr.pair_d = std::sqrt(cd), tr.second_d = std::sqrt(sd);
+            // Relaxed: a second candidate byte-identical to the best is the same object drawn twice (another
+            // pass with the same program and buffers), not a crowd: either gives the same blend.
+            const bool dup = obj_mode() == ObjMode::Relaxed && cand2 >= 0 &&
+                             !memcmp(obj_prev_.arena.data() + prevs[cand].off, obj_prev_.arena.data() + prevs[cand2].off, bytes);
             if (cand >= 0 && cd <= kObjMaxMove * kObjMaxMove) {
-                if (sd <= 4.0f * cd) {  // second within 2x the best distance: a crowd of identical objects
+                if (sd <= 4.0f * cd && !dup) {  // second within 2x the best distance: a crowd of identical objects
                     obj_st_.ambiguous++;
                     tr.outcome = kOutAmbiguous;
                     return;
@@ -2567,23 +2579,39 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         tr.a = a;
         // The same offsets must hold transforms in both blocks; collect the matrices to blend. Strict
         // compares every 16-byte offset that looks like a transform (misaligned windows inside a bone
-        // palette included, whose edges depend on neighbouring data); relaxed compares the matrices
-        // themselves (non-overlapping, scanned from the first hit).
+        // palette included, whose edges depend on neighbouring data) and blends from the first hit.
+        // Relaxed picks the palette's 48-byte grid first: inside a palette the windows straddling two
+        // matrices pass is_world_3x4 too, and whichever window matched first set the grid (it flipped
+        // between frames). Real rotation rows are orthogonal, straddling windows mix two bones' rows;
+        // camera matrices (viewProj, before an object's world matrix) are not orthogonal either.
         const ObjLimits& lim = obj_limits();
         const bool relaxed = obj_mode() == ObjMode::Relaxed;
-        u16 amats[1024 / 12 + 1];
-        u32 na = 0;
         bool same = true;
-        for (u64 i = 0; i + 12 <= nf; i += 4) {
-            const bool tb = is_world_3x4(b + i), ta = is_world_3x4(a + i);
-            if (tb && (nm == 0 || i >= mats[nm - 1] + 12u)) mats[nm++] = (u16)i;
-            if (relaxed) {
-                if (ta && (na == 0 || i >= amats[na - 1] + 12u)) amats[na++] = (u16)i;
-            } else if (tb != ta) {
-                same = false;
+        if (relaxed) {
+            u32 cnt[3] = {};
+            float err[3] = {};
+            for (u64 i = 0; i + 12 <= nf; i += 4) {
+                if (!is_world_3x4(b + i)) continue;
+                const u32 ph = (u32)(i / 4 % 3);
+                cnt[ph]++;
+                err[ph] += obj_ortho_err(b + i);
+            }
+            u32 maxc = std::max({cnt[0], cnt[1], cnt[2]}), ph = 0;
+            float be = INFINITY;
+            for (u32 p = 0; p < 3; p++)  // the most orthogonal grid among those holding (nearly) the most matrices
+                if (cnt[p] && cnt[p] + 2 >= maxc && err[p] / cnt[p] < be) be = err[p] / cnt[p], ph = p;
+            for (u64 i = ph * 4; i + 12 <= nf; i += 12) {
+                const bool tb = is_world_3x4(b + i);
+                if (tb) mats[nm++] = (u16)i;
+                if (tb != is_world_3x4(a + i)) same = false;
+            }
+        } else {
+            for (u64 i = 0; i + 12 <= nf; i += 4) {
+                const bool tb = is_world_3x4(b + i);
+                if (tb && (nm == 0 || i >= mats[nm - 1] + 12u)) mats[nm++] = (u16)i;
+                if (tb != is_world_3x4(a + i)) same = false;
             }
         }
-        if (relaxed) same = na == nm && memcmp(amats, mats, nm * sizeof(u16)) == 0;
         tr.mats = mats, tr.nm = nm;
         if (nm >= 8) obj_st_.skin_matched++;
         if (!same) {
