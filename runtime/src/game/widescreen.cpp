@@ -7,16 +7,19 @@
 // guest still renders into 16:9 targets; the renderer allocates them at the window's shape, which
 // undoes the horizontal squeeze (runtime/src/gpu/vk/vk_renderer.cpp, unlocked scale).
 //
-// Hook: Camera::BuildProj (0x100057cee0, x0 = camera). The camera layout is in docs/camera.md:
-// +0x148 vertical fov, +0x14c aspect, +0x158 flags (bit 0: orthographic).
+// Hook: Camera_BuildProj (x0 = camera). The camera layout is game::Camera (game/structs.h, docs/camera.md).
 #include <windows.h>
 
 #include <algorithm>
 #include <cmath>
 
+#include "game/guest.h"
+#include "game/hook.h"
+#include "game/structs.h"
 #include "gpu/display.h"
 #include "gpu/settings.h"
 #include "hwder/runtime.h"
+#include "interp/interp.h"
 
 namespace {
 
@@ -24,7 +27,7 @@ constexpr float k169 = 16.0f / 9.0f;
 float g_set = 0.0f;  // the last aspect this hook wrote (to undo it when the option is turned off)
 
 // Perspective cameras this hook has built a projection for (guest addresses, most recent kept). The game
-// rebuilds a projection only when its parameters change (Camera::Update checks the dirty byte +353), so a
+// rebuilds a projection only when its parameters change (Camera_Update checks proj_dirty), so a
 // window resize alone would leave the old aspect in place: hw_widescreen_tick marks these dirty instead.
 u64 g_cams[8];
 u32 g_ncams = 0;
@@ -48,8 +51,6 @@ float wide_aspect() {
 
 }  // namespace
 
-extern "C" void f_100057cee0_orig(Ctx* c);
-
 // Once per frame (game thread, interp/camera.cpp's render-camera copy): when the window's aspect or the fov
 // setting changed, ask the remembered cameras to rebuild their projection on their next update. A camera
 // is only touched while it still looks like one this hook handled (perspective, our or a 16:9 aspect).
@@ -62,33 +63,26 @@ extern "C" void hw_widescreen_tick() {
     if (first) return;
     u32 n = 0;
     for (u32 i = 0; i < std::min(g_ncams, 8u); i++) {
-        u8* cam = GUESTP(u8, g_cams[i]);
+        game::Camera* cam = game::at<game::Camera>(g_cams[i]);
         if (!cam) continue;
-        u32 flags;
-        float aspect;
-        memcpy(&flags, cam + 0x158, 4);
-        memcpy(&aspect, cam + 0x14c, 4);
-        if ((flags & 1) || !(aspect == g_set || std::fabs(aspect - k169) < 0.01f)) continue;
-        cam[353] = 1;  // projection dirty
+        if (cam->orthographic() || !(cam->aspect == g_set || std::fabs(cam->aspect - k169) < 0.01f)) continue;
+        cam->proj_dirty = 1;
         n++;
     }
     hw_log("widescreen: window aspect %.3f, fov %.0f: projection rebuild requested for %u cameras", wa, fov, n);
 }
 
-extern "C" void f_100057cee0(Ctx* c) {
-    u8* cam = GUESTP(u8, c->x[0]);
-    u32 flags;
-    memcpy(&flags, cam + 0x158, 4);
-    if (!(flags & 1)) {  // perspective
+HW_HOOK(Camera_BuildProj) {
+    game::Camera* cam = game::at<game::Camera>(c->x[0]);
+    if (!cam->orthographic()) {  // perspective
         remember(c->x[0]);
-        float aspect;
-        memcpy(&aspect, cam + 0x14c, 4);
+        float aspect = cam->aspect;
         float wa = wide_aspect();
         float want = aspect;
         if (wa > 0.0f && (std::fabs(aspect - k169) < 0.01f || aspect == g_set)) want = wa;  // a 16:9 camera (or one we widened)
         else if (wa == 0.0f && g_set != 0.0f && aspect == g_set) want = k169;               // option turned off: restore
         if (want != aspect) {
-            memcpy(cam + 0x14c, &want, 4);
+            cam->aspect = want;
             if (want != k169) {
                 if (g_set != want) hw_log("widescreen: camera aspect %.3f -> %.3f", aspect, want);
                 g_set = want;
@@ -100,12 +94,12 @@ extern "C" void f_100057cee0(Ctx* c) {
     // the game's culling, does. k scales tan(fov / 2), i.e. the visible extent at a given distance.
     float k = settings::video().fov / 100.0f;
     float fov = 0.0f;
-    if (!(flags & 1) && k != 1.0f) {
-        memcpy(&fov, cam + 0x148, 4);
+    if (!cam->orthographic() && k != 1.0f) {
+        fov = cam->fov;
         float wide = 2.0f * std::atan(std::tan(fov * 0.5f) * k);
-        if (wide > 0.0f && wide < 3.0f) memcpy(cam + 0x148, &wide, 4);
+        if (wide > 0.0f && wide < 3.0f) cam->fov = wide;
         else fov = 0.0f;
     }
-    f_100057cee0_orig(c);
-    if (fov != 0.0f) memcpy(cam + 0x148, &fov, 4);
+    HW_ORIG(Camera_BuildProj)(c);
+    if (fov != 0.0f) cam->fov = fov;
 }

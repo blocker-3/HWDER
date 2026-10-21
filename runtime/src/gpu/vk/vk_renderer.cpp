@@ -10,6 +10,7 @@
 //    match the GPU's: constant buffer updates between draws are honored).
 #include "gpu/settings.h"
 #include "interp/camera.h"
+#include "interp/interp.h"
 #include <unordered_set>
 #include <deque>
 #include <windows.h>
@@ -622,7 +623,7 @@ struct Framebuffer {
     }
 };
 
-// Draws in the last presented frame (read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
+// Draws in the last presented frame (interp/interp.h: read by the HWDER_AUTOPLAY=2 input script to tell battle from menus).
 extern "C" std::atomic<u32> hw_last_frame_draws{0};
 
 // HWDER_DRAWLOG=1 (with HWDER_FILMSTRIP): one line per draw into <filmstrip dir>/drawlog.txt while the

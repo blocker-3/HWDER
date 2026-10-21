@@ -8,7 +8,7 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
-extern "C" u32 hw_game_interp_release_hz();  // interp/interp_draw.cpp, called on the guest thread
+#include "interp/interp.h"
 
 
 namespace ipc {

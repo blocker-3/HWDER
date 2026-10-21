@@ -14,7 +14,7 @@
 #include "service/common.h"
 
 extern "C" u64 hw_cntvct();
-extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last presented frame
+#include "interp/interp.h"
 
 namespace ipc {
 

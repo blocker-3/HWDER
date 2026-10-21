@@ -4,7 +4,7 @@
 #include "ipc.h"
 
 #include <cstring>
-extern "C" void hw_gi_note_ipc(const char* service, u32 command);  // interp/interp_draw.cpp
+#include "interp/interp.h"
 
 extern "C" void hw_log_backtrace(const char* tag);
 

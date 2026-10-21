@@ -9,8 +9,7 @@
 #include "nvdrv_device.h"
 #include "service/common.h"
 
-#include <atomic>
-extern "C" std::atomic<unsigned long long> hw_gi_submit_tag;  // interp/interp_draw.cpp
+#include "interp/interp.h"
 
 extern "C" u64 hw_cntvct();
 

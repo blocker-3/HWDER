@@ -60,6 +60,29 @@ extern "C" HwFn hw_lookup(u64 addr) {
     return nullptr;
 }
 
+// Name from tools/recomp/symbols.txt for a guest function start (hw_symbols is sorted by address).
+extern "C" const char* hw_symbol_name(u64 addr) {
+    unsigned lo = 0, hi = hw_symbol_count;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (hw_symbols[mid].addr < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < hw_symbol_count && hw_symbols[lo].addr == addr ? hw_symbols[lo].name : nullptr;
+}
+
+// "f_<addr>" -> "f_<addr>(Name)" when the function is named; other symbols unchanged.
+static std::string pretty_symbol(const char* sym) {
+    std::string s = sym;
+    if (s.rfind("f_", 0) == 0) {
+        char* end = nullptr;
+        u64 addr = strtoull(s.c_str() + 2, &end, 16);
+        if (end && *end == 0)
+            if (const char* name = hw_symbol_name(addr)) s += std::string("(") + name + ")";
+    }
+    return s;
+}
+
 // Paths are UTF-8 internally (the ANSI code page cannot spell every folder name a user may have).
 static std::wstring to_w(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -324,10 +347,10 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
                          SymFunctionTableAccess64, SymGetModuleBase64, nullptr) || !sf.AddrPC.Offset)
             break;
         disp = 0;
-        const char* n = SymFromAddr(proc, sf.AddrPC.Offset, &disp, sym) ? sym->Name : "?";
+        std::string n = SymFromAddr(proc, sf.AddrPC.Offset, &disp, sym) ? pretty_symbol(sym->Name) : "?";
         char fm[MAX_PATH];
         modname((const void*)sf.AddrPC.Offset, fm, sizeof(fm));
-        hw_log("  #%02d %s!%s+0x%llx", i, fm, n, (unsigned long long)disp);
+        hw_log("  #%02d %s!%s+0x%llx", i, fm, n.c_str(), (unsigned long long)disp);
     }
     write_crash_dump(ep);
     ExitProcess(2);
@@ -348,7 +371,7 @@ extern "C" void hw_log_backtrace(const char* tag) {
         const char* name = SymFromAddr(proc, (DWORD64)pcs[i], &disp, sym) ? sym->Name : "?";
         if (strncmp(name, "f_", 2) != 0) continue;  // guest frames only
         line += " ";
-        line += name;
+        line += pretty_symbol(name);
     }
     hw_log("%s backtrace:%s", tag, line.c_str());
 }
@@ -389,7 +412,7 @@ static void dump_threads() {
             sym->MaxNameLen = 255;
             DWORD64 disp = 0;
             char b[300];
-            snprintf(b, sizeof(b), " %s+0x%llx", SymFromAddr(proc, pcs[i], &disp, sym) ? sym->Name : "?",
+            snprintf(b, sizeof(b), " %s+0x%llx", SymFromAddr(proc, pcs[i], &disp, sym) ? pretty_symbol(sym->Name).c_str() : "?",
                      (unsigned long long)disp);
             line += b;
             if (i < n - 1) line += " <";

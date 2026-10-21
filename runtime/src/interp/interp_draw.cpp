@@ -1,15 +1,15 @@
 // High frame rate, stage b (docs/frame-loop.md, docs/high-framerate.md): the game draws and presents
 // one extra frame per tick, with the camera halfway between the previous tick and this one.
 //
-// In battle, MainThread runs one tick in f_10002acb54: it waits for the update jobs (scene slots 2,
-// 4 and 3, which publishes the render camera), then
-//   f_100051e9c4(dev, w, h, ..)  BeginFrame         (call at 0x10002acd08)
-//   f_1000387f9c(scene)          Draw (scene slot 5)
-//   vcall +192 / f_100052f6bc     (when the scene asks for it)
-//   f_100051ea20(dev, 1)         EndFrame
-//   f_100051e67c(dev, 0)         Present: SubmitGPFIFO, QueueBuffer, DequeueBuffer
+// In battle, MainThread runs one tick in Battle_Tick (tools/recomp/symbols.txt): it waits for the update
+// jobs (scene slots 2, 4 and 3, which publishes the render camera), then
+//   GfxDevice_BeginFrame(dev, w, h, ..)              (call at 0x10002acd08)
+//   Scene_Draw(scene)                                scene slot 5
+//   vcall +192 / GfxDevice_PresentWindow             (when the scene asks for it)
+//   GfxDevice_EndFrame(dev, 1)
+//   GfxDevice_Present(dev, 0)                        SubmitGPFIFO, QueueBuffer, DequeueBuffer
 // The hook on BeginFrame runs that sequence once more first, on a copy of the registers, with screen
-// 0's render camera set to lerp(tick n-1, tick n, 0.5) and rebuilt by the game's Camera::Update; then
+// 0's render camera set to lerp(tick n-1, tick n, 0.5) and rebuilt by the game's Camera_Update; then
 // it restores the camera bytes and lets the real frame of tick n run unchanged. The profiler markers
 // and the end-of-frame calls on the 0x1000c22a40 object (f_10001e2f7c, f_10001e301c, f_10001df06c,
 // f_10001df624) are not repeated. Each queued extra/paired-real frame carries a fixed 120 Hz release
@@ -28,24 +28,25 @@
 #include <mutex>
 #include <map>
 
-#include "hwder/runtime.h"
+#include "game/guest.h"
+#include "game/hook.h"
+#include "game/structs.h"
 #include "gpu/settings.h"
+#include "hwder/runtime.h"
 #include "interp/camera.h"
+#include "interp/interp.h"
 
 #pragma clang fp contract(off)
 
-extern "C" void f_100051e9c4_orig(Ctx* c);  // the original BeginFrame
-extern "C" void f_10002acb54_orig(Ctx* c);  // the original battle tick
-extern "C" void f_100057cb78(Ctx* c);      // Camera::Update(cam, view dirty, proj dirty)
-extern "C" void f_1000387f9c(Ctx* c);      // Draw
-extern "C" void f_100052f6bc(Ctx* c);
-extern "C" void f_100051ea20(Ctx* c);      // EndFrame
-extern "C" void f_100051e67c(Ctx* c);      // Present
+HW_GUEST(Camera_Update);           // (cam, view dirty, proj dirty)
+HW_GUEST(Scene_Draw);
+HW_GUEST(GfxDevice_PresentWindow);
+HW_GUEST(GfxDevice_EndFrame);
+HW_GUEST(GfxDevice_Present);
 
 // Tag of the GPU work being submitted: (tick << 1) | 1 during an extra frame (nvdrv copies it into each
 // submission; the renderer reads it back while executing).
 extern "C" std::atomic<unsigned long long> hw_gi_submit_tag{0};
-extern "C" std::atomic<u32> hw_last_frame_draws;  // gpu/vk: draws in the last presented frame
 
 namespace interp {
 
@@ -65,7 +66,13 @@ bool game_interp() {
 
 namespace {
 
-constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;  // return address of the BeginFrame call in f_10002acb54
+// Return addresses inside Battle_Tick of its calls, as the generated code sets x30 for them.
+constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;
+constexpr u64 kDrawRet = 0x10002ACD38ULL;
+constexpr u64 kPresentWindowQueryRet = 0x10002ACDB0ULL;
+constexpr u64 kPresentWindowRet = 0x10002ACDE0ULL;
+constexpr u64 kEndFrameRet = 0x10002ACDECULL;
+constexpr u64 kPresentRet = 0x10002ACE0CULL;
 
 thread_local bool g_in_extra = false;  // recursion guard and same-thread IPC diagnostic scope
 thread_local bool g_paired_real = false;  // this tick actually queued an extra present
@@ -128,15 +135,9 @@ float dist(const float a[3], const float b[3]) {
     return std::sqrt(d0 * d0 + d1 * d1 + d2 * d2);
 }
 
-// Calls a guest function on e as the generated code would from return address ret; false when the
-// callee unwound past it (a guest exception), which the caller must treat as "stop".
-bool call(Ctx* e, void (*fn)(Ctx*), u64 ret) {
-    e->x[30] = ret;
-    fn(e);
-    return e->x[30] == ret;
-}
+using game::call;
 
-// The extra frame. c: f_10002acb54's registers at the BeginFrame call (x19 scene, x20 frame state,
+// The extra frame. c: Battle_Tick's registers at the BeginFrame call (x19 scene, x20 frame state,
 // x21 graphics device, x0..x3/v0 BeginFrame's arguments).
 void extra_frame(const Ctx* c) {
     interp::CamSnap s[2];
@@ -155,8 +156,8 @@ void extra_frame(const Ctx* c) {
         g_st.cut++;
         return;
     }
-    u8* cam = GUESTP(u8, b.addr);
-    if (memcmp(cam + 0x10, b.eye, 12) || memcmp(cam + 0x20, b.at, 12) || memcmp(cam + 0x100, b.viewproj, 64)) {
+    game::Camera* cam = game::at<game::Camera>(b.addr);
+    if (memcmp(cam->eye, b.eye, 12) || memcmp(cam->at, b.at, 12) || memcmp(cam->viewproj, b.viewproj, 64)) {
         g_st.mismatch++;
         return;
     }
@@ -164,8 +165,8 @@ void extra_frame(const Ctx* c) {
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&t0);
 
-    // Screen 0's render camera halfway between the ticks, rebuilt by the game's own Camera::Update.
-    alignas(16) u8 saved[0x170];
+    // Screen 0's render camera halfway between the ticks, rebuilt by the game's own Camera_Update.
+    alignas(16) u8 saved[sizeof(game::Camera)];
     memcpy(saved, cam, sizeof saved);
     float eye[3], at[3], up[3];
     for (int i = 0; i < 3; i++) {
@@ -177,57 +178,54 @@ void extra_frame(const Ctx* c) {
     if (ul > 0.0f)
         for (float& u : up) u /= ul;
     float roll = a.roll + (b.roll - a.roll) * 0.5f;
-    memcpy(cam + 0x10, eye, 12);
-    memcpy(cam + 0x20, at, 12);
-    memcpy(cam + 0x30, up, 12);
-    memcpy(cam + 0x150, &roll, 4);
+    memcpy(cam->eye, eye, 12);
+    memcpy(cam->at, at, 12);
+    memcpy(cam->up, up, 12);
+    cam->roll = roll;
     Ctx u = *c;
     u.x[0] = b.addr;
     u.x[1] = 1;
     u.x[2] = 1;
-    call(&u, f_100057cb78, 0);
+    call(&u, f_Camera_Update, 0);
 
     hw_gi_submit_tag = (b.tick << 1) | 1;  // the renderer blends this frame's object transforms (stage c)
     g_in_extra = true;
     Ctx e = *c;
     const u64 scene = c->x[19], state = c->x[20], dev = c->x[21];
-    bool ok = call(&e, f_100051e9c4_orig, kBeginFrameRet) && (u8)e.x[0] != 0;
+    bool ok = call(&e, HW_ORIG(GfxDevice_BeginFrame), kBeginFrameRet) && (u8)e.x[0] != 0;
     if (!ok) g_st.begin_failed++;
     if (ok) {
         e.x[0] = scene;
-        ok = call(&e, f_1000387f9c, 0x10002ACD38ULL);
+        ok = call(&e, f_Scene_Draw, kDrawRet);
     }
     if (ok) {
-        // vcall scene+192: does the scene want f_100052f6bc this frame
+        // vcall scene+192: does the scene want GfxDevice_PresentWindow this frame
         e.x[0] = scene;
-        u64 fn = *GUESTP(u64, *GUESTP(u64, scene) + 192);
-        e.x[30] = 0x10002ACDB0ULL;
-        hw_call(&e, fn);
-        ok = e.x[30] == 0x10002ACDB0ULL;
+        ok = game::call_addr(&e, game::vfunc(scene, game::scene::kVtablePresentWindowQuery), kPresentWindowQueryRet);
         if (ok && (u8)e.x[0] != 0) {
-            u64 g = *GUESTP(u64, *GUESTP(u64, 0x1000C21DE0ULL));
-            e.x[3] = *GUESTP(u64, *GUESTP(u64, g + 64) + 88);
+            u64 g = game::deref(game::deref(HW_ADDR(g_GfxGlobals)));
+            e.x[3] = game::deref(game::deref(g + 64) + 88);
             e.x[0] = dev;
             e.x[1] = 0;
             e.x[2] = 0;
             e.x[4] = 0;
-            ok = call(&e, f_100052f6bc, 0x10002ACDE0ULL);
+            ok = call(&e, f_GfxDevice_PresentWindow, kPresentWindowRet);
         }
     }
     if (ok) {
         e.x[0] = dev;
         e.x[1] = 1;
-        ok = call(&e, f_100051ea20, 0x10002ACDECULL);
+        ok = call(&e, f_GfxDevice_EndFrame, kEndFrameRet);
     }
     g_xdraw = now_ms();
     if (ok) {
-        u64 skip_present = *GUESTP(u8, *GUESTP(u64, state + 544) + 0x2d420);
+        u8 skip_present = game::read<u8>(game::deref(state + game::frame_state::kDevicePtr) + game::frame_state::kSkipPresent);
         if (skip_present) {
             g_st.no_present++;
         } else {
             e.x[0] = dev;
             e.x[1] = 0;
-            call(&e, f_100051e67c, 0x10002ACE0CULL);
+            call(&e, f_GfxDevice_Present, kPresentRet);
         }
     }
     g_in_extra = false;
@@ -276,9 +274,9 @@ extern "C" u32 hw_game_interp_release_hz() {
     return enabled ? 60 : 0;
 }
 
-// Hook (tools/recomp/hooks.txt): BeginFrame. Only the battle tick's call (from f_10002acb54) gets
-// the extra frame; menus and loading screens draw through other paths and stay at one frame per tick.
-extern "C" void f_100051e9c4(Ctx* c) {
+// Hook: BeginFrame. Only the battle tick's call (from Battle_Tick) gets the extra frame; menus and
+// loading screens draw through other paths and stay at one frame per tick.
+HW_HOOK(GfxDevice_BeginFrame) {
     if (!g_in_extra) {
         g_paired_real = false;
         g_frame_gi = interp::game_interp();
@@ -326,19 +324,19 @@ extern "C" void f_100051e9c4(Ctx* c) {
         }
         report();
     }
-    f_100051e9c4_orig(c);
+    HW_ORIG(GfxDevice_BeginFrame)(c);
 }
 
-// Hook (tools/recomp/hooks.txt): the battle tick on MainThread, for the per-tick timing above.
-extern "C" void f_10002acb54(Ctx* c) {
+// Hook: the battle tick on MainThread, for the per-tick timing above.
+HW_HOOK(Battle_Tick) {
     if (!interp::game_interp()) {
-        f_10002acb54_orig(c);
+        HW_ORIG(Battle_Tick)(c);
         return;
     }
     double in = now_ms();
     if (g_tick_out > 0 && in - g_tick_out < 100.0) add(g_st.t_loop, g_st.m_loop, in - g_tick_out);
     g_tick_in = in;
-    f_10002acb54_orig(c);
+    HW_ORIG(Battle_Tick)(c);
     g_tick_out = now_ms();
     if (g_xpresent > 0 && g_tick_out - g_xpresent < 100.0) add(g_st.t_real, g_st.m_real, g_tick_out - g_xpresent);
 }

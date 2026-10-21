@@ -40,10 +40,12 @@ copies and cameras, not identified (inferred: shadow, reflection or menu views) 
 
 ## Hook
 
-`tools/recomp/hooks.txt` lists hooked guest functions. `gen_main.py` emits each one's body as
-`f_<addr>_orig`; the runtime defines `f_<addr>` (here `runtime/src/interp/camera.cpp`), so direct
-calls, tail calls and the dispatch table all reach the hook. Run with `HWDER_CAM_LOG=1` to log
-screen 0's eye, target, up, fov, aspect, near, far and roll every tick, with a host timestamp.
+`tools/recomp/symbols.txt` names the guest functions and marks the hooked ones (`hook`). `gen_main.py`
+emits `generated/symbols.h` (so `f_Camera_BuildProj` is `f_100057cee0`) and each hooked function's body
+as `f_<addr>_orig`; the runtime defines `f_<addr>` with `HW_HOOK(Name)` from `runtime/src/game/hook.h`
+(here `runtime/src/interp/camera.cpp`), so direct calls, tail calls and the dispatch table all reach the
+hook. The camera layout above is `game::Camera` in `runtime/src/game/structs.h`, with the offsets checked
+at compile time.
 
 ## BuildView and viewProj, reproduced
 
