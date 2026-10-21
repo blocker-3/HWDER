@@ -9,6 +9,7 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk/vk_present.cpp
     runtime/src/gpu/vk/vk_debug.cpp
     runtime/src/gpu/vk/texture_cache.cpp
+    runtime/src/gpu/vk/texture_layout.cpp
     runtime/src/gpu/vk/formats.cpp
     runtime/src/gpu/vk/astc.cpp
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp

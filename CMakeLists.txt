@@ -27,8 +27,19 @@ if(HWDER_SYNTHETIC_TESTS_ONLY)
     add_test(NAME pipeline_warmup_cache COMMAND pipeline_warmup_cache_test)
     add_test(NAME pipeline_catalog COMMAND pipeline_catalog_test)
     # Added by the independent public synthetic-CI candidate when integrated.
+    # Pure-function unit tests (runtime/tests/runtime_unit_test.cpp): no Vulkan device, no game data.
+    add_executable(runtime_unit_test runtime/tests/runtime_unit_test.cpp
+        runtime/src/gpu/vk/formats.cpp runtime/src/gpu/vk/texture_layout.cpp
+        runtime/src/service/hipc.cpp runtime/src/kernel/handles.cpp runtime/src/debug_flags.cpp)
+    target_include_directories(runtime_unit_test PRIVATE runtime/src runtime/include ${TP}/vulkan-headers/include ${TP}/spirv-headers/include)
+    target_compile_definitions(runtime_unit_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(runtime_unit_test PRIVATE /EHsc /O2)
+    add_test(NAME runtime_unit COMMAND runtime_unit_test)
     if(EXISTS "${CMAKE_SOURCE_DIR}/tools/tests/recompiler.cmake")
         include(tools/tests/recompiler.cmake)
+    endif()
+    if(TARGET synthetic_tests)
+        add_dependencies(synthetic_tests runtime_unit_test)
     endif()
     return()
 endif()
@@ -93,9 +104,11 @@ set(RUNTIME_SOURCES
     runtime/src/config.cpp
     runtime/src/version.cpp
     runtime/src/kernel/kernel.cpp
+    runtime/src/kernel/handles.cpp
     runtime/src/kernel/memory.cpp
     runtime/src/kernel/svc.cpp
     runtime/src/service/ipc.cpp
+    runtime/src/service/hipc.cpp
     runtime/src/service/sm.cpp
     runtime/src/service/applet.cpp
     runtime/src/service/misc.cpp
