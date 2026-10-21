@@ -395,8 +395,6 @@ static std::mutex g_present_lock;
 static double g_trace_fence_ms, g_trace_acq_ms;  // HWDER_PACE_TRACE: last present's fence wait / acquire time
 static double g_trace_overshoot_ms;               // HWDER_PACE_TRACE: last limiter sleep's wake-up lateness
 
-static double g_output_hz = 0;
-void set_output_hz(double hz) { g_output_hz = hz; }
 void client_size(unsigned* w, unsigned* h) {
     *w = g_extent.width;
     *h = g_extent.height;
@@ -419,13 +417,13 @@ static void frame_limit(u32 interval, u32 release_hz) {
     // 60 Hz whatever the display runs at; HWDER_FPS exists only for experiments.
     // GI rate is attached to the queued frame, not inferred from the producer's current state: the
     // compositor can lag across battle/menu transitions. Native experiments keep their old semantics.
-    double fps = release_hz ? (double)release_hz : (env ? atof(env) : (g_output_hz > 0 ? g_output_hz : 60.0));
+    double fps = release_hz ? (double)release_hz : (env ? atof(env) : 60.0);
     static u32 last_interval = 0;
     if (interval != last_interval) {
         last_interval = interval;
         hw_log("display: swap interval %u", interval);
     }
-    u32 slots = (release_hz == 120 || (!release_hz && g_output_hz > 0)) ? 1 : std::max(1u, std::min(interval, 4u));
+    u32 slots = release_hz == 120 ? 1 : std::max(1u, std::min(interval, 4u));
     // Experiment: release every frame at the 60 Hz grid even when the game asks for interval 2.
     static const bool force1 = getenv("HWDER_FORCE_INTERVAL1") != nullptr;
     if (force1 && !release_hz) slots = 1;

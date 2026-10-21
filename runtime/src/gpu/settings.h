@@ -18,7 +18,6 @@ struct Video {
     bool ultrawide = false;     // with unlocked_res on a wider-than-16:9 window: widen the game's camera to fill it
                                 // (true 21:9) instead of pillarboxing; the HUD stays a centred 16:9
     bool show_fps = false;      // small frame-time readout in the corner
-    int interp_hz = 0;          // frame interpolation output rate: 0 off, -1 match display, else Hz (ignored while kInterpEnabled is false)
     std::atomic<bool> fps120{false};  // UI request, sampled at BeginFrame; read by guest/GPU threads
     bool display_60hz = false;  // opt-in: switch the monitor to 60 Hz while the game runs (even cadence for 60/30 fps content)
     int menu_scale = 100;       // in-game menu text size, percent
@@ -68,10 +67,6 @@ struct Debug {
     bool async_shaders = true;    // false = HWDER_SYNC_PIPELINES
     std::set<std::string> env;    // HWDER_* debug switches set to 1 at startup
 };
-
-// False while frame interpolation is stubbed out: the presenter ignores interp_hz (the saved value is kept) and the
-// overlay greys the option out. HWDER_INTERP=<hz> still enables it for experiments.
-constexpr bool kInterpEnabled = false;
 
 Video& video();
 Audio& audio();

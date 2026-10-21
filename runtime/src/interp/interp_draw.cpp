@@ -34,8 +34,8 @@
 
 #pragma clang fp contract(off)
 
-extern "C" void probe_100051e9c4(Ctx* c);  // frame_probe.cpp: the original BeginFrame, probed
-extern "C" void probe_10002acb54(Ctx* c);  // frame_probe.cpp: the original battle tick, probed
+extern "C" void f_100051e9c4_orig(Ctx* c);  // the original BeginFrame
+extern "C" void f_10002acb54_orig(Ctx* c);  // the original battle tick
 extern "C" void f_100057cb78(Ctx* c);      // Camera::Update(cam, view dirty, proj dirty)
 extern "C" void f_1000387f9c(Ctx* c);      // Draw
 extern "C" void f_100052f6bc(Ctx* c);
@@ -191,7 +191,7 @@ void extra_frame(const Ctx* c) {
     g_in_extra = true;
     Ctx e = *c;
     const u64 scene = c->x[19], state = c->x[20], dev = c->x[21];
-    bool ok = call(&e, probe_100051e9c4, kBeginFrameRet) && (u8)e.x[0] != 0;
+    bool ok = call(&e, f_100051e9c4_orig, kBeginFrameRet) && (u8)e.x[0] != 0;
     if (!ok) g_st.begin_failed++;
     if (ok) {
         e.x[0] = scene;
@@ -326,19 +326,19 @@ extern "C" void f_100051e9c4(Ctx* c) {
         }
         report();
     }
-    probe_100051e9c4(c);
+    f_100051e9c4_orig(c);
 }
 
 // Hook (tools/recomp/hooks.txt): the battle tick on MainThread, for the per-tick timing above.
 extern "C" void f_10002acb54(Ctx* c) {
     if (!interp::game_interp()) {
-        probe_10002acb54(c);
+        f_10002acb54_orig(c);
         return;
     }
     double in = now_ms();
     if (g_tick_out > 0 && in - g_tick_out < 100.0) add(g_st.t_loop, g_st.m_loop, in - g_tick_out);
     g_tick_in = in;
-    probe_10002acb54(c);
+    f_10002acb54_orig(c);
     g_tick_out = now_ms();
     if (g_xpresent > 0 && g_tick_out - g_xpresent < 100.0) add(g_st.t_real, g_st.m_real, g_tick_out - g_xpresent);
 }

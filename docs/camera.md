@@ -1,5 +1,7 @@
 # The game's camera (main module)
 
+> The renderer replay interpolation described below (`HWDER_INTERP`, `HWDER_INTERP_MODE=camera`, `HWDER_CAM_LOG`, `HWDER_CAM_INV`) was removed on 2026-10-21. The camera hook and its per-tick snapshots remain and feed the game-drawn 120 fps mode (`docs/high-framerate.md`).
+
 Found statically from `data/exefs/main` (no symbols; names below are ours). Addresses are guest
 addresses with `main` at `0x1000000000`.
 

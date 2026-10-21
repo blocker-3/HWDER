@@ -1,5 +1,7 @@
 # The game's frame loop (stage a of the 120 fps plan)
 
+> Research record. The probes and switches it describes (`HWDER_FRAME_PROBE`, `HWDER_DRAW_WRITES`, `HWDER_DRAW_TWICE`, `HWDER_CBUF_DUMP`, `HWDER_GI_OBJ_MODE`, `HWDER_INTERP`) were removed from the code on 2026-10-21; the shipped path is described in `docs/high-framerate.md`.
+
 Measured 2026-10-18 on `interp-120` with the frame probe (`runtime/src/interp/frame_probe.cpp`),
 five autoplay battle runs (`HWDER_AUTOPLAY=2`, `HWDER_AUTOPLAY_SKIP=1`, fixed autoplay save),
 steady battle 25–40 s after the first 3D frame. Addresses are guest addresses (`main` at
