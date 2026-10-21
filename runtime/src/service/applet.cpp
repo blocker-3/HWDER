@@ -171,8 +171,21 @@ public:
             out_data_.pop_front();
             rs.push_object(std::make_shared<IStorage>(s));
         });
-        reg(106, [](Request&, Response& rs) { push_handle(rs, make_event()); });
+        reg(30, [this](Request&, Response&) { hw_log("am: applet 0x%x GetResult -> ok", id_); });  // GetResult
+        reg(104, [this](Request&, Response& rs) {  // PopInteractiveOutData
+            hw_log("am: applet 0x%x PopInteractiveOutData -> no data", id_);
+            rs.result = ResultNoData;
+        });
+        reg(106, [](Request&, Response& rs) { push_handle(rs, make_event()); });  // GetPopOutDataEvent
+        reg(107, [](Request&, Response& rs) { push_handle(rs, make_event()); });  // GetPopInteractiveOutDataEvent
         reg(105, [](Request&, Response& rs) { push_handle(rs, make_event()); });
+    }
+
+    // Every applet command is logged so a playtest log shows the full sequence the game uses.
+    void dispatch(Request& rq, Response& rs) override {
+        hw_log("am: applet 0x%x command %u (objs %zu, handles %zu)", id_, rq.command, rq.in_services.size(),
+               rq.copy_handles.size() + rq.move_handles.size());
+        SimpleService::dispatch(rq, rs);
     }
 
 private:
