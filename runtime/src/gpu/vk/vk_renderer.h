@@ -345,6 +345,10 @@ double prof_flush();                    // vk_renderer.cpp
 bool drawlog_active();                  // vk_renderer.cpp
 extern FILE* g_drawlog;                 // vk_renderer.cpp
 extern const u64 g_start_ms;            // vk_renderer.cpp
+void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt);  // vk_renderer.cpp
+void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const char* path,
+                     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);  // vk_renderer.cpp
+void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir);  // vk_renderer.cpp
 
 class VkRenderer final : public Renderer {
 public:

@@ -6,6 +6,7 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk/vk_pipelines.cpp
     runtime/src/gpu/vk/vk_interp_objects.cpp
     runtime/src/gpu/vk/vk_draw.cpp
+    runtime/src/gpu/vk/vk_present.cpp
     runtime/src/gpu/vk/texture_cache.cpp
     runtime/src/gpu/vk/formats.cpp
     runtime/src/gpu/vk/astc.cpp
