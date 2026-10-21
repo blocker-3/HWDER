@@ -115,7 +115,12 @@ public:
         });
         nop({1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 41, 42, 44, 45, 46, 50, 51, 61, 62, 64, 65, 68, 72,
              100, 110, 120});
-        reg(9, [](Request&, Response& rs) { push_handle(rs, make_event()); });   // GetLibraryAppletLaunchableEvent
+        reg(9, [](Request&, Response& rs) {  // GetLibraryAppletLaunchableEvent
+            // The application waits on this before it may create a library applet (the controller screen,
+            // opened with L3 on the warrior select). It is always launchable here, so the event stays signaled.
+            hw_log("am: GetLibraryAppletLaunchableEvent (signaled)");
+            push_handle(rs, make_event(true));
+        });
         reg(40, [](Request&, Response& rs) { rs.push<u64>(1); });                 // CreateManagedDisplayLayer
         reg(43, [](Request&, Response& rs) { rs.push<u64>(1); rs.push<u64>(2); });  // CreateManagedDisplaySeparableLayer
         ret<u32>(63, 0);   // GetIdleTimeDetectionExtension
