@@ -2321,7 +2321,7 @@ static bool is_world_3x4(const float* m) {
 }
 
 // HWDER_GI_OBJ_MODE=legacy: the original per-bone matching (nearest-other-bone fallback, partial
-// blocks). Default strict: a c3 block is blended whole or not at all (obj_transforms_strict).
+// blocks). Default strict: a c3 block is blended whole or not at all (obj_transforms).
 static bool obj_legacy() {
     static const bool legacy = [] {
         const char* m = getenv("HWDER_GI_OBJ_MODE");
