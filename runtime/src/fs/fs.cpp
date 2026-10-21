@@ -10,6 +10,7 @@
 
 #include "fs_internal.h"
 #include "fs/save_dir.h"
+#include "debug_flags.h"
 
 namespace hwfs {
 
@@ -43,7 +44,7 @@ const std::wstring& exe_dir() {
 
 bool trace_enabled() {
     static bool on = [] {
-        const char* e = getenv("HWDER_FS_TRACE");
+        const char* e = debug::str(debug::FsTrace);
         return e && *e && *e != '0';
     }();
     return on;

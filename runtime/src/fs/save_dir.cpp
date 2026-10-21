@@ -11,6 +11,7 @@
 
 #include "fs_internal.h"
 #include "gpu/settings.h"
+#include "debug_flags.h"
 
 namespace hwfs {
 
@@ -169,7 +170,7 @@ void run_pending_save_copy() {
     // On failure keep playing from the old folder rather than a new one with no (or half-copied) saves.
     if (!ok) l.save_dir = same_dir(from, default_save_dir()) ? "" : from;
     settings::save();
-    if (!ok && !getenv("HWDER_MUTE"))
+    if (!ok && !debug::flag(debug::Mute))
         MessageBoxW(nullptr, utf8_to_wide("Your saves could not be copied to the new save folder.\n\n" + report +
                                           "\n\nThe game keeps using " + from + ". Choose the folder again in the menu to retry.")
                                  .c_str(),
