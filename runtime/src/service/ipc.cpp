@@ -281,6 +281,15 @@ Result send_sync_request(Handle h, u8* msg) {
             return ResultSuccess;
         }
         target = it->second;
+        for (u32 id : rq.in_objects) {
+            auto ob = sess->dom->objects.find(id);
+            rq.in_services.push_back(ob == sess->dom->objects.end() ? nullptr : ob->second);
+        }
+    } else {
+        for (Handle mh : rq.move_handles) {
+            auto in = g_handles.get_as<Session>(mh);
+            rq.in_services.push_back(in ? in->service : nullptr);
+        }
     }
     bool dump = dump_filter && target->name().find(dump_filter) != std::string::npos;
     if (dump) dump_msg("req ", msg);

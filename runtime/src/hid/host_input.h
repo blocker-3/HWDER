@@ -35,9 +35,14 @@ struct TouchInput {
     u32 x = 0, y = 0;  // 1280x720 touch panel space
 };
 
+// Player slots: npad ids 0..3. Host controllers take the lowest free slot as they connect (SDL order, or
+// the XInput user index order while SDL has no pad open); the keyboard joins per Settings > Input.
+constexpr int kPlayerSlots = 4;
+
 struct HostInput {
-    PadInput pad;
-    MotionInput motion;
+    PadInput pads[kPlayerSlots];     // per player slot, already remapped
+    bool connected[kPlayerSlots] = {};  // a controller or the keyboard drives this slot
+    MotionInput motion;              // player 1's controller
     TouchInput touch;
 };
 
@@ -85,9 +90,15 @@ void set_game_input_blocked(bool blocked);
 // True once each time View/Select is held past the menu threshold (Settings > Input). The overlay polls it.
 bool take_menu_request();
 
-// Rumble on the active pad, applied by the HID thread. Amplitudes 0..1 (low band -> big motor, high band ->
+// Which slots currently have a controller or the keyboard (bit per slot). Thread safe; the controller applet
+// reads it to answer the game's player-count request.
+u32 connected_slots();
+// Name of the device in a slot for the menu ("" = empty). Thread safe.
+void slot_name(int slot, char* out, size_t n);
+
+// Rumble on the pad in `slot`, applied by the HID thread. Amplitudes 0..1 (low band -> big motor, high band ->
 // small motor), scaled by Settings > Input > Rumble strength.
-void set_rumble(float low, float high);
+void set_rumble(int slot, float low, float high);
 // Short full-amplitude pulse at the current strength, so the Input tab's slider can be felt while it moves.
 void preview_rumble();
 

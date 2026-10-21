@@ -33,6 +33,7 @@ struct Request {
     u32 args_size = 0;
     u32 cursor = 0;
     std::vector<u32> in_objects;  // domain input object ids
+    std::vector<ServicePtr> in_services;  // the services those ids (or the moved session handles) name
 
     template <typename T>
     T pop() {
