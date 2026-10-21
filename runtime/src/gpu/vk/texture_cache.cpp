@@ -373,6 +373,17 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
     std::vector<Image*> overlaps;
     collect_overlaps(addr, size, overlaps);
     delete ps;
+    if (info.render_target) {  // the game renders into it again: recreate it at the current scale (apply_scale)
+        for (size_t i = 0; i < overlaps.size();) {
+            Image* o = overlaps[i];
+            if (o->addr == addr && scale_stale(o)) {
+                destroy(o);
+                overlaps.erase(overlaps.begin() + i);
+            } else {
+                i++;
+            }
+        }
+    }
     ps = new ProfScope(kProfGetMatch);
     Image* hit = nullptr;
     for (Image* img : overlaps) {
@@ -624,22 +635,26 @@ bool TextureCache::scalable(const ImageInfo& info) {
            !info.fmt.astc;
 }
 
-// Runtime scale change (F1 menu): drop every image whose physical size would differ under the new
-// scale; render targets are redrawn each frame, so they simply come back at the new size.
+// An image whose physical size differs from what the current internal resolution scale would give it.
+bool TextureCache::scale_stale(const Image* img) {
+    const bool any = g_res_scale != 1.0f || g_res_scale_y != 1.0f;
+    return (img->scale != 1.0f || img->scale_y != 1.0f || (any && scalable(img->info))) &&
+           (img->scale != g_res_scale || img->scale_y != g_res_scale_y);
+}
+
+// Runtime scale change (F1 menu, window resize with "unlocked"): render targets are recreated at the new
+// size the next time the game renders into them (get() with a render-target request), not here. Frames
+// already rendered and queued for presentation (120 fps keeps up to two ahead) keep their images until
+// they are shown; dropping them made the presenter re-upload stale guest memory ("jumping" on resize).
 void TextureCache::apply_scale(float sx, float sy) {
     if (sx == g_res_scale && sy == g_res_scale_y) return;
     g_res_scale = sx;
     g_res_scale_y = sy;
-    bool any = sx != 1.0f || sy != 1.0f;
-    std::vector<Image*> dead;
+    size_t stale = 0;
     for (auto& [pg, v] : pages_)
         for (Image* img : v)
-            if ((img->scale != 1.0f || img->scale_y != 1.0f || (any && scalable(img->info))) && (img->scale != sx || img->scale_y != sy) &&
-                std::find(dead.begin(), dead.end(), img) == dead.end())
-                dead.push_back(img);
-    rec().wait_idle();
-    for (Image* img : dead) destroy(img);
-    hw_log("vk: internal resolution scale -> %.3fx x %.3fx (%zu render targets recreated)", sx, sy, dead.size());
+            if (scale_stale(img)) stale++;
+    hw_log("vk: internal resolution scale -> %.3fx x %.3fx (%zu render target pages to recreate on next use)", sx, sy, stale);
 }
 
 Image* TextureCache::make_shadow(Image* src) {
