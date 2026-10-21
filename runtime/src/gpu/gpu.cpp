@@ -12,6 +12,7 @@
 #include "maxwell_3d.h"
 #include "nvdrv_device.h"
 #include "swizzle.h"
+#include "debug_flags.h"
 
 extern "C" u64 hw_cntvct();
 
@@ -25,7 +26,7 @@ Renderer* renderer() {
 }
 
 static bool trace_enabled() {
-    static const bool t = getenv("HWDER_GPU_TRACE") != nullptr;
+    static const bool t = debug::flag(debug::GpuTrace);
     return t;
 }
 
@@ -351,7 +352,7 @@ static void report_semaphore(Engine3D& e, u32 query) {
         // Samples passed (occlusion). The game fades head-up markers (names, health bars, attack
         // counters) by the visible fraction of a probe quad, so "1 sample" rendered them invisible.
         // Until real occlusion queries exist, report the probe as fully visible.
-        case 0xF: value = getenv("HWDER_OCCLUSION_ONE") ? 1 : 0x100000; break;
+        case 0xF: value = debug::flag(debug::OcclusionOne) ? 1 : 0x100000; break;
         case 0x12: value = 0; break;        // primitives generated
         default: value = 0; break;
         }
@@ -414,7 +415,7 @@ static void flush_macro(Engine3D& e) {
 static void method_3d(Engine3D& e, u32 method, u32 value) {
     using namespace m3d;
     {
-        static const char* t = getenv("HWDER_GPU_TRACE");
+        static const char* t = debug::str(debug::GpuTrace);
         static u64 n = 0;
         if (t && t[0] == '2') {
             n++;
@@ -727,7 +728,7 @@ static void method_i2m(Channel* ch, u32 method, u32 value) {
 
 // ------------------------------------------------------------------ puller
 static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
-    static const char* tr = getenv("HWDER_GPU_TRACE");
+    static const char* tr = debug::str(debug::GpuTrace);
     static const bool trace_host = tr && tr[0] == '3';  // host methods + class binds, per channel
     if (trace_host && (method < 0x40 || method == 0xB2 || method == 0xAF || method == 0x586))
         hw_log("gpu[sp%u]: subch %u class 0x%x method 0x%03x = 0x%08x", ch->syncpt, subch, ch->bound_class[subch], method, value);
@@ -885,7 +886,7 @@ u64 exec_gi_tag() { return g_exec_gi_tag; }
 static void execute_inner(Channel* ch, Submission& s) {
     ch->syncpt = s.syncpoint;
     g_exec_gi_tag = s.gi_tag;
-    static const char* tr = getenv("HWDER_GPU_TRACE");
+    static const char* tr = debug::str(debug::GpuTrace);
     if (tr && tr[0] == '3')
         hw_log("gpu[sp%u]: --- submission: %zu entries, wait %d, increment %d x%u", ch->syncpt, s.entries.size(), (int)s.wait,
                (int)s.increment, s.increment_count);

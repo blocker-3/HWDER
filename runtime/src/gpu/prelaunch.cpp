@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "debug_flags.h"
 
 #pragma comment(lib, "ole32.lib")
 
@@ -118,7 +119,7 @@ void game_section() {
         if (inf.has_version) snprintf(line + n, sizeof(line) - n, "   |   Version %u%s", inf.version, inf.version ? "" : " (no update)");
         ImGui::TextDisabled("%s", line);
     }
-    if (getenv("HWDER_NSP")) ImGui::TextColored(kPending, "HWDER_NSP is set: it is used instead of a file chosen here.");
+    if (debug::flag(debug::Nsp)) ImGui::TextColored(kPending, "HWDER_NSP is set: it is used instead of a file chosen here.");
     if (ImGui::Button("Choose game file...")) g_pick = Pick::Game;
     if (g_first && !inf.nsp_found) ImGui::SetItemDefaultFocus();
 }
@@ -138,7 +139,7 @@ void keys_section() {
     else
         ImGui::TextWrapped("Looked for prod.keys next to hwder.exe, in its keys folder, in %%USERPROFILE%%\\.switch and in the "
                            "yuzu and Ryujinx key folders.");
-    if (getenv("HWDER_KEYS")) ImGui::TextColored(kPending, "HWDER_KEYS is set: it is used instead of a file chosen here.");
+    if (debug::flag(debug::Keys)) ImGui::TextColored(kPending, "HWDER_KEYS is set: it is used instead of a file chosen here.");
     if (ImGui::Button("Choose prod.keys...")) g_pick = Pick::Keys;
     if (g_first && inf.nsp_found && !inf.keys_found) ImGui::SetItemDefaultFocus();
 }
@@ -291,7 +292,7 @@ bool run(const std::string& exe_dir) {
     display::set_status("startup");
     overlay::set_screen(draw);
     hw_log("prelaunch: screen shown");
-    const char* frames_env = getenv("HWDER_PRELAUNCH_FRAMES");
+    const char* frames_env = debug::str(debug::PrelaunchFrames);
     const int max_frames = frames_env ? atoi(frames_env) : 0;
     for (int frame = 1; !g_play && !g_quit; frame++) {
         display::present_overlay_frame();

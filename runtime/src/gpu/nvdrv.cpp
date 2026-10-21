@@ -10,6 +10,7 @@
 #include "service/common.h"
 
 #include "interp/interp.h"
+#include "debug_flags.h"
 
 extern "C" u64 hw_cntvct();
 
@@ -358,7 +359,7 @@ public:
                 if (!va) return InsufficientMemory;
             }
             as->reservations[va] = size;
-            if (getenv("HWDER_AS_TRACE"))
+            if (debug::flag(debug::AsTrace))
                 hw_log("as-gpu: alloc space va %llx size %llx page %x flags %x", (unsigned long long)va, (unsigned long long)size, page_size, flags);
             *(u64*)(p + 16) = va;
             return Success;
@@ -416,7 +417,7 @@ public:
             }
             as->map(va, base + buf_off, size);
             as->mappings[va] = {size, in_reservation, base + buf_off};
-            if (getenv("HWDER_AS_TRACE"))
+            if (debug::flag(debug::AsTrace))
                 hw_log("as-gpu: map va %llx size %llx handle %u off %llx flags %x page %x -> %llx", (unsigned long long)va,
                        (unsigned long long)size, handle, (unsigned long long)buf_off, flags, page_size, (unsigned long long)(base + buf_off));
             *(u64*)(p + 32) = va;
@@ -438,7 +439,7 @@ public:
         case 0x09: {  // InitializeEx {big_page_size, as_fd, flags, reserved, u64 start, u64 end, u64 split}
             u32 big = *(u32*)p;
             if (big) as->big_page_ = big;
-            if (getenv("HWDER_AS_TRACE")) hw_log("as-gpu: InitializeEx big page %x", big);
+            if (debug::flag(debug::AsTrace)) hw_log("as-gpu: InitializeEx big page %x", big);
             return Success;
         }
         case 0x14: {  // Remap: entries {u16 flags, u16 kind, u32 handle, u32 mem_offset_lo, u32 gpu_offset, u32 pages}
@@ -449,7 +450,7 @@ public:
                 u64 mem_off = (u64)*(u32*)(e + 8) << 16;
                 u64 va = (u64)*(u32*)(e + 12) << 16;
                 u64 size = (u64)*(u32*)(e + 16) << 16;
-                if (getenv("HWDER_AS_TRACE"))
+                if (debug::flag(debug::AsTrace))
                     hw_log("as-gpu: remap va %llx size %llx handle %u memoff %llx flags %x", (unsigned long long)va,
                            (unsigned long long)size, handle, (unsigned long long)mem_off, *(u16*)e);
                 if (!handle) as->unmap(va, size);
@@ -488,7 +489,7 @@ public:
         case 0x16:  // SyncptWait {id, thresh, timeout}
         case 0x19: {  // SyncptWaitEx {id, thresh, timeout, value}
             s32 timeout = (s32)p[2];
-            static const bool trace = getenv("HWDER_SYNC_TRACE") != nullptr;
+            static const bool trace = debug::flag(debug::SyncTrace);
             if (trace && !reached(syncpoint_read(p[0]), p[1]))
                 hw_log("sync: syncpt wait %u >= %u (value %u) timeout %d", p[0], p[1], syncpoint_read(p[0]), timeout);
             bool ok = syncpoint_wait(p[0], p[1], timeout < 0 ? -1 : (s64)timeout * 1000000);
@@ -546,7 +547,7 @@ public:
     NvResult event_wait(u32* p, bool allocate) {
         u32 id = p[0], thresh = p[1];
         s32 timeout = (s32)p[2];
-        static const bool trace = getenv("HWDER_SYNC_TRACE") != nullptr;
+        static const bool trace = debug::flag(debug::SyncTrace);
         if (trace && !(thresh == 0 || reached(syncpoint_read(id), thresh)))
             hw_log("sync: event wait syncpt %u >= %u (value %u, max %u) timeout %d", id, thresh, syncpoint_read(id),
                    g_sp.max[id % kMaxSyncpoints].load(), timeout);
@@ -736,7 +737,7 @@ private:
             fence[0] = syncpt_;
             fence[1] = g_sp.max[syncpt_];
         }
-        static const bool trace = getenv("HWDER_SYNC_TRACE") != nullptr;
+        static const bool trace = debug::flag(debug::SyncTrace);
         if (trace)
             hw_log("sync: submit ch(syncpt %u) flags 0x%x entries %u wait %u:%u -> fence %u:%u (value %u)", syncpt_, flags, n,
                    s.wait ? s.wait_fence.id : 0, s.wait ? s.wait_fence.value : 0, fence[0], fence[1], syncpoint_read(syncpt_));
@@ -865,7 +866,7 @@ private:
         if (out.addr && (cmd >> 31 & 1)) memcpy((void*)out.addr, work.data(), out.size);
         else if (out.addr) memcpy((void*)out.addr, work.data(), out.size);
         if (out2.addr) memcpy((void*)out2.addr, out2_buf.data(), out2.size);
-        static const bool trace = getenv("HWDER_NV_TRACE") != nullptr;
+        static const bool trace = debug::flag(debug::NvTrace);
         if (trace || (r != Success && r != Timeout)) hw_log("nvdrv: fd %u ioctl 0x%08x -> %u", fd, cmd, r);
         return r;
     }
