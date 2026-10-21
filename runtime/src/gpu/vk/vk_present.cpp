@@ -6,6 +6,7 @@
 #include "interp/interp.h"
 #include "post_spv.h"
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 
@@ -185,7 +186,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                    (pt1.QuadPart - pt0.QuadPart) * 1000.0 / ptf.QuadPart, (pt2.QuadPart - pt1.QuadPart) * 1000.0 / ptf.QuadPart,
                    img->gpu_modified ? "gpu" : "cpu", img->cpu_dirty ? " dirty" : "");
         {   // HWDER_PRESENT_TRACE=1: one line per present (address switches, stale re-presents, movie cadence)
-            static const bool ptrace = getenv("HWDER_PRESENT_TRACE") != nullptr;
+            static const bool ptrace = debug::flag(debug::PresentTrace);
             if (ptrace) {
                 static u64 last_addr = 0, last_hash = 0, same_hash_run = 0;
                 u64 ch = img->gpu_modified ? img->write_seq : hash_bytes((const u8*)img->addr, std::min<u64>(img->readable, 64 << 10));
@@ -238,7 +239,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             }
         }
         {
-            static const char* strip_dir = getenv("HWDER_FILMSTRIP");
+            static const char* strip_dir = debug::str(debug::Filmstrip);
             if (strip_dir) filmstrip_capture(image, w, h, strip_dir);
         }
         // Fill ultrawide: the orthographic HUD (and movies, which the game draws as a 2D quad) stays in
@@ -294,7 +295,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             draws_at_last = draws_;
         }
         {   // F1 menu changed the internal resolution: apply between frames
-            static const bool env_scale = getenv("HWDER_RES_SCALE") || getenv("HWDER_RES_SCALE_X") || getenv("HWDER_RES_SCALE_Y");
+            static const bool env_scale = debug::flag(debug::ResScale) || debug::flag(debug::ResScaleX) || debug::flag(debug::ResScaleY);
             if (!env_scale) {
                 float wx = settings::video().res_scale, wy = settings::video().res_scale;
                 if (settings::video().unlocked_res) {  // largest 16:9 that fits the window; the blit pillarboxes the rest
@@ -349,7 +350,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         }
         // HWDER_VK_FRAME_DUMP_MIN_DRAWS overrides the 600-draw threshold (e.g. 30 to catch a menu frame).
         // "30-200" also sets an upper bound (skips the hundreds-of-draws cutscene frames).
-        static const char* auto_env = getenv("HWDER_VK_FRAME_DUMP_MIN_DRAWS");
+        static const char* auto_env = debug::str(debug::VkFrameDumpMinDraws);
         static const u64 auto_min_draws = auto_env ? strtoull(auto_env, nullptr, 0) : 600;
         static const u64 auto_max_draws = auto_env && strchr(auto_env, '-') ? strtoull(strchr(auto_env, '-') + 1, nullptr, 0) : ~0ull;
         if (dump_auto_ && st_.draws >= auto_min_draws && st_.draws <= auto_max_draws &&
@@ -357,10 +358,10 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             dump_auto_ = false;
             // HWDER_VK_FRAME_DUMP_SKIP=n dumps the n-th present after the trigger instead (menu frames
             // straddle presents: a 44-draw "frame" is followed by a 7-draw one, then the next full one).
-            static const u64 skip = getenv("HWDER_VK_FRAME_DUMP_SKIP") ? strtoull(getenv("HWDER_VK_FRAME_DUMP_SKIP"), nullptr, 0) : 0;
+            static const u64 skip = debug::value(debug::VkFrameDumpSkip, (u64)0, 0);
             // HWDER_VK_FRAME_DUMP_DELAY=<secs>: arm the time trigger that long after the draw-count trigger
             // (e.g. the Select Mode menu is complete ~3 s after its first 44-draw parchment frame).
-            static const double delay = getenv("HWDER_VK_FRAME_DUMP_DELAY") ? atof(getenv("HWDER_VK_FRAME_DUMP_DELAY")) : 0.0;
+            static const double delay = debug::value(debug::VkFrameDumpDelay, 0.0);
             if (delay > 0) {
                 dump_time_ = (GetTickCount64() - g_start_ms) / 1000.0 + delay;
                 hw_log("fd: draw-count trigger (previous frame had %llu draws); dumping at t=%.2f", (unsigned long long)st_.draws, dump_time_);

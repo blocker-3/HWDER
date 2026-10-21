@@ -5,6 +5,7 @@
 
 #include "interp/camera.h"
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 
@@ -132,7 +133,7 @@ void VkRenderer::obj_frame_begin(u64 tag) {
     obj_occ_.clear();
     obj_tag_ = tag;
     if (!(tag & 1)) obj_st_.ticks++;
-    static const bool trace = getenv("HWDER_GI_OBJ_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::GiObjTrace);
     if (trace && (tag & 1)) {
         obj_near_last_.swap(obj_near_cur_);
         obj_near_cur_.clear();
@@ -171,7 +172,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
             acc += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
         }
     } timer(obj_st_.ms);
-    static const bool off = getenv("HWDER_GI_NO_OBJECTS") != nullptr;
+    static const bool off = debug::flag(debug::GiNoObjects);
     if (off) return;
     u64 tag = gpu::exec_gi_tag();
     if (!tag) return;
@@ -191,7 +192,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     // block of the same key whose first world transform is nearest (each used once).
     obj_st_.draws++;
     // HWDER_GI_OBJ_TRACE: the block's outcome, recorded on every return when it is the nearest so far.
-    static const bool trace = getenv("HWDER_GI_OBJ_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::GiObjTrace);
     u16 mats[1024 / 12 + 1];  // offsets (floats) of the block's matrices; outlives tr
     u32 nm = 0;
     struct Trace {

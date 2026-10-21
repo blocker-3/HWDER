@@ -3,6 +3,7 @@
 // text-for-text from vk_renderer.cpp.
 #include "interp/interp.h"
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 
@@ -11,10 +12,10 @@ namespace gpu::vk::detail {
 static bool g_drawlog_window = false;
 FILE* g_drawlog = nullptr;
 bool drawlog_active() {
-    static const bool on = getenv("HWDER_DRAWLOG") && getenv("HWDER_FILMSTRIP");
+    static const bool on = debug::flag(debug::Drawlog) && debug::flag(debug::Filmstrip);
     if (!on || !g_drawlog_window) return false;
     if (!g_drawlog) {
-        std::string path = std::string(getenv("HWDER_FILMSTRIP")) + "/drawlog.txt";
+        std::string path = std::string(debug::str(debug::Filmstrip)) + "/drawlog.txt";
         g_drawlog = fopen(path.c_str(), "w");
     }
     return g_drawlog != nullptr;
@@ -27,7 +28,7 @@ using gpu::vk::g_prof_draws;
 double prof_flush() {
     double total = 0;
     for (double v : g_prof) total += v;
-    static const double limit = getenv("HWDER_PROFILE_MS") ? atof(getenv("HWDER_PROFILE_MS")) : 200.0;
+    static const double limit = debug::value(debug::ProfileMs, 200.0);
     if (total > limit) {
         char line[512];
         int o = snprintf(line, sizeof(line), "vk: profile: %u draws, %.0f ms:", g_prof_draws, total);
@@ -40,14 +41,14 @@ double prof_flush() {
 }
 
 void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt) {
-    static const char* dir = getenv("HWDER_DUMP_FRAMES");
+    static const char* dir = debug::str(debug::DumpFrames);
     static u32 n = 0;
     if (!dir) return;
     // Note: each dump waits for the GPU and writes an 8 MB BMP (a visible hitch) - keep `every` large.
-    u32 every = getenv("HWDER_DUMP_EVERY") ? (u32)atoi(getenv("HWDER_DUMP_EVERY")) : 600;
+    u32 every = (u32)debug::value(debug::DumpEvery, 600);
     // HWDER_DUMP_AFTER=<secs>: no dumps (and no dump stalls) before that time, so the run reaches
     // the interesting part at normal speed.
-    static double after_s = getenv("HWDER_DUMP_AFTER") ? atof(getenv("HWDER_DUMP_AFTER")) : 0.0;
+    static double after_s = debug::value(debug::DumpAfter, 0.0);
     if (after_s > 0 && GetTickCount64() - g_start_ms < (u64)(after_s * 1000.0)) {
         n++;
         return;
@@ -120,13 +121,13 @@ static char g_strip_tag[64] = "real";
 // read back two presents later so it never stalls. For frame-by-frame inspection of transitions/cadence.
 void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     // HWDER_FILMSTRIP_W=<width> (default 96): thumbnail width, 16:9.
-    static const u32 SW = getenv("HWDER_FILMSTRIP_W") ? std::max(16, atoi(getenv("HWDER_FILMSTRIP_W"))) : 96, SH = SW * 9 / 16;
+    static const u32 SW = debug::flag(debug::FilmstripW) ? std::max(16, atoi(debug::str(debug::FilmstripW))) : 96, SH = SW * 9 / 16;
     // HWDER_FILMSTRIP_BATTLE=<s>: start that long after the first battle-sized frame (> 450 draws);
     // HWDER_FILMSTRIP_AFTER=<s>: or at that time since boot; HWDER_FILMSTRIP_FOR=<s>: stop after that long.
     {
-        static const char* battle = getenv("HWDER_FILMSTRIP_BATTLE");
-        static const double dur = getenv("HWDER_FILMSTRIP_FOR") ? atof(getenv("HWDER_FILMSTRIP_FOR")) : 1e9;
-        static const double after = getenv("HWDER_FILMSTRIP_AFTER") ? atof(getenv("HWDER_FILMSTRIP_AFTER")) : 0.0;
+        static const char* battle = debug::str(debug::FilmstripBattle);
+        static const double dur = debug::value(debug::FilmstripFor, 1e9);
+        static const double after = debug::value(debug::FilmstripAfter, 0.0);
         static double start = -1;
         double now = (GetTickCount64() - g_start_ms) / 1000.0;
         if (battle && start < 0) {

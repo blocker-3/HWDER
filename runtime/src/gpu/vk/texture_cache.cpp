@@ -8,6 +8,7 @@
 #include "kernel/kernel.h"
 #include "vk_common.h"
 #include "gpu/graphics_audit.h"
+#include "debug_flags.h"
 
 namespace gpu::vk {
 
@@ -619,7 +620,7 @@ void TextureCache::alloc_image(Image* img) {
     if (!vk_format_compressed(info.fmt.vk)) {  // clears are not allowed on block-compressed formats
         VkImageSubresourceRange all{img->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         if (img->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-            static const float init_depth = getenv("HWDER_VK_INIT_DEPTH") ? (float)atof(getenv("HWDER_VK_INIT_DEPTH")) : 1.0f;
+            static const float init_depth = (float)debug::value(debug::VkInitDepth, 1.0);
             VkClearDepthStencilValue ds{init_depth, 0};
             vkCmdClearDepthStencilImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all);
         } else {
@@ -667,9 +668,9 @@ Image* TextureCache::create(u64 addr, const ImageInfo& info) {
         static bool init = false;
         if (!init) {
             init = true;
-            const char* e = getenv("HWDER_RES_SCALE");
-            const char* ex = getenv("HWDER_RES_SCALE_X");  // test aid: emulate another window aspect
-            const char* ey = getenv("HWDER_RES_SCALE_Y");
+            const char* e = debug::str(debug::ResScale);
+            const char* ex = debug::str(debug::ResScaleX);  // test aid: emulate another window aspect
+            const char* ey = debug::str(debug::ResScaleY);
             g_res_scale = g_res_scale_y = e ? (float)atof(e) : settings::video().res_scale;
             if (!e && settings::video().unlocked_res) {
                 float sx = GetSystemMetrics(SM_CXSCREEN) / 1920.0f, sy = GetSystemMetrics(SM_CYSCREEN) / 1080.0f;

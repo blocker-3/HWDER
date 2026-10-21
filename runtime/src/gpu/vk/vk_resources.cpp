@@ -1,6 +1,7 @@
 // Resource binding of the Vulkan renderer: dummy images, framebuffer resolution, dynamic rendering, descriptor
 // pools, TIC reads and filling a program's descriptor set. Moved text-for-text from vk_renderer.cpp.
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 using namespace m3d;
@@ -8,7 +9,7 @@ using namespace m3d;
 // ------------------------------------------------------------------ resources
 void VkRenderer::create_dummies() {
     static u8 zeros[64 * 6] = {};
-    if (getenv("HWDER_VK_WHITE_TEX")) memset(zeros, 0xFF, sizeof(zeros));
+    if (debug::flag(debug::VkWhiteTex)) memset(zeros, 0xFF, sizeof(zeros));
     ImageInfo i;
     i.fmt = rt_format(0xD5);
     i.width = i.height = 1;
@@ -251,7 +252,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);
-            static const bool census = getenv("HWDER_GI_OBJ_TRACE") != nullptr;
+            static const bool census = debug::flag(debug::GiObjTrace);
             if (census && cur_stage_ == 0 && c.index != 3 && n >= 48 && n <= 4096 && (gpu::exec_gi_tag() & 1)) {
                 alignas(16) u8 tmp[4096];
                 mm_->read(va, tmp, n);  // the staging slice is write-combined: read the guest copy instead
@@ -354,7 +355,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
             u32 tic_id = h & 0xFFFFF, tsc_id = linked_tsc ? tic_id : h >> 20;
             u32 tic[8], tsc[8];
             VkDescriptorImageInfo ii{dummy_sampler_, dummy_view(vt), VK_IMAGE_LAYOUT_GENERAL};
-            static bool white = getenv("HWDER_VK_WHITE_TEX") != nullptr;
+            static bool white = debug::flag(debug::VkWhiteTex);
             bool tic_ok = !white && read_tic(((u64)pools[0] << 32) | pools[1], pools[2], tic_id, tic);
             if (dumping() && !tic_ok)
                 hw_log("fd:   tex DUMMY: handle 0x%x (c%u+0x%x) tic %u not readable (pool %llx limit %u)", h, t.cbuf_index, t.cbuf_offset,
@@ -459,7 +460,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                                  stale ? " STALE" : "");
                         dump_tex_ += t;
                         // Guest bytes of every sampled texture (HWDER_VK_DUMP_TEX=1): fd/tex_<addr>_WxH_f<fmt>_bh<n>_tws<n>_<bl|pitch>.guest
-                        static bool dump_tex_bytes = getenv("HWDER_VK_DUMP_TEX") != nullptr;
+                        static bool dump_tex_bytes = debug::flag(debug::VkDumpTex);
                         if (dump_tex_bytes && img->readable) {
                             CreateDirectoryA("fd", nullptr);
                             char path[256];

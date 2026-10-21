@@ -6,6 +6,7 @@
 #include "gpu/settings.h"
 #include "gpu/graphics_audit.h"
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 using namespace m3d;
@@ -63,7 +64,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     key.topology = topology(topo);
     key.patch_points = regs[0x373];
     // rasterizer
-    static const bool no_cull = getenv("HWDER_VK_NO_CULL") != nullptr;
+    static const bool no_cull = debug::flag(debug::VkNoCull);
     key.cull_enable = regs[GlCullTestEnabled] != 0 && !no_cull;
     key.cull_mode = regs[GlCullFace] == 0x404 ? VK_CULL_MODE_FRONT_BIT
                     : regs[GlCullFace] == 0x408 ? VK_CULL_MODE_FRONT_AND_BACK
@@ -84,7 +85,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     bool flip_y = (regs[WindowOrigin] >> 4) & 1;
     bool ll = regs[WindowOrigin] & 1;
     bool ccw = regs[GlFrontFace] == 0x901;
-    static const char* face_rule = getenv("HWDER_VK_FACE_RULE");
+    static const char* face_rule = debug::str(debug::VkFaceRule);
     bool invert = face_rule ? (atoi(face_rule) == 1 ? flip_y : false) : (ll == flip_y);
     if (invert) ccw = !ccw;
     key.front_face = ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -311,7 +312,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
             hw_log("fd:   vstream %u va %llx stride %u limit-size %llx start %llx bytes %llx avail %llx vmin %u vmax %u first %.3f %.3f %.3f %.3f", s,
                    (unsigned long long)va, stride, (unsigned long long)size, (unsigned long long)start, (unsigned long long)bytes,
                    (unsigned long long)avail, vmin, vmax, f4[0], f4[1], f4[2], f4[3]);
-            static const bool fd_raw = getenv("HWDER_FD_RAW") != nullptr;
+            static const bool fd_raw = debug::flag(debug::FdRaw);
             if (fd_raw && avail) {  // raw vertex data for offline analysis
                 char path[128];
                 snprintf(path, sizeof(path), "fd/vs_%llu_s%u.bin", (unsigned long long)draws_, s);
@@ -468,7 +469,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     if (!dump_prog_.empty()) {
         // HWDER_VK_FRAME_DUMP_AFTER=<secs>: ignore matches before that run time (the same UI program is used
         // on the loading screen at ~10 s and on the Select Mode menu at ~22 s).
-        static const double after = getenv("HWDER_VK_FRAME_DUMP_AFTER") ? atof(getenv("HWDER_VK_FRAME_DUMP_AFTER")) : 0.0;
+        static const double after = debug::value(debug::VkFrameDumpAfter, 0.0);
         char kb[20];
         snprintf(kb, sizeof(kb), "%016llx", (unsigned long long)prog_key);
         if (GetTickCount64() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
@@ -521,7 +522,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
                          c.size, f[0], f[1], f[2], f[3]);
                 cb += t;
                 // HWDER_VK_DUMP_CBUF=<frag shader key prefix>: full contents of that shader's cbufs (8 floats per line).
-                static const char* dump_cbuf = getenv("HWDER_VK_DUMP_CBUF");
+                static const char* dump_cbuf = debug::str(debug::VkDumpCbuf);
                 if (dump_cbuf && bnd.valid && prog->stages[4]) {
                     char kbuf[20];
                     snprintf(kbuf, sizeof(kbuf), "%016llx", (unsigned long long)prog->stages[4]->key);
@@ -555,7 +556,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
                 snprintf(t, sizeof(t), " c%u[%s size 0x%x use 0x%x: %.3g %.3g %.3g %.3g]", c.index, bnd.valid ? "ok" : "UNBOUND", bnd.size,
                          c.size, f[0], f[1], f[2], f[3]);
                 cb += t;
-                static const bool fd_raw = getenv("HWDER_FD_RAW") != nullptr;
+                static const bool fd_raw = debug::flag(debug::FdRaw);
                 if (fd_raw && bnd.valid && bnd.size) {  // raw vertex-stage cbuf for offline analysis
                     std::vector<u8> buf(std::min<u32>(bnd.size, 0x10000));
                     mm_->read(bnd.va, buf.data(), buf.size());

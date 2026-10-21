@@ -27,6 +27,7 @@
 #include "gpu/vk/pipeline_warmup_cache.h"
 #include "gpu/vk/pipeline_catalog.h"
 #include "vk_common.h"
+#include "debug_flags.h"
 
 namespace gpu::vk {
 
@@ -726,7 +727,7 @@ private:
             fclose(f);
             pcache_saved_ = pipelines_.size();
         }
-        if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: native retrieval %.3f ms, disk %.3f ms, %zu bytes",
+        if (debug::flag(debug::CacheProfile)) hw_log("cache-save: native retrieval %.3f ms, disk %.3f ms, %zu bytes",
             std::chrono::duration<double, std::milli>(retrieved-begin).count(),
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-retrieved).count(), n);
     }
@@ -764,20 +765,20 @@ private:
         u64 draws, skipped, clears, dispatches, blits, pipelines, shaders, images_created;
         u64 tic_hit, tic_miss, vb_hit, vb_miss, idx_hit, idx_miss;
     } st_{};
-    bool verbose_ = getenv("HWDER_VK_VERBOSE") != nullptr;
+    bool verbose_ = debug::flag(debug::VkVerbose);
     // HWDER_VK_FRAME_DUMP=<present index>: log every draw/clear/blit of that frame with its targets and sources.
     // "auto": the first frame following one with 600+ draws (a real 3D frame).
-    bool dump_auto_ = getenv("HWDER_VK_FRAME_DUMP") && !strncmp(getenv("HWDER_VK_FRAME_DUMP"), "auto", 4);
-    double dump_auto_after_ = dump_auto_ ? atof(getenv("HWDER_VK_FRAME_DUMP") + 4) : 0.0;  // "auto70": not before 70 s
+    bool dump_auto_ = debug::flag(debug::VkFrameDump) && !strncmp(debug::str(debug::VkFrameDump), "auto", 4);
+    double dump_auto_after_ = dump_auto_ ? atof(debug::str(debug::VkFrameDump) + 4) : 0.0;  // "auto70": not before 70 s
     // "t<seconds>": the first frame presented after that many seconds of run time.
-    double dump_time_ = getenv("HWDER_VK_FRAME_DUMP") && getenv("HWDER_VK_FRAME_DUMP")[0] == 't' ? atof(getenv("HWDER_VK_FRAME_DUMP") + 1) : -1.0;
+    double dump_time_ = debug::flag(debug::VkFrameDump) && debug::str(debug::VkFrameDump)[0] == 't' ? atof(debug::str(debug::VkFrameDump) + 1) : -1.0;
     // "p<hex prefix>": the first present after a draw whose program key starts with that prefix (robust against
     // the +-2 s wall-clock jitter of menu screens; combine with HWDER_VK_FRAME_DUMP_COUNT).
-    std::string dump_prog_ = getenv("HWDER_VK_FRAME_DUMP") && getenv("HWDER_VK_FRAME_DUMP")[0] == 'p' ? getenv("HWDER_VK_FRAME_DUMP") + 1 : "";
-    u64 dump_frame_ = getenv("HWDER_VK_FRAME_DUMP") && !dump_auto_ && dump_time_ < 0 && dump_prog_.empty() ? strtoull(getenv("HWDER_VK_FRAME_DUMP"), nullptr, 0) : ~0ull;
+    std::string dump_prog_ = debug::flag(debug::VkFrameDump) && debug::str(debug::VkFrameDump)[0] == 'p' ? debug::str(debug::VkFrameDump) + 1 : "";
+    u64 dump_frame_ = debug::flag(debug::VkFrameDump) && !dump_auto_ && dump_time_ < 0 && dump_prog_.empty() ? strtoull(debug::str(debug::VkFrameDump), nullptr, 0) : ~0ull;
     // HWDER_VK_FRAME_DUMP_COUNT=n dumps n consecutive presents from the trigger (menu frames straddle
     // presents nondeterministically: a 44-draw "frame" may be followed by a 7- or 0-draw one).
-    u64 dump_count_ = getenv("HWDER_VK_FRAME_DUMP_COUNT") ? std::max(1ull, strtoull(getenv("HWDER_VK_FRAME_DUMP_COUNT"), nullptr, 0)) : 1;
+    u64 dump_count_ = debug::flag(debug::VkFrameDumpCount) ? std::max(1ull, strtoull(debug::str(debug::VkFrameDumpCount), nullptr, 0)) : 1;
     bool dumping() const { return g_s.present_count + 1 >= dump_frame_ && g_s.present_count + 1 < dump_frame_ + dump_count_; }
     std::string dump_tex_;  // texture sources of the current draw (filled by bind_resources)
     std::string drawlog_tex_;  // same, compact, for HWDER_DRAWLOG

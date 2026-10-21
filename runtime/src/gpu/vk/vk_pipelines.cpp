@@ -6,6 +6,7 @@
 #include "fs/nsp.h"
 #include "hwder_version.h"
 #include "vk_renderer.h"
+#include "debug_flags.h"
 
 namespace gpu::vk::detail {
 using namespace m3d;
@@ -16,7 +17,7 @@ static const char* kCatalogFile = "pipeline_catalog.bin";
 static catalog::GameSources catalog_sources;
 static bool catalog_recording = false, catalog_deferred = false;
 static bool catalog_enabled() {
-    const char* value = getenv("HWDER_PIPELINE_CATALOG");
+    const char* value = debug::str(debug::PipelineCatalog);
     return !value || strcmp(value,"0") != 0;
 }
 static u64 catalog_build() {
@@ -25,10 +26,10 @@ static u64 catalog_build() {
     return hash_bytes(HWDER_COMMIT,sizeof(HWDER_COMMIT),tag);
 }
 static u32 catalog_game_version() { return hwfs::nsp::active() && hwfs::nsp::info().has_version ? hwfs::nsp::info().version : 0; }
-static bool catalog_debug_translation() { return getenv("HWDER_SHADER_NO_KIL") || getenv("HWDER_SHADER_FALLBACK"); }
+static bool catalog_debug_translation() { return debug::flag(debug::ShaderNoKil) || debug::flag(debug::ShaderFallback); }
 
 static bool prewarm_enabled() {
-    const char* value = getenv("HWDER_PIPELINE_PREWARM");
+    const char* value = debug::str(debug::PipelinePrewarm);
     return !value || strcmp(value, "0") != 0;
 }
 static u64 warmup_compatibility() {
@@ -120,7 +121,7 @@ ShaderEntry* VkRenderer::get_shader(GuestEnv& env, shader::Stage stage, const sh
         hw_log("vk: shader module creation failed (%016llx)", (unsigned long long)key);
         return e;
     }
-    if (getenv("HWDER_DUMP_SHADERS")) {
+    if (debug::flag(debug::DumpShaders)) {
         char name[128];
         snprintf(name, sizeof(name), "shader_%016llx_%u.spv", (unsigned long long)key, (u32)stage);
         if (FILE* f = fopen(name, "wb")) {
@@ -566,7 +567,7 @@ void VkRenderer::record_catalog_pipeline(GfxProgram* prog, const PipelineKey& ke
     auto words=warmup::key_words(key);
     for (const auto& p:catalog_records_.pipelines) if(p.program==index && warmup::key_words(p.key)==words)return;
     catalog_records_.build=catalog_build(); catalog_records_.game_version=catalog_game_version();
-    const char* scope=getenv("HWDER_PIPELINE_CATALOG_RECORD");
+    const char* scope=debug::str(debug::PipelineCatalogRecord);
     catalog_records_.scope=scope ? scope : "unspecified";
     catalog_records_.pipelines.push_back({index,key}); catalog_dirty_=true;
 }
@@ -597,7 +598,7 @@ void VkRenderer::save_warmup_records() {
         // successful old snapshot must never clear those later changes.
         if (completed.status != warmup::Status::Ok) warmup_dirty_ = true;
         hw_log("vk: prewarm background save: %s, %zu recipes retained", warmup::name(completed.status), completed.recipes);
-        if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background validation %.3f ms, serialization %.3f ms, disk %.3f ms",
+        if (debug::flag(debug::CacheProfile)) hw_log("cache-save: background validation %.3f ms, serialization %.3f ms, disk %.3f ms",
             completed.timings.validation_ms, completed.timings.serialization_ms, completed.timings.disk_ms);
     }
     if (warmup_save_.pending()) return;
@@ -618,22 +619,22 @@ void VkRenderer::save_warmup_records() {
         snapshot.pipelines.back().program_index = remap[record.program_index];
     }
     const auto copied = std::chrono::steady_clock::now();
-    static const bool synchronous = getenv("HWDER_CACHE_SAVE_SYNC") && strcmp(getenv("HWDER_CACHE_SAVE_SYNC"), "1") == 0;
+    static const bool synchronous = debug::flag(debug::CacheSaveSync) && strcmp(debug::str(debug::CacheSaveSync), "1") == 0;
     if (!synchronous) {
-        if (warmup_save_.start(kWarmupFile, warmup_compatibility(), std::move(snapshot), getenv("HWDER_CACHE_PROFILE") != nullptr)) {
+        if (warmup_save_.start(kWarmupFile, warmup_compatibility(), std::move(snapshot), debug::flag(debug::CacheProfile))) {
             warmup_dirty_ = false;
-            if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: background snapshot %.3f ms, submit %.3f ms",
+            if (debug::flag(debug::CacheProfile)) hw_log("cache-save: background snapshot %.3f ms, submit %.3f ms",
                 std::chrono::duration<double, std::milli>(copied-begin).count(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-copied).count());
         } else hw_log("vk: prewarm background save unavailable; retaining dirty history for retry");
         return;
     }
     warmup::SaveTimings timings;
-    const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot, getenv("HWDER_CACHE_PROFILE") ? &timings : nullptr);
+    const auto status = warmup::save(kWarmupFile, warmup_compatibility(), snapshot, debug::flag(debug::CacheProfile) ? &timings : nullptr);
     if (status == warmup::Status::Ok) warmup_dirty_ = false;
     hw_log("vk: prewarm save: %s, %zu recipes retained, %llu newly recorded this run",
            warmup::name(status), snapshot.pipelines.size(), (unsigned long long)warmup_recorded_);
-    if (getenv("HWDER_CACHE_PROFILE")) hw_log("cache-save: snapshot %.3f ms, validation %.3f ms, serialization %.3f ms, disk %.3f ms",
+    if (debug::flag(debug::CacheProfile)) hw_log("cache-save: snapshot %.3f ms, validation %.3f ms, serialization %.3f ms, disk %.3f ms",
         std::chrono::duration<double, std::milli>(copied-begin).count(), timings.validation_ms, timings.serialization_ms, timings.disk_ms);
 }
 
@@ -671,7 +672,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // A driver compile takes 50-250 ms. Instead of stalling the whole frame, build new pipelines on
     // worker threads and skip the draw until the pipeline exists (a one-or-two-frame pop-in, the usual
     // "async shaders" trade). HWDER_SYNC_PIPELINES=1 restores the synchronous behaviour.
-    static const bool sync_pipes = getenv("HWDER_SYNC_PIPELINES") != nullptr;
+    static const bool sync_pipes = debug::flag(debug::SyncPipelines);
     // Light frames (menus, the first frames of a scene) compile synchronously: a 100 ms hitch behind a
     // fade is invisible, while skipping their draws shows a half-drawn scene. Heavy battle frames go
     // async so a new effect's pipeline does not stall the whole frame.
@@ -679,7 +680,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     // compile synchronously: skipping one leaves its output, or the copy a later pass reads, empty,
     // which showed as a one-frame black box the first time an attack effect was used.
     // HWDER_ASYNC_RT_PIPELINES=1 restores async compiles for them (for comparison).
-    static const bool async_rt = getenv("HWDER_ASYNC_RT_PIPELINES") != nullptr;
+    static const bool async_rt = debug::flag(debug::AsyncRtPipelines);
     const bool synchronous = sync_pipes || st_.draws < 64 || pipe_retried_.count(h) || (draw_samples_rt_ && !async_rt);
     if (prog->matched_warm) {
         std::unique_lock<std::mutex> l(pipe_m_);
@@ -967,7 +968,7 @@ void start_pipeline_prewarm() {
     start_private_pipeline_prewarm();
 }
 void prepare_pipeline_catalog() {
-    const char* record=getenv("HWDER_PIPELINE_CATALOG_RECORD");
+    const char* record=debug::str(debug::PipelineCatalogRecord);
     catalog_recording=record && *record && strlen(record)<=128 && !catalog_debug_translation();
     if(!catalog_recording && !catalog_deferred)return;
     prelaunch::preparation_frame("Finding graphics programs in your local game...");
