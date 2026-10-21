@@ -163,7 +163,8 @@ try:
     fixture=OUT/"fixture";fixture.mkdir();(fixture/"game.nsp").write_bytes(b"synthetic, never read");(fixture/"prod.keys").write_bytes(b"synthetic, never read")
     tools_marker=OUT/"synthetic-tools/managed-tools/0123456789abcdef01234567";tools_marker.mkdir(parents=True);(tools_marker/"complete.json").write_text("{}")
     p,h=start("","normal-missing")
-    wait(lambda:primary(h)=="Next" and enabled(h,PRIMARY));require("Pick your game file" in status(h),"Next step has no hint")
+    # The window enables the primary button a moment before it writes the step hint: wait for both.
+    wait(lambda:primary(h)=="Next" and enabled(h,PRIMARY) and "Pick your game file" in status(h));require("Pick your game file" in status(h),"Next step has no hint")
     shot(h,"02a-next")
     settext(h,101,fixture/"game.nsp");require(edit(h,101)==str(fixture/"game.nsp") and primary(h)=="Next","Keys missing still Next")
     settext(h,102,fixture/"prod.keys");wait(lambda:primary(h)=="Install");shot(h,"02b-install")
@@ -172,7 +173,7 @@ try:
     require(not any((OUT/"normal-missing").rglob("*.zip")),"Verify-only Check downloaded payload")
     require(not any((OUT/"normal-missing").rglob("*.partial-*")),"Verify-only Check created an install attempt")
     shot(h,"02c-private-tools-missing")
-    settext(h,DATA,OUT/"synthetic-tools");wait(lambda:primary(h)=="Prepare");require("Choose Prepare" in status(h),"Prepare step has no hint")
+    settext(h,DATA,OUT/"synthetic-tools");wait(lambda:primary(h)=="Prepare" and "Choose Prepare" in status(h));require("Choose Prepare" in status(h),"Prepare step has no hint")
     shot(h,"02d-prepare")
     settext(h,DATA,OUT/"normal-missing");wait(lambda:primary(h)=="Install")
     settext(h,101,"");wait(lambda:primary(h)=="Next")
