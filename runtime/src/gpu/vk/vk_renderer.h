@@ -343,6 +343,8 @@ struct Framebuffer {
 extern const char* kPipelineCacheFile;  // vk_pipelines.cpp
 double prof_flush();                    // vk_renderer.cpp
 bool drawlog_active();                  // vk_renderer.cpp
+extern FILE* g_drawlog;                 // vk_renderer.cpp
+extern const u64 g_start_ms;            // vk_renderer.cpp
 
 class VkRenderer final : public Renderer {
 public:
