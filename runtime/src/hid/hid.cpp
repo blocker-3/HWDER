@@ -15,6 +15,7 @@
 
 extern "C" u64 hw_cntvct();
 #include "interp/interp.h"
+#include "debug_flags.h"
 
 namespace ipc {
 
@@ -282,11 +283,11 @@ void update_thread() {
     timeBeginPeriod(1);
     hid::HostInput in;
     // HWDER_AUTOPLAY=1: tap A every 1.5 s (after 5 s) so unattended runs advance through the menus.
-    static const bool autoplay = getenv("HWDER_AUTOPLAY") != nullptr;
+    static const bool autoplay = debug::flag(debug::Autoplay);
     // HWDER_AUTOPLAY=2: into a battle and keep fighting (performance runs): A until the battle has
     // loaded, + (loading tips) followed by B (closes the pause menu if + opened one), then move and attack.
     // No cutscene-skip sequence: its Left press moved the pre-battle menu's cursor off "Start Battle".
-    static const bool battle = autoplay && atoi(getenv("HWDER_AUTOPLAY")) == 2;
+    static const bool battle = autoplay && atoi(debug::str(debug::Autoplay)) == 2;
     const u64 t0 = GetTickCount64();
     for (;;) {
         hid::poll_host_input(in);
@@ -312,7 +313,7 @@ void update_thread() {
             const bool in_battle = battle_since && t - battle_since > 2000;
             // HWDER_AUTOPLAY_SKIP=1 (a save that starts with the story cutscenes): a 6 s cycle of
             // + (skip prompt), Left (Yes), A, then A twice for the menus (the default entries lead into Legend Mode).
-            static const bool skip = getenv("HWDER_AUTOPLAY_SKIP") != nullptr;
+            static const bool skip = debug::flag(debug::AutoplaySkip);
             // The pre-battle menu (Battlefield Info, Select Warrior: 90+ draws) needs the original sequence:
             // B leaves a sub-screen, Up x3 reaches Start Battle at the top, A starts.
             const bool prebattle = skip && hw_last_frame_draws.load() >= 90;
@@ -346,14 +347,14 @@ void update_thread() {
                 if (c >= 1500 && c < 1620) in.pads[0].buttons |= hid::kBtnA;
             }
             if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pads[0].buttons |= hid::kBtnPlus;  // loading tips
-            static const bool idle_in_battle = getenv("HWDER_AUTOPLAY_IDLE") != nullptr;  // experiments: no input in battle
+            static const bool idle_in_battle = debug::flag(debug::AutoplayIdle);  // experiments: no input in battle
             if (in_battle && !idle_in_battle) {
                 if ((t % 800) < 100) in.pads[0].buttons |= hid::kBtnY;
                 in.pads[0].ly = 20000;
                 in.pads[0].lx = (s32)(((t / 3000) % 2) ? 12000 : -12000);
                 // HWDER_AUTOPLAY_CIRCLE=1: run in a slow circle (one turn every 8 s) so Link crosses the map
                 // and the view covers every direction instead of pushing against a wall.
-                static const bool circle = getenv("HWDER_AUTOPLAY_CIRCLE") != nullptr;
+                static const bool circle = debug::flag(debug::AutoplayCircle);
                 if (circle) {
                     double a = (t % 8000) / 8000.0 * 6.283185307;
                     in.pads[0].lx = (s32)(24000 * std::cos(a));
@@ -361,7 +362,7 @@ void update_thread() {
                 }
                 // HWDER_AUTOPLAY_CAM=1: also turn the camera with the right stick (2 s right, 2 s left,
                 // 2 s still), for camera interpolation tests.
-                static const bool cam = getenv("HWDER_AUTOPLAY_CAM") != nullptr;
+                static const bool cam = debug::flag(debug::AutoplayCam);
                 if (cam) in.pads[0].rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
             }
         } else if (autoplay) {
