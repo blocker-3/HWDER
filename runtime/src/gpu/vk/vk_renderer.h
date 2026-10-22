@@ -340,6 +340,17 @@ struct Framebuffer {
     }
 };
 
+// State that flows between the phases of VkRenderer::do_draw (build_pipeline_key, read_indices,
+// stage_vertex_input, stage_indices, record_draw). One per draw, on the stack.
+struct DrawCtx {
+    PipelineKey key;
+    u32 topo = 0;           // Maxwell topology (p.topology & 0xFFFF)
+    bool quads = false;     // quads / quad strip: converted to a triangle list
+    u32 attrs_used = 0;     // vertex attributes the program reads
+    u32 streams_used = 0;   // vertex streams bound to those attributes
+    bool need_const = false;  // some attribute reads the constant binding
+};
+
 // Shared across the renderer's units (defined in the unit the comment names).
 extern const char* kPipelineCacheFile;  // vk_pipelines.cpp
 double prof_flush();                    // vk_debug.cpp
@@ -629,6 +640,9 @@ private:
     bool read_tic(u64 pool_va, u32 limit, u32 index, u32* out);
 
     void do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size);
+    // do_draw phases (vk_draw.cpp)
+    void build_pipeline_key(const u32* regs, const DrawParams& p, const void* inline_idx, u64 prog_key, const Framebuffer& fb,
+                            const GfxProgram* prog, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
