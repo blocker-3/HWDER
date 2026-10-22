@@ -550,42 +550,66 @@ void VkRenderer::record_pipeline(GfxProgram* prog, const PipelineKey& key) {
 
 void VkRenderer::record_catalog_pipeline(GfxProgram* prog, const PipelineKey& key) {
     if (!catalog_recording || !prog->recipe || catalog_records_.pipelines.size() >= warmup::kMaxPipelines) return;
-    catalog::Program record; record.key = key.program; record.expected_translation = prog->recipe->fingerprint;
-    for (u32 i=0;i<5;i++) if (prog->stages[i]) {
-        if (!prog->stages[i]->catalog_stage.present) return;
-        record.stages[i] = prog->stages[i]->catalog_stage;
-    }
+    catalog::Program record;
+    record.key = key.program;
+    record.expected_translation = prog->recipe->fingerprint;
+    for (u32 i = 0; i < 5; i++)
+        if (prog->stages[i]) {
+            if (!prog->stages[i]->catalog_stage.present) return;
+            record.stages[i] = prog->stages[i]->catalog_stage;
+        }
     u32 index = ~0u;
-    for (u32 i=0;i<catalog_records_.programs.size();i++) {
+    for (u32 i = 0; i < catalog_records_.programs.size(); i++) {
         const auto& p = catalog_records_.programs[i];
-        if (p.key==record.key && p.expected_translation==record.expected_translation) { index=i; break; }
+        if (p.key == record.key && p.expected_translation == record.expected_translation) {
+            index = i;
+            break;
+        }
     }
-    if (index==~0u) {
-        if (catalog_records_.programs.size()>=warmup::kMaxPrograms) return;
-        index=(u32)catalog_records_.programs.size(); catalog_records_.programs.push_back(std::move(record));
+    if (index == ~0u) {
+        if (catalog_records_.programs.size() >= warmup::kMaxPrograms) return;
+        index = (u32)catalog_records_.programs.size();
+        catalog_records_.programs.push_back(std::move(record));
     }
-    auto words=warmup::key_words(key);
-    for (const auto& p:catalog_records_.pipelines) if(p.program==index && warmup::key_words(p.key)==words)return;
-    catalog_records_.build=catalog_build(); catalog_records_.game_version=catalog_game_version();
-    const char* scope=debug::str(debug::PipelineCatalogRecord);
-    catalog_records_.scope=scope ? scope : "unspecified";
-    catalog_records_.pipelines.push_back({index,key}); catalog_dirty_=true;
+    auto words = warmup::key_words(key);
+    for (const auto& p : catalog_records_.pipelines)
+        if (p.program == index && warmup::key_words(p.key) == words) return;
+    catalog_records_.build = catalog_build();
+    catalog_records_.game_version = catalog_game_version();
+    const char* scope = debug::str(debug::PipelineCatalogRecord);
+    catalog_records_.scope = scope ? scope : "unspecified";
+    catalog_records_.pipelines.push_back({index, key});
+    catalog_dirty_ = true;
 }
+
 void VkRenderer::save_catalog_records() {
     if (!catalog_dirty_) return;
-    auto status=catalog::save(kCatalogFile,catalog_records_);
-    if (status==catalog::Status::Ok) catalog_dirty_=false;
+    auto status = catalog::save(kCatalogFile, catalog_records_);
+    if (status == catalog::Status::Ok) catalog_dirty_ = false;
     hw_log("catalog: metadata export %s: %zu programs / %zu successful pipeline recipes, scope=%s; contains no shader code",
-           warmup::name(status),catalog_records_.programs.size(),catalog_records_.pipelines.size(),catalog_records_.scope.c_str());
+           warmup::name(status), catalog_records_.programs.size(), catalog_records_.pipelines.size(), catalog_records_.scope.c_str());
 }
+
 void VkRenderer::wait_catalog() {
-    const u64 start=GetTickCount64();
+    const u64 start = GetTickCount64();
     for (;;) {
-        u64 done,total,success;
-        {std::lock_guard<std::mutex> lock(pipe_m_);done=warmup_finished_;total=warmup_queued_;success=warmup_succeeded_;}
-        prelaunch::preparation_frame("Compiling known graphics pipelines from your game...",(u32)done,(u32)total);
-        if(done>=total){hw_log("catalog: preparation complete: %llu / %llu compiled successfully before guest boot",(unsigned long long)success,(unsigned long long)total);break;}
-        if(GetTickCount64()-start>120000){hw_log("catalog: preparation wait expired; remaining work uses normal demand fallback");break;}
+        u64 done, total, success;
+        {
+            std::lock_guard<std::mutex> lock(pipe_m_);
+            done = warmup_finished_;
+            total = warmup_queued_;
+            success = warmup_succeeded_;
+        }
+        prelaunch::preparation_frame("Compiling known graphics pipelines from your game...", (u32)done, (u32)total);
+        if (done >= total) {
+            hw_log("catalog: preparation complete: %llu / %llu compiled successfully before guest boot",
+                   (unsigned long long)success, (unsigned long long)total);
+            break;
+        }
+        if (GetTickCount64() - start > 120000) {
+            hw_log("catalog: preparation wait expired; remaining work uses normal demand fallback");
+            break;
+        }
         Sleep(15);
     }
 }
@@ -947,43 +971,56 @@ using namespace vk::detail;
 
 static void start_private_pipeline_prewarm() {
     if (!prewarm_enabled()) {
-        hw_log("vk: prewarm disabled; live recipe recording remains enabled");return;
+        hw_log("vk: prewarm disabled; live recipe recording remains enabled");
+        return;
     }
-    const u64 start=GetTickCount64();warmup::Cache cache;
-    const auto status=warmup::load(kWarmupFile,warmup_compatibility(),cache);
-    const u64 loaded=GetTickCount64();
-    if(status!=warmup::Status::Ok || cache.pipelines.empty()) {
-        hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy",warmup::name(status),cache.pipelines.size(),(unsigned long long)(loaded-start));return;
+    const u64 start = GetTickCount64();
+    warmup::Cache cache;
+    const auto status = warmup::load(kWarmupFile, warmup_compatibility(), cache);
+    const u64 loaded = GetTickCount64();
+    if (status != warmup::Status::Ok || cache.pipelines.empty()) {
+        hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy", warmup::name(status),
+               cache.pipelines.size(), (unsigned long long)(loaded - start));
+        return;
     }
-    auto* target=static_cast<VkRenderer*>(renderer());
-    hw_log("vk: prewarm early renderer allocation: %llu ms",(unsigned long long)(GetTickCount64()-loaded));
-    target->start_prewarm(std::move(cache),loaded-start);
+    auto* target = static_cast<VkRenderer*>(renderer());
+    hw_log("vk: prewarm early renderer allocation: %llu ms", (unsigned long long)(GetTickCount64() - loaded));
+    target->start_prewarm(std::move(cache), loaded - start);
 }
+
 void start_pipeline_prewarm() {
     // Catalog preparation must use the game selected on the startup screen.
     // Defer only if a catalog exists; missing catalogs retain existing behavior.
-    if(catalog_enabled() && prewarm_enabled() && GetFileAttributesA(kCatalogFile)!=INVALID_FILE_ATTRIBUTES) {
-        catalog_deferred=true;hw_log("catalog: preparation deferred until game selection");return;
+    if (catalog_enabled() && prewarm_enabled() && GetFileAttributesA(kCatalogFile) != INVALID_FILE_ATTRIBUTES) {
+        catalog_deferred = true;
+        hw_log("catalog: preparation deferred until game selection");
+        return;
     }
     start_private_pipeline_prewarm();
 }
+
 void prepare_pipeline_catalog() {
-    const char* record=debug::str(debug::PipelineCatalogRecord);
-    catalog_recording=record && *record && strlen(record)<=128 && !catalog_debug_translation();
-    if(!catalog_recording && !catalog_deferred)return;
+    const char* record = debug::str(debug::PipelineCatalogRecord);
+    catalog_recording = record && *record && strlen(record) <= 128 && !catalog_debug_translation();
+    if (!catalog_recording && !catalog_deferred) return;
     prelaunch::preparation_frame("Finding graphics programs in your local game...");
     catalog_sources.index();
-    if(catalog_deferred) {
+    if (catalog_deferred) {
         catalog::Catalog cat;
-        auto status=catalog::load(kCatalogFile,catalog_build(),catalog_game_version(),cat);
-        if(status==catalog::Status::Ok && hwfs::nsp::active() && hwfs::nsp::info().title_id!=catalog::kTitleId)status=catalog::Status::Incompatible;
-        if(status==catalog::Status::Ok && !catalog_debug_translation()) {
-            hw_log("catalog: imported metadata scope=%s, %zu programs / %zu recipes; resolving fresh selected-game bytes",cat.scope.c_str(),cat.programs.size(),cat.pipelines.size());
-            auto cache=catalog::prepare(cat,[](const catalog::Locator& l,std::vector<u8>& bytes){return catalog_sources.read(l,bytes);},[](const catalog::Progress& p){
-                prelaunch::preparation_frame("Preparing graphics programs from your game...",p.done,p.total);
-                if(p.done==p.total)hw_log("catalog: local translation: %u resolved, %u unresolved of %u",p.resolved,p.unresolved,p.total);
-            });
-            if(!cache.pipelines.empty()) {
+        auto status = catalog::load(kCatalogFile, catalog_build(), catalog_game_version(), cat);
+        if (status == catalog::Status::Ok && hwfs::nsp::active() && hwfs::nsp::info().title_id != catalog::kTitleId)
+            status = catalog::Status::Incompatible;
+        if (status == catalog::Status::Ok && !catalog_debug_translation()) {
+            hw_log("catalog: imported metadata scope=%s, %zu programs / %zu recipes; resolving fresh selected-game bytes",
+                   cat.scope.c_str(), cat.programs.size(), cat.pipelines.size());
+            auto cache = catalog::prepare(
+                cat, [](const catalog::Locator& l, std::vector<u8>& bytes) { return catalog_sources.read(l, bytes); },
+                [](const catalog::Progress& p) {
+                    prelaunch::preparation_frame("Preparing graphics programs from your game...", p.done, p.total);
+                    if (p.done == p.total)
+                        hw_log("catalog: local translation: %u resolved, %u unresolved of %u", p.resolved, p.unresolved, p.total);
+                });
+            if (!cache.pipelines.empty()) {
                 // A catalog is partial. Preserve compatible private successes,
                 // including programs whose catalog source could not be resolved.
                 warmup::Cache retained;
@@ -997,11 +1034,15 @@ void prepare_pipeline_catalog() {
                 } else {
                     hw_log("catalog: private history %s; preparing resolved catalog recipes", warmup::name(private_status));
                 }
-                auto* target=static_cast<VkRenderer*>(renderer());target->start_prewarm(std::move(cache),0);target->wait_catalog();
-                prelaunch::preparation_frame(nullptr);return;
+                auto* target = static_cast<VkRenderer*>(renderer());
+                target->start_prewarm(std::move(cache), 0);
+                target->wait_catalog();
+                prelaunch::preparation_frame(nullptr);
+                return;
             }
             hw_log("catalog: no resolvable recipes; normal private-cache/lazy fallback");
-        } else hw_log("catalog: import %s (or debug translation active); normal private-cache/lazy fallback",warmup::name(status));
+        } else
+            hw_log("catalog: import %s (or debug translation active); normal private-cache/lazy fallback", warmup::name(status));
         start_private_pipeline_prewarm();
     }
     prelaunch::preparation_frame(nullptr);
