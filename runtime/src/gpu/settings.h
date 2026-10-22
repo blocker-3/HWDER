@@ -7,6 +7,11 @@
 
 namespace settings {
 
+// Threading rule for every settings struct: the UI thread (the in-game menu and the .ini load at
+// startup) writes the fields; the guest and GPU threads only read them, through video() and friends,
+// and pick a change up whenever they next read the field. Only fps120 is atomic: the game thread
+// latches it once per tick (BeginFrame) while the UI may flip it at any moment, and the pair logic
+// needs one consistent value per tick. Keep new fields under the same rule.
 struct Video {
     bool vsync = false;         // FIFO present mode when true, MAILBOX otherwise
     int aniso = 0;              // anisotropic filtering override: 0 = game default, 2/4/8/16
