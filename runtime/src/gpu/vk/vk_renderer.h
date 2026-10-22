@@ -359,6 +359,12 @@ struct DrawCtx {
     // when need_const) are set
     VkBuffer vbufs[32];
     VkDeviceSize voffs[32];
+    // staged index buffer (stage_indices); indexed becomes true for converted quads
+    VkBuffer ibuf = VK_NULL_HANDLE;
+    VkDeviceSize ioff = 0;
+    VkIndexType itype = VK_INDEX_TYPE_UINT32;
+    s32 vertex_offset = 0;
+    u32 first_vertex = 0;
 };
 
 // Shared across the renderer's units (defined in the unit the comment names).
@@ -655,6 +661,7 @@ private:
                             const GfxProgram* prog, DrawCtx& d);
     bool read_indices(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size, DrawCtx& d);
     void stage_vertex_input(const u32* regs, const DrawParams& p, DrawCtx& d);
+    void stage_indices(const DrawParams& p, const void* inline_idx, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);

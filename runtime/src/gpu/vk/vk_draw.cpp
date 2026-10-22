@@ -346,6 +346,70 @@ void VkRenderer::stage_vertex_input(const u32* regs, const DrawParams& p, DrawCt
     }
 }
 
+void VkRenderer::stage_indices(const DrawParams& p, const void* inline_idx, DrawCtx& d) {
+    const PipelineKey& key = d.key;
+    const bool quads = d.quads;
+    bool& indexed = d.indexed;
+    const u32 isize = d.isize;
+    const std::vector<u32>& converted = d.converted;
+    const u8* const idx_src = d.idx_src;
+    const u32 vmin = d.vmin, count = d.count;
+    // ---- index buffer upload
+    VkBuffer ibuf = VK_NULL_HANDLE;
+    VkDeviceSize ioff = 0;
+    VkIndexType itype = VK_INDEX_TYPE_UINT32;
+    s32 vertex_offset = 0;
+    u32 first_vertex = 0;
+    if (quads) {
+        Slice sl = g_rec.stage(converted.size() * 4, 16);
+        for (size_t i = 0; i < converted.size(); i++) {
+            u32 v = converted[i];
+            if (indexed) v += p.base_vertex;
+            ((u32*)sl.ptr)[i] = v - vmin;
+        }
+        ibuf = sl.buf;
+        ioff = sl.offset;
+        indexed = true;
+        vertex_offset = 0;
+    } else if (indexed) {
+        if (isize == 1) {
+            Slice sl = g_rec.stage((u64)count * 2, 16);
+            for (u32 i = 0; i < count; i++) {
+                u32 v = idx_src[i];
+                ((u16*)sl.ptr)[i] = (u16)(v == 0xFF && key.prim_restart ? 0xFFFF : v);
+            }
+            ibuf = sl.buf;
+            ioff = sl.offset;
+            itype = VK_INDEX_TYPE_UINT16;
+        } else {
+            Slice sl;
+            u64 kw[2] = {(u64)(uintptr_t)idx_src, (u64)count * isize};
+            u64 ikey2 = hash_bytes(kw, sizeof(kw), 0x1b1b);
+            u64 isample2 = sample_hash(idx_src, (u64)count * isize);
+            auto iit = vb_cache_.find(ikey2);
+            if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
+                iit->second.bytes == (u64)count * isize && iit->second.sample == isample2) {
+                sl = iit->second.slice;
+            } else {
+                sl = g_rec.stage((u64)count * isize, 16);
+                memcpy(sl.ptr, idx_src, (u64)count * isize);
+                if (!inline_idx) vb_cache_[ikey2] = {g_rec.serial(), (u64)count * isize, isample2, sl};
+            }
+            ibuf = sl.buf;
+            ioff = sl.offset;
+            itype = isize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+        }
+        vertex_offset = (s32)(p.base_vertex - vmin);
+    } else {
+        first_vertex = p.first - vmin;
+    }
+    d.ibuf = ibuf;
+    d.ioff = ioff;
+    d.itype = itype;
+    d.vertex_offset = vertex_offset;
+    d.first_vertex = first_vertex;
+}
+
 void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size) {
     draws_++;
     st_.draws++;
@@ -412,55 +476,12 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
 
     delete phase;
     phase = new ProfScope(kProfIndex);
-    // ---- index buffer upload
-    VkBuffer ibuf = VK_NULL_HANDLE;
-    VkDeviceSize ioff = 0;
-    VkIndexType itype = VK_INDEX_TYPE_UINT32;
-    s32 vertex_offset = 0;
-    u32 first_vertex = 0;
-    if (quads) {
-        Slice sl = g_rec.stage(converted.size() * 4, 16);
-        for (size_t i = 0; i < converted.size(); i++) {
-            u32 v = converted[i];
-            if (indexed) v += p.base_vertex;
-            ((u32*)sl.ptr)[i] = v - vmin;
-        }
-        ibuf = sl.buf;
-        ioff = sl.offset;
-        indexed = true;
-        vertex_offset = 0;
-    } else if (indexed) {
-        if (isize == 1) {
-            Slice sl = g_rec.stage((u64)count * 2, 16);
-            for (u32 i = 0; i < count; i++) {
-                u32 v = idx_src[i];
-                ((u16*)sl.ptr)[i] = (u16)(v == 0xFF && key.prim_restart ? 0xFFFF : v);
-            }
-            ibuf = sl.buf;
-            ioff = sl.offset;
-            itype = VK_INDEX_TYPE_UINT16;
-        } else {
-            Slice sl;
-            u64 kw[2] = {(u64)(uintptr_t)idx_src, (u64)count * isize};
-            u64 ikey2 = hash_bytes(kw, sizeof(kw), 0x1b1b);
-            u64 isample2 = sample_hash(idx_src, (u64)count * isize);
-            auto iit = vb_cache_.find(ikey2);
-            if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
-                iit->second.bytes == (u64)count * isize && iit->second.sample == isample2) {
-                sl = iit->second.slice;
-            } else {
-                sl = g_rec.stage((u64)count * isize, 16);
-                memcpy(sl.ptr, idx_src, (u64)count * isize);
-                if (!inline_idx) vb_cache_[ikey2] = {g_rec.serial(), (u64)count * isize, isample2, sl};
-            }
-            ibuf = sl.buf;
-            ioff = sl.offset;
-            itype = isize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-        }
-        vertex_offset = (s32)(p.base_vertex - vmin);
-    } else {
-        first_vertex = p.first - vmin;
-    }
+    stage_indices(p, inline_idx, d);
+    VkBuffer& ibuf = d.ibuf;
+    VkDeviceSize& ioff = d.ioff;
+    VkIndexType& itype = d.itype;
+    s32& vertex_offset = d.vertex_offset;
+    u32& first_vertex = d.first_vertex;
 
     delete phase;
     phase = new ProfScope(kProfDescriptors);
