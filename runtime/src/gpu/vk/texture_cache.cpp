@@ -8,14 +8,12 @@
 #include "kernel/kernel.h"
 #include "vk_common.h"
 #include "texture_layout.h"
-#include "gpu/graphics_audit.h"
+#include "gpu/diag.h"
 #include "debug_flags.h"
 
 namespace gpu::vk {
 
-double g_prof[kProfCount];
 float g_res_scale = 1.0f, g_res_scale_y = 1.0f;
-u32 g_prof_draws;
 
 
 // ------------------------------------------------------------------ device memory sub-allocation

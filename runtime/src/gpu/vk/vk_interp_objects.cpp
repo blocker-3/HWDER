@@ -1,4 +1,4 @@
-// Stage c of the 120 fps mode (HWDER_GAME_INTERP): each draw's vertex-stage object/bone transforms are blended
+// Object blending of the 120 fps mode (HWDER_GAME_INTERP): each draw's vertex-stage object/bone transforms are blended
 // halfway between the previous real frame's copy of the same draw and the game-drawn in-between frame, with the
 // HWDER_GI_OBJ_TRACE diagnostics. Moved text-for-text from vk_renderer.cpp.
 #include <cmath>
@@ -25,7 +25,7 @@ static bool is_world_3x4(const float* m) {
     return true;
 }
 
-// Stage c blends each c3 block whole or not at all, with limits a running/attacking skeleton passes
+// Whole-block object blending: each c3 block is blended whole or not at all, with limits a running/attacking skeleton passes
 // (palette grid by orthogonality, pairing by block contents). The earlier per-bone matching (nearest-
 // other-bone fallback, partial blocks) produced the jagged flashes at 120 fps.
 // Whole-block limits (world units). kObjMove: one bone's move per tick. kObjRigid: how far a bone's move
@@ -101,7 +101,7 @@ void VkRenderer::obj_trace_log() {
 }
 
 // HWDER_GI_OBJ_TRACE: vertex-stage constant buffers other than c3 in in-between frames - do any hold world
-// transforms near the player (which stage c would not blend)?
+// transforms near the player (which the object blending would not blend)?
 void VkRenderer::obj_cbuf_census(u32 index, const u8* data, u64 bytes) {
     if (index >= 18) return;
     CbufCensus& c = obj_cb_[index];

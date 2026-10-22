@@ -24,7 +24,7 @@ struct Submission {
     Fence wait_fence{};
     u32 syncpoint = 0;
     u32 increment_count = 0;
-    u64 gi_tag = 0;  // stage b/c: (game tick << 1) | 1 for the extra frame's work, set at submit time
+    u64 gi_tag = 0;  // game-drawn extra frame (HWDER_GAME_INTERP): (game tick << 1) | 1 for its work, set at submit time; the renderer blends its object transforms
 };
 
 // The gi_tag of the submission the GPU thread is executing (GPU thread only).

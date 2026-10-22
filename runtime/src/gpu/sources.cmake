@@ -3,6 +3,7 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk_loader.cpp
     runtime/src/gpu/display.cpp
     runtime/src/gpu/settings.cpp
+    runtime/src/gpu/diag.cpp
     runtime/src/gpu/overlay.cpp
     runtime/src/gpu/prelaunch.cpp
     runtime/src/gpu/save_folder_ui.cpp

@@ -46,9 +46,11 @@ void parse(const u8* msg, Parsed& p, bool is_domain) {
     for (u32 i = 0; i < nx; i++) {
         u32 d0 = cur[0], d1 = cur[1];
         cur += 2;
+        // X descriptor word 0: bits 0-5 counter bits 0-5, bits 6-8 address bits 36-38, bits 9-11 counter
+        // bits 9-11, bits 12-15 address bits 32-35, bits 16-31 size. Word 1: address bits 0-31.
         u64 addr = d1 | ((u64)((d0 >> 12) & 0xF) << 32) | ((u64)((d0 >> 6) & 0x7) << 36);
         rq.x.push_back({addr, d0 >> 16});
-        rq.x_index.push_back((d0 & 0x3F) | ((d0 >> 3) & 0xE00));
+        rq.x_index.push_back((d0 & 0x3F) | (d0 & 0xE00));
     }
     auto abw = [&](std::vector<Buffer>& v, u32 n) {
         for (u32 i = 0; i < n; i++) {

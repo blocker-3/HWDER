@@ -1,6 +1,6 @@
 // GPU command processor: GPFIFO entries -> pushbuffer methods -> engines.
 #include "gpu.h"
-#include "gpu/graphics_audit.h"
+#include "gpu/diag.h"
 
 #include <windows.h>
 

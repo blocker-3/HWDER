@@ -1,6 +1,6 @@
 // Memory, attribute, texture and warp instructions.
 #include "shader/translator.h"
-#include "gpu/graphics_audit.h"
+#include "gpu/diag.h"
 
 namespace shader {
 

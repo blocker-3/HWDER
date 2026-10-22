@@ -18,7 +18,7 @@ struct CamSnap {
     float view[16], proj[16], viewproj[16];      // +0x80, +0xc0, +0x100, row-major as stored
 };
 
-// HWDER_GAME_INTERP=1 (stage b, interp_draw.cpp): the game draws an extra frame per tick with a
+// HWDER_GAME_INTERP=1 (the game-drawn extra frame, interp_draw.cpp): the game draws an extra frame per tick with a
 // blended camera. Read once.
 bool game_interp();
 

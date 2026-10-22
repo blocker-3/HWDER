@@ -375,7 +375,8 @@ static void test_hipc() {
     {
         alignas(16) u8 msg[0x100] = {};
         put32(msg, 0, 4 | (1u << 16) | (1u << 20));  // one X, one A
-        put32(msg, 8, (0x20u << 16) | (0x1u << 12) | 0x2);  // X: size 0x20, address bits 32-35 = 1, index 2
+        // X: size 0x20, address bits 32-35 = 5 (word bits 12-15), counter 0x602 (bits 9-11 = 3, bits 0-5 = 2)
+        put32(msg, 8, (0x20u << 16) | (0x5u << 12) | (0x3u << 9) | 0x2);
         put32(msg, 12, 0xABCDEF00);                         //    address low
         put32(msg, 16, 0x100);                              // A: size low
         put32(msg, 20, 0x12345678);                         //    address low
@@ -389,12 +390,11 @@ static void test_hipc() {
         parse(msg, p, false);
         CHECK_EQ(p.rq.command, 7);
         CHECK_EQ(p.rq.x.size(), 1u);
-        CHECK_EQ(p.rq.x[0].addr, 0x1ABCDEF00ull);
+        CHECK_EQ(p.rq.x[0].addr, 0x5ABCDEF00ull);
         CHECK_EQ(p.rq.x[0].size, 0x20u);
-        // PIN of a quirk: the counter's bits 9-11 are taken from word bits 12-14 ((d0 >> 3) & 0xE00), which
-        // are address bits 32-34 in the HIPC X descriptor; with address bit 32 set the index reads 2 | 0x200.
-        // x_index is only used to order X buffers, so this is recorded here rather than changed.
-        CHECK_EQ(p.rq.x_index[0], 514u);
+        // The counter's bits 9-11 come from word bits 9-11, not from the address bits 32-34 at word bits
+        // 12-14 (the old (d0 >> 3) & 0xE00 read 2 | 0xA00 here); both are set so the two readings differ.
+        CHECK_EQ(p.rq.x_index[0], 0x602u);
         CHECK_EQ(p.rq.a.size(), 1u);
         CHECK_EQ(p.rq.a[0].addr, 0x312345678ull);
         CHECK_EQ(p.rq.a[0].size, 0x100000100ull);
