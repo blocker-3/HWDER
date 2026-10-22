@@ -410,259 +410,20 @@ void VkRenderer::stage_indices(const DrawParams& p, const void* inline_idx, Draw
     d.first_vertex = first_vertex;
 }
 
-void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size) {
-    draws_++;
-    st_.draws++;
-    if (!p.count) return;
-    if (!warmup_first_draw_) {
-        warmup_first_draw_ = true;
-        log_warmup("before_first_live_draw");
-    }
-    u64 prog_key = 0;
-    g_prof_draws++;
-    GfxProgram* prog;
-    {
-        ProfScope ps(kProfProgram);
-        prog = get_program(regs, &prog_key);
-    }
-    if (!prog || !prog->ok) {
-        skipped_++;
-        st_.skipped++;
-        VK_LOG_ONCE("vk: draw skipped (no usable program)");
-        return;
-    }
-    ProfScope* phase = new ProfScope(kProfFramebuffer);
-    // The render-target registers rarely change between draws: reuse the last resolved framebuffer
-    // while they (and the texture cache's image set) are unchanged.
-    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
-    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
-    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
-    Framebuffer fb;
-    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
-        fb = fb_cache_;
-    } else {
-        fb = resolve_framebuffer(regs, false, 0);
-        fb_cache_ = fb;
-        fb_cache_key_ = fbkey;
-        fb_cache_gen_ = tc_.generation;
-        fb_cache_valid_ = true;
-    }
-
-    delete phase;
-    phase = new ProfScope(kProfKeyBuild);
-    DrawCtx d;
-    build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
-    PipelineKey& key = d.key;
-    u32& topo = d.topo;
-    bool& quads = d.quads;
-    u32& attrs_used = d.attrs_used;
-    u32& streams_used = d.streams_used;
-    bool& need_const = d.need_const;
-
-    if (!read_indices(regs, p, inline_idx, inline_size, d)) return;
-    bool& indexed = d.indexed;
-    u32& isize = d.isize;
-    std::vector<u32>& converted = d.converted;
-    const u8*& idx_src = d.idx_src;
-    u32& vmin = d.vmin;
-    u32& vmax = d.vmax;
-    u32& count = d.count;
-
-    delete phase;
-    phase = new ProfScope(kProfVertex);
-    stage_vertex_input(regs, p, d);
-    VkBuffer* vbufs = d.vbufs;
-    VkDeviceSize* voffs = d.voffs;
-
-    delete phase;
-    phase = new ProfScope(kProfIndex);
-    stage_indices(p, inline_idx, d);
-    VkBuffer& ibuf = d.ibuf;
-    VkDeviceSize& ioff = d.ioff;
-    VkIndexType& itype = d.itype;
-    s32& vertex_offset = d.vertex_offset;
-    u32& first_vertex = d.first_vertex;
-
-    delete phase;
-    phase = new ProfScope(kProfDescriptors);
-    // ---- descriptor sets (may upload textures: before rendering begins)
-    VkDescriptorSet sets[5] = {};
-    std::vector<std::function<void()>> post;
-    draw_samples_rt_ = false;
-    u32 pools[6] = {regs[TexHeader], regs[TexHeader + 1], regs[TexHeader + 2],
-                    regs[TexSampler], regs[TexSampler + 1], regs[TexSampler + 2]};
-    bool linked = regs[SamplerBinding] == 1;
-    {
-        u64 kw[5] = {prog_key, addr(regs, VertexStreams + 1), addr(regs, IndexBuffer), ((u64)p.count << 32) | p.first, p.topology};
-        cur_draw_key_ = hash_bytes(kw, sizeof(kw), 0x1e1e);
-    }
-    for (u32 s = 0; s < 5; s++) {
-        if (!prog->stages[s]) continue;
-        StageLayout* sl = prog->layouts[s];
-        if (sl->types.empty()) continue;
-        {
-            ProfScope aps(kProfDescAlloc);
-            sets[s] = alloc_set(sl->layout);
-        }
-        u32 group = s;  // bind group of the stage
-        auto cbuf = [this, group](u32 index, u32 offset) -> u32 {
-            if (index >= 18) return 0;
-            const CbufBinding& b = cbufs_[group][index];
-            if (!b.valid || offset + 4 > b.size) return 0;
-            return read_u32(b.va + offset);
-        };
-        auto range = [this, group](u32 index, u64& lo, u32& size) -> bool {
-            if (index >= 18) return false;
-            const CbufBinding& b = cbufs_[group][index];
-            lo = b.va;
-            size = b.size;
-            return b.valid;
-        };
-        cur_stage_ = (int)s;
-        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post);
-    }
-
-    delete phase;
-    phase = new ProfScope(kProfPipeline);
-    VkPipeline pipe = get_pipeline(prog, key);
-    delete phase;
-    phase = nullptr;
-    if (!pipe) {
-        skipped_++;
-        st_.skipped++;
-        {   // diagnostics: which draws a pending pipeline hides, and whether they read render targets
-            ++audit_skips_by_program_[prog_key];
-            if (++audit::skipped_draws == 1) {
-                hw_log("vk: async pipeline: skipped draw (present %llu, prog %016llx, rt0 %llx %ux%u, samples rt %d)",
-                       (unsigned long long)g_s.present_count, (unsigned long long)prog_key,
-                       fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)draw_samples_rt_);
-            }
-        }
-        return;
-    }
-    ProfScope record_scope(kProfRecord);
-    if (!dump_prog_.empty()) {
-        // HWDER_VK_FRAME_DUMP_AFTER=<secs>: ignore matches before that run time (the same UI program is used
-        // on the loading screen at ~10 s and on the Select Mode menu at ~22 s).
-        static const double after = debug::value(debug::VkFrameDumpAfter, 0.0);
-        char kb[20];
-        snprintf(kb, sizeof(kb), "%016llx", (unsigned long long)prog_key);
-        if (GetTickCount64() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
-            dump_frame_ = g_s.present_count + 2;  // the next full present
-            hw_log("fd: program %s drawn (draw #%llu); dumping from present %llu", kb, (unsigned long long)draws_, (unsigned long long)dump_frame_);
-            dump_prog_.clear();
-        }
-    }
-    if (drawlog_active()) {
-        const float* vt = (const float*)(regs + ViewportTransform);
-        const u32* sc = regs + ScissorTest;
-        fprintf(g_drawlog, "%llu %llu prog %016llx topo %u count %u rt0 %llx %ux%u f%d rts %u depth %llx t%d w%d | blend %d mask %x | vp %.0f,%.0f %.0f,%.0f | sc %d %u-%u,%u-%u |%s\n",
-                (unsigned long long)g_s.present_count, (unsigned long long)draws_, (unsigned long long)prog_key, topo, count,
-                fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)fb.color_format[0], fb.num_colors,
-                fb.depth ? (unsigned long long)fb.depth->addr : 0ull, (int)key.depth_test, (int)key.depth_write, (int)key.blend_enable[0],
-                key.color_mask[0], vt[0], vt[1], vt[3], vt[4], (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16,
-                drawlog_tex_.c_str());
-    }
-    drawlog_tex_.clear();
-    if (dumping()) {
-        const float* vt = (const float*)(regs + ViewportTransform);
-        const u32* sc = regs + ScissorTest;
-        u32 rt0_slot = (regs[RtControl] >> 4) & 7;
-        hw_log("fd: draw #%llu prog %016llx topo %u count %u | rt0 %llx %ux%u f%d raw %02x (rts %u) depth %llx f%d test %d write %d func %d | blend0 %d mask0 %x | "
-               "vt scale %.0f,%.0f tr %.0f,%.0f swz %x origin %x clip %ux%u scissor %d %u-%u,%u-%u cull %d%s"
-               " | blendregs %x:%x,%x,%x/%x,%x,%x pt %x alpha %u/%x/%.3f logic %x pt0 %x:%x,%x,%x/%x,%x,%x",
-               (unsigned long long)draws_, (unsigned long long)prog_key, topo, count, fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull,
-               fb.width, fb.height, (int)fb.color_format[0], regs[RenderTarget + rt0_slot * 16 + 4] & 0xFF, fb.num_colors,
-               fb.depth ? (unsigned long long)fb.depth->addr : 0ull,
-               (int)fb.depth_format, (int)key.depth_test, (int)key.depth_write, (int)key.depth_func, (int)key.blend_enable[0],
-               key.color_mask[0], vt[0], vt[1], vt[3], vt[4], regs[ViewportTransform + 6], regs[WindowOrigin], regs[0x3FD] & 0xFFFF,
-               regs[0x3FD] >> 16, (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16, (int)key.cull_enable,
-               dump_tex_.c_str(),
-               // raw Maxwell blend state: separate-alpha flag : rgb op,src,dst / alpha op,src,dst; per-target enable;
-               // alpha test enable/func/ref; logic op enable
-               regs[Blend], regs[Blend + 1], regs[Blend + 2], regs[Blend + 3], regs[Blend + 4], regs[Blend + 5], regs[Blend + 7],
-               regs[BlendPerTargetEnabled], regs[AlphaTestEnable], regs[AlphaTestFunc], *(const float*)&regs[AlphaTestRef], regs[LogicOp],
-               regs[BlendPerTarget], regs[BlendPerTarget + 1], regs[BlendPerTarget + 2], regs[BlendPerTarget + 3], regs[BlendPerTarget + 4],
-               regs[BlendPerTarget + 5], regs[BlendPerTarget + 6]);
-        dump_tex_.clear();
-        // Fragment-stage constant buffers actually used by the program: slot, bound size, first floats.
-        if (prog->stages[4]) {
-            std::string cb;
-            for (const auto& c : prog->stages[4]->prog.resources.const_buffers) {
-                const CbufBinding& bnd = cbufs_[4][c.index < 18 ? c.index : 0];
-                char t[200];
-                float f[4] = {};
-                if (bnd.valid) mm_->read(bnd.va, f, 16);
-                snprintf(t, sizeof(t), " c%u[%s size 0x%x use 0x%x: %.3g %.3g %.3g %.3g]", c.index, bnd.valid ? "ok" : "UNBOUND", bnd.size,
-                         c.size, f[0], f[1], f[2], f[3]);
-                cb += t;
-                // HWDER_VK_DUMP_CBUF=<frag shader key prefix>: full contents of that shader's cbufs (8 floats per line).
-                static const char* dump_cbuf = debug::str(debug::VkDumpCbuf);
-                if (dump_cbuf && bnd.valid && prog->stages[4]) {
-                    char kbuf[20];
-                    snprintf(kbuf, sizeof(kbuf), "%016llx", (unsigned long long)prog->stages[4]->key);
-                    if (!strncmp(kbuf, dump_cbuf, strlen(dump_cbuf))) {
-                        u32 n = std::min<u32>(std::min<u32>(c.size, bnd.size), 0x1000) / 4;
-                        std::vector<float> v(n);
-                        mm_->read(bnd.va, v.data(), n * 4);
-                        for (u32 i = 0; i < n; i += 8) {
-                            std::string line;
-                            for (u32 j = i; j < std::min(n, i + 8); j++) {
-                                char fs[32];
-                                snprintf(fs, sizeof(fs), " %.4g", v[j]);
-                                line += fs;
-                            }
-                            hw_log("fd:     c%u[0x%03x]:%s", c.index, i * 4, line.c_str());
-                        }
-                    }
-                }
-            }
-            hw_log("fd:   frag shader %016llx cbufs:%s | vert %016llx | cull en %u face %x front %x origin %x", (unsigned long long)prog->stages[4]->key, cb.c_str(),
-                   (unsigned long long)(prog->stages[0] ? prog->stages[0]->key : 0), regs[GlCullTestEnabled], regs[GlCullFace], regs[GlFrontFace], regs[WindowOrigin]);
-        }
-        // Vertex-stage constant buffers and the raw formats of the attributes the vertex program reads.
-        if (prog->stages[0]) {
-            std::string cb;
-            for (const auto& c : prog->stages[0]->prog.resources.const_buffers) {
-                const CbufBinding& bnd = cbufs_[0][c.index < 18 ? c.index : 0];
-                char t[200];
-                float f[4] = {};
-                if (bnd.valid) mm_->read(bnd.va, f, 16);
-                snprintf(t, sizeof(t), " c%u[%s size 0x%x use 0x%x: %.3g %.3g %.3g %.3g]", c.index, bnd.valid ? "ok" : "UNBOUND", bnd.size,
-                         c.size, f[0], f[1], f[2], f[3]);
-                cb += t;
-                static const bool fd_raw = debug::flag(debug::FdRaw);
-                if (fd_raw && bnd.valid && bnd.size) {  // raw vertex-stage cbuf for offline analysis
-                    std::vector<u8> buf(std::min<u32>(bnd.size, 0x10000));
-                    mm_->read(bnd.va, buf.data(), buf.size());
-                    char path[128];
-                    snprintf(path, sizeof(path), "fd/cb_%llu_c%u.bin", (unsigned long long)draws_, c.index);
-                    if (FILE* fo = fopen(path, "wb")) {
-                        fwrite(buf.data(), 1, buf.size(), fo);
-                        fclose(fo);
-                    }
-                }
-            }
-            std::string at;
-            for (u32 a = 0; a < 32; a++) {
-                if (!(attrs_used & (1u << a))) continue;
-                char t[64];
-                snprintf(t, sizeof(t), " a%u[raw %08x s%u off %u vkf %d]", a, regs[VertexAttribFormat + a], regs[VertexAttribFormat + a] & 0x1F,
-                         (regs[VertexAttribFormat + a] >> 7) & 0x3FFF, (int)key.attrib_format[a]);
-                at += t;
-            }
-            hw_log("fd:   vert cbufs:%s | attrs:%s | inst %u base_vertex %u first %u", cb.c_str(), at.c_str(), p.base_instance, p.base_vertex, p.first);
-        }
-        for (u32 i = 0; i < fb.num_colors; i++)
-            if (fb.color[i] && std::find(dump_rts_.begin(), dump_rts_.end(), fb.color[i]) == dump_rts_.end())
-                dump_rts_.push_back(fb.color[i]);
-        if (fb.depth && std::find(dump_rts_.begin(), dump_rts_.end(), fb.depth) == dump_rts_.end()) dump_rts_.push_back(fb.depth);
-    }
-    if (verbose_ && st_.draws < 400)
-        hw_log("vk: draw #%llu topo %u %s count %u inst %u rts %u (%ux%u fmt0 %d) depth %d prog %016llx", (unsigned long long)draws_,
-               topo, indexed ? "indexed" : "arrays", count, p.base_instance, fb.num_colors, fb.width, fb.height,
-               (int)fb.color_format[0], (int)fb.depth_format, (unsigned long long)prog_key);
-
+void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebuffer& fb, GfxProgram* prog, VkPipeline pipe,
+                             const VkDescriptorSet* sets, std::vector<std::function<void()>>& post, DrawCtx& d) {
+    const PipelineKey& key = d.key;
+    const u32 streams_used = d.streams_used;
+    const bool need_const = d.need_const;
+    const bool indexed = d.indexed;
+    const u32 count = d.count;
+    const VkBuffer* vbufs = d.vbufs;
+    const VkDeviceSize* voffs = d.voffs;
+    const VkBuffer ibuf = d.ibuf;
+    const VkDeviceSize ioff = d.ioff;
+    const VkIndexType itype = d.itype;
+    const s32 vertex_offset = d.vertex_offset;
+    const u32 first_vertex = d.first_vertex;
     // ---- record
     begin_rendering(fb);
     VkCommandBuffer cb = g_rec.cmd_in_pass();
@@ -866,6 +627,247 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     if ((settings::video().fxaa || settings::video().sharpen > 0) && prog->stages[4] && fb.color[0])
         for (const PictureShader& ps : kPictureShaders)
             if (prog->stages[4]->key == ps.key) post_picture(fb.color[0]);
+}
+
+void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size) {
+    draws_++;
+    st_.draws++;
+    if (!p.count) return;
+    if (!warmup_first_draw_) {
+        warmup_first_draw_ = true;
+        log_warmup("before_first_live_draw");
+    }
+    u64 prog_key = 0;
+    g_prof_draws++;
+    GfxProgram* prog;
+    {
+        ProfScope ps(kProfProgram);
+        prog = get_program(regs, &prog_key);
+    }
+    if (!prog || !prog->ok) {
+        skipped_++;
+        st_.skipped++;
+        VK_LOG_ONCE("vk: draw skipped (no usable program)");
+        return;
+    }
+    ProfScope* phase = new ProfScope(kProfFramebuffer);
+    // The render-target registers rarely change between draws: reuse the last resolved framebuffer
+    // while they (and the texture cache's image set) are unchanged.
+    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
+    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
+    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
+    Framebuffer fb;
+    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
+        fb = fb_cache_;
+    } else {
+        fb = resolve_framebuffer(regs, false, 0);
+        fb_cache_ = fb;
+        fb_cache_key_ = fbkey;
+        fb_cache_gen_ = tc_.generation;
+        fb_cache_valid_ = true;
+    }
+
+    delete phase;
+    phase = new ProfScope(kProfKeyBuild);
+    DrawCtx d;
+    build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
+    PipelineKey& key = d.key;
+    u32& topo = d.topo;
+    u32& attrs_used = d.attrs_used;
+
+    if (!read_indices(regs, p, inline_idx, inline_size, d)) return;
+    bool& indexed = d.indexed;
+    u32& count = d.count;
+
+    delete phase;
+    phase = new ProfScope(kProfVertex);
+    stage_vertex_input(regs, p, d);
+
+    delete phase;
+    phase = new ProfScope(kProfIndex);
+    stage_indices(p, inline_idx, d);
+
+    delete phase;
+    phase = new ProfScope(kProfDescriptors);
+    // ---- descriptor sets (may upload textures: before rendering begins)
+    VkDescriptorSet sets[5] = {};
+    std::vector<std::function<void()>> post;
+    draw_samples_rt_ = false;
+    u32 pools[6] = {regs[TexHeader], regs[TexHeader + 1], regs[TexHeader + 2],
+                    regs[TexSampler], regs[TexSampler + 1], regs[TexSampler + 2]};
+    bool linked = regs[SamplerBinding] == 1;
+    {
+        u64 kw[5] = {prog_key, addr(regs, VertexStreams + 1), addr(regs, IndexBuffer), ((u64)p.count << 32) | p.first, p.topology};
+        cur_draw_key_ = hash_bytes(kw, sizeof(kw), 0x1e1e);
+    }
+    for (u32 s = 0; s < 5; s++) {
+        if (!prog->stages[s]) continue;
+        StageLayout* sl = prog->layouts[s];
+        if (sl->types.empty()) continue;
+        {
+            ProfScope aps(kProfDescAlloc);
+            sets[s] = alloc_set(sl->layout);
+        }
+        u32 group = s;  // bind group of the stage
+        auto cbuf = [this, group](u32 index, u32 offset) -> u32 {
+            if (index >= 18) return 0;
+            const CbufBinding& b = cbufs_[group][index];
+            if (!b.valid || offset + 4 > b.size) return 0;
+            return read_u32(b.va + offset);
+        };
+        auto range = [this, group](u32 index, u64& lo, u32& size) -> bool {
+            if (index >= 18) return false;
+            const CbufBinding& b = cbufs_[group][index];
+            lo = b.va;
+            size = b.size;
+            return b.valid;
+        };
+        cur_stage_ = (int)s;
+        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post);
+    }
+
+    delete phase;
+    phase = new ProfScope(kProfPipeline);
+    VkPipeline pipe = get_pipeline(prog, key);
+    delete phase;
+    phase = nullptr;
+    if (!pipe) {
+        skipped_++;
+        st_.skipped++;
+        {   // diagnostics: which draws a pending pipeline hides, and whether they read render targets
+            ++audit_skips_by_program_[prog_key];
+            if (++audit::skipped_draws == 1) {
+                hw_log("vk: async pipeline: skipped draw (present %llu, prog %016llx, rt0 %llx %ux%u, samples rt %d)",
+                       (unsigned long long)g_s.present_count, (unsigned long long)prog_key,
+                       fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)draw_samples_rt_);
+            }
+        }
+        return;
+    }
+    ProfScope record_scope(kProfRecord);
+    if (!dump_prog_.empty()) {
+        // HWDER_VK_FRAME_DUMP_AFTER=<secs>: ignore matches before that run time (the same UI program is used
+        // on the loading screen at ~10 s and on the Select Mode menu at ~22 s).
+        static const double after = debug::value(debug::VkFrameDumpAfter, 0.0);
+        char kb[20];
+        snprintf(kb, sizeof(kb), "%016llx", (unsigned long long)prog_key);
+        if (GetTickCount64() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
+            dump_frame_ = g_s.present_count + 2;  // the next full present
+            hw_log("fd: program %s drawn (draw #%llu); dumping from present %llu", kb, (unsigned long long)draws_, (unsigned long long)dump_frame_);
+            dump_prog_.clear();
+        }
+    }
+    if (drawlog_active()) {
+        const float* vt = (const float*)(regs + ViewportTransform);
+        const u32* sc = regs + ScissorTest;
+        fprintf(g_drawlog, "%llu %llu prog %016llx topo %u count %u rt0 %llx %ux%u f%d rts %u depth %llx t%d w%d | blend %d mask %x | vp %.0f,%.0f %.0f,%.0f | sc %d %u-%u,%u-%u |%s\n",
+                (unsigned long long)g_s.present_count, (unsigned long long)draws_, (unsigned long long)prog_key, topo, count,
+                fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull, fb.width, fb.height, (int)fb.color_format[0], fb.num_colors,
+                fb.depth ? (unsigned long long)fb.depth->addr : 0ull, (int)key.depth_test, (int)key.depth_write, (int)key.blend_enable[0],
+                key.color_mask[0], vt[0], vt[1], vt[3], vt[4], (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16,
+                drawlog_tex_.c_str());
+    }
+    drawlog_tex_.clear();
+    if (dumping()) {
+        const float* vt = (const float*)(regs + ViewportTransform);
+        const u32* sc = regs + ScissorTest;
+        u32 rt0_slot = (regs[RtControl] >> 4) & 7;
+        hw_log("fd: draw #%llu prog %016llx topo %u count %u | rt0 %llx %ux%u f%d raw %02x (rts %u) depth %llx f%d test %d write %d func %d | blend0 %d mask0 %x | "
+               "vt scale %.0f,%.0f tr %.0f,%.0f swz %x origin %x clip %ux%u scissor %d %u-%u,%u-%u cull %d%s"
+               " | blendregs %x:%x,%x,%x/%x,%x,%x pt %x alpha %u/%x/%.3f logic %x pt0 %x:%x,%x,%x/%x,%x,%x",
+               (unsigned long long)draws_, (unsigned long long)prog_key, topo, count, fb.color[0] ? (unsigned long long)fb.color[0]->addr : 0ull,
+               fb.width, fb.height, (int)fb.color_format[0], regs[RenderTarget + rt0_slot * 16 + 4] & 0xFF, fb.num_colors,
+               fb.depth ? (unsigned long long)fb.depth->addr : 0ull,
+               (int)fb.depth_format, (int)key.depth_test, (int)key.depth_write, (int)key.depth_func, (int)key.blend_enable[0],
+               key.color_mask[0], vt[0], vt[1], vt[3], vt[4], regs[ViewportTransform + 6], regs[WindowOrigin], regs[0x3FD] & 0xFFFF,
+               regs[0x3FD] >> 16, (int)sc[0], sc[1] & 0xFFFF, sc[1] >> 16, sc[2] & 0xFFFF, sc[2] >> 16, (int)key.cull_enable,
+               dump_tex_.c_str(),
+               // raw Maxwell blend state: separate-alpha flag : rgb op,src,dst / alpha op,src,dst; per-target enable;
+               // alpha test enable/func/ref; logic op enable
+               regs[Blend], regs[Blend + 1], regs[Blend + 2], regs[Blend + 3], regs[Blend + 4], regs[Blend + 5], regs[Blend + 7],
+               regs[BlendPerTargetEnabled], regs[AlphaTestEnable], regs[AlphaTestFunc], *(const float*)&regs[AlphaTestRef], regs[LogicOp],
+               regs[BlendPerTarget], regs[BlendPerTarget + 1], regs[BlendPerTarget + 2], regs[BlendPerTarget + 3], regs[BlendPerTarget + 4],
+               regs[BlendPerTarget + 5], regs[BlendPerTarget + 6]);
+        dump_tex_.clear();
+        // Fragment-stage constant buffers actually used by the program: slot, bound size, first floats.
+        if (prog->stages[4]) {
+            std::string cb;
+            for (const auto& c : prog->stages[4]->prog.resources.const_buffers) {
+                const CbufBinding& bnd = cbufs_[4][c.index < 18 ? c.index : 0];
+                char t[200];
+                float f[4] = {};
+                if (bnd.valid) mm_->read(bnd.va, f, 16);
+                snprintf(t, sizeof(t), " c%u[%s size 0x%x use 0x%x: %.3g %.3g %.3g %.3g]", c.index, bnd.valid ? "ok" : "UNBOUND", bnd.size,
+                         c.size, f[0], f[1], f[2], f[3]);
+                cb += t;
+                // HWDER_VK_DUMP_CBUF=<frag shader key prefix>: full contents of that shader's cbufs (8 floats per line).
+                static const char* dump_cbuf = debug::str(debug::VkDumpCbuf);
+                if (dump_cbuf && bnd.valid && prog->stages[4]) {
+                    char kbuf[20];
+                    snprintf(kbuf, sizeof(kbuf), "%016llx", (unsigned long long)prog->stages[4]->key);
+                    if (!strncmp(kbuf, dump_cbuf, strlen(dump_cbuf))) {
+                        u32 n = std::min<u32>(std::min<u32>(c.size, bnd.size), 0x1000) / 4;
+                        std::vector<float> v(n);
+                        mm_->read(bnd.va, v.data(), n * 4);
+                        for (u32 i = 0; i < n; i += 8) {
+                            std::string line;
+                            for (u32 j = i; j < std::min(n, i + 8); j++) {
+                                char fs[32];
+                                snprintf(fs, sizeof(fs), " %.4g", v[j]);
+                                line += fs;
+                            }
+                            hw_log("fd:     c%u[0x%03x]:%s", c.index, i * 4, line.c_str());
+                        }
+                    }
+                }
+            }
+            hw_log("fd:   frag shader %016llx cbufs:%s | vert %016llx | cull en %u face %x front %x origin %x", (unsigned long long)prog->stages[4]->key, cb.c_str(),
+                   (unsigned long long)(prog->stages[0] ? prog->stages[0]->key : 0), regs[GlCullTestEnabled], regs[GlCullFace], regs[GlFrontFace], regs[WindowOrigin]);
+        }
+        // Vertex-stage constant buffers and the raw formats of the attributes the vertex program reads.
+        if (prog->stages[0]) {
+            std::string cb;
+            for (const auto& c : prog->stages[0]->prog.resources.const_buffers) {
+                const CbufBinding& bnd = cbufs_[0][c.index < 18 ? c.index : 0];
+                char t[200];
+                float f[4] = {};
+                if (bnd.valid) mm_->read(bnd.va, f, 16);
+                snprintf(t, sizeof(t), " c%u[%s size 0x%x use 0x%x: %.3g %.3g %.3g %.3g]", c.index, bnd.valid ? "ok" : "UNBOUND", bnd.size,
+                         c.size, f[0], f[1], f[2], f[3]);
+                cb += t;
+                static const bool fd_raw = debug::flag(debug::FdRaw);
+                if (fd_raw && bnd.valid && bnd.size) {  // raw vertex-stage cbuf for offline analysis
+                    std::vector<u8> buf(std::min<u32>(bnd.size, 0x10000));
+                    mm_->read(bnd.va, buf.data(), buf.size());
+                    char path[128];
+                    snprintf(path, sizeof(path), "fd/cb_%llu_c%u.bin", (unsigned long long)draws_, c.index);
+                    if (FILE* fo = fopen(path, "wb")) {
+                        fwrite(buf.data(), 1, buf.size(), fo);
+                        fclose(fo);
+                    }
+                }
+            }
+            std::string at;
+            for (u32 a = 0; a < 32; a++) {
+                if (!(attrs_used & (1u << a))) continue;
+                char t[64];
+                snprintf(t, sizeof(t), " a%u[raw %08x s%u off %u vkf %d]", a, regs[VertexAttribFormat + a], regs[VertexAttribFormat + a] & 0x1F,
+                         (regs[VertexAttribFormat + a] >> 7) & 0x3FFF, (int)key.attrib_format[a]);
+                at += t;
+            }
+            hw_log("fd:   vert cbufs:%s | attrs:%s | inst %u base_vertex %u first %u", cb.c_str(), at.c_str(), p.base_instance, p.base_vertex, p.first);
+        }
+        for (u32 i = 0; i < fb.num_colors; i++)
+            if (fb.color[i] && std::find(dump_rts_.begin(), dump_rts_.end(), fb.color[i]) == dump_rts_.end())
+                dump_rts_.push_back(fb.color[i]);
+        if (fb.depth && std::find(dump_rts_.begin(), dump_rts_.end(), fb.depth) == dump_rts_.end()) dump_rts_.push_back(fb.depth);
+    }
+    if (verbose_ && st_.draws < 400)
+        hw_log("vk: draw #%llu topo %u %s count %u inst %u rts %u (%ux%u fmt0 %d) depth %d prog %016llx", (unsigned long long)draws_,
+               topo, indexed ? "indexed" : "arrays", count, p.base_instance, fb.num_colors, fb.width, fb.height,
+               (int)fb.color_format[0], (int)fb.depth_format, (unsigned long long)prog_key);
+
+    record_draw(regs, p, fb, prog, pipe, sets, post, d);
 }
 
 void VkRenderer::do_clear(const u32* regs, u32 v) {

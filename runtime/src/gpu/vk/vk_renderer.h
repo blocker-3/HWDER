@@ -662,6 +662,8 @@ private:
     bool read_indices(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size, DrawCtx& d);
     void stage_vertex_input(const u32* regs, const DrawParams& p, DrawCtx& d);
     void stage_indices(const DrawParams& p, const void* inline_idx, DrawCtx& d);
+    void record_draw(const u32* regs, const DrawParams& p, const Framebuffer& fb, GfxProgram* prog, VkPipeline pipe,
+                     const VkDescriptorSet* sets, std::vector<std::function<void()>>& post, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
