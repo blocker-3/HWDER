@@ -508,7 +508,7 @@ private:
     };
     bool draw_samples_rt_ = false;  // the draw being built samples a render target (post-process pass)
     int cur_stage_ = 0;                // stage being bound
-    // ---- stage c (HWDER_GAME_INTERP): the game draws an in-between frame per tick (interp_draw.cpp)
+    // ---- object blending for the game-drawn in-between frame (HWDER_GAME_INTERP, drawn by interp_draw.cpp)
     // with a blended camera; here every draw's vertex-stage transforms (c3: world matrix, bone palette)
     // are blended halfway between the previous real frame's copy of the same draw and this one.
     struct ObjEntry {

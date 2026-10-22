@@ -1,4 +1,4 @@
-// High frame rate, stage b (docs/frame-loop.md, docs/high-framerate.md): the game draws and presents
+// High frame rate, the game-drawn extra frame (docs/frame-loop.md, docs/high-framerate.md): the game draws and presents
 // one extra frame per tick, with the camera halfway between the previous tick and this one.
 //
 // In battle, MainThread runs one tick in Battle_Tick (tools/recomp/symbols.txt): it waits for the update
@@ -189,7 +189,7 @@ void extra_frame(const Ctx* c) {
     u.x[2] = 1;
     call(&u, f_Camera_Update, 0);
 
-    hw_gi_submit_tag = (b.tick << 1) | 1;  // the renderer blends this frame's object transforms (stage c)
+    hw_gi_submit_tag = (b.tick << 1) | 1;  // the renderer blends this frame's object transforms (vk_interp_objects.cpp)
     g_in_extra = true;
     Ctx e = *c;
     const u64 scene = c->x[19], state = c->x[20], dev = c->x[21];
@@ -243,7 +243,7 @@ void extra_frame(const Ctx* c) {
 
 extern "C" bool hw_game_interp_on() { return interp::game_interp(); }
 
-// Stage d diagnostic only: count IPC issued synchronously by this thread's extra draw. This does not
+// Side-effect diagnostic only (experimental): count IPC issued synchronously by this thread's extra draw. This does not
 // suppress side effects, inspect guest-memory changes, or cover work scheduled on other threads.
 namespace {
 std::mutex g_ipc_m;

@@ -6,7 +6,7 @@
 // camera into buffer slot % 3 and rebuilds its matrices (Camera_Update). Hooking it gives exactly one
 // finished camera per tick, which is what interpolation needs to record. See docs/camera.md for the layout.
 //
-// Each tick's screen-0 camera goes into a small ring that stage c reads (interp_draw.cpp, vk_renderer.cpp).
+// Each tick's screen-0 camera goes into a small ring that the object blending reads (interp_draw.cpp, vk_renderer.cpp).
 #include "interp/camera.h"
 
 #include <windows.h>

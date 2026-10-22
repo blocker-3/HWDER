@@ -396,7 +396,7 @@ private:
             fb.release_hz = q.release_hz;
             if (fb.address) gpu::renderer()->present(fb);
             u64 ticket = fb.address ? display::last_present_ticket() : 0;
-            // Stage b (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
+            // Game-drawn extra frame (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
             // instead of when the next frame arrives. The game can then queue two frames ahead (triple
             // buffering), which absorbs a slow game tick at 120 Hz; the release grid still paces it.
             if (fb.release_hz && ticket) {

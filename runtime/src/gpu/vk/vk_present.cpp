@@ -246,7 +246,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         // the centred 16:9; when nothing full-width (a 3D frame's post passes, a full clear) wrote this
         // frame, the side bands hold stale memory. Clear them to black before presenting.
         // "Since it was last presented", not "during this present's frame number": with frames queued ahead
-        // (stage b's triple buffering) the GPU thread draws the next frame before this one is presented,
+        // (the 120 fps mode's triple buffering) the GPU thread draws the next frame before this one is presented,
         // and a frame-number check blacked out side bands that were in fact drawn (flashing bars).
         const bool full_width = img->full_width_since_present;
         img->full_width_since_present = false;
