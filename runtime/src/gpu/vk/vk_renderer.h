@@ -349,6 +349,12 @@ struct DrawCtx {
     u32 attrs_used = 0;     // vertex attributes the program reads
     u32 streams_used = 0;   // vertex streams bound to those attributes
     bool need_const = false;  // some attribute reads the constant binding
+    // index source and vertex range (read_indices)
+    bool indexed = false;
+    u32 isize = 0;              // bytes per index
+    std::vector<u32> converted; // quads converted to a triangle list
+    const u8* idx_src = nullptr;
+    u32 vmin = 0, vmax = 0, count = 0;
 };
 
 // Shared across the renderer's units (defined in the unit the comment names).
@@ -643,6 +649,7 @@ private:
     // do_draw phases (vk_draw.cpp)
     void build_pipeline_key(const u32* regs, const DrawParams& p, const void* inline_idx, u64 prog_key, const Framebuffer& fb,
                             const GfxProgram* prog, DrawCtx& d);
+    bool read_indices(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
