@@ -16,6 +16,16 @@ typedef struct HwFuncEntry {
 extern const HwFuncEntry hw_func_table[];
 extern const unsigned hw_func_count;
 
+// Named guest symbols (tools/recomp/symbols.txt), sorted by address; emitted into functable.c.
+typedef struct HwSymbol {
+    u64 addr;
+    const char* name;
+} HwSymbol;
+extern const HwSymbol hw_symbols[];
+extern const unsigned hw_symbol_count;
+// Name of a guest function start, or NULL (runtime/src/core.cpp).
+const char* hw_symbol_name(u64 addr);
+
 // Resolve a guest code address to its recompiled host function (NULL if none).
 HwFn hw_lookup(u64 addr);
 // Indirect call: BLR. Return address is already in x30.

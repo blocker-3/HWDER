@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "debug_flags.h"
 
 namespace display {
 void validation_report();  // HWDER_VALIDATION message counts (below)
@@ -143,7 +144,7 @@ static void window_thread() {
     // HWDER_OFFSCREEN=1: a normal visible window (real swapchain, real presents) parked beyond the
     // desktop edge and never activated, so automated runs exercise the present path without
     // appearing on the user's screen or taking their focus.
-    const bool offscreen = getenv("HWDER_OFFSCREEN") != nullptr;
+    const bool offscreen = debug::flag(debug::Offscreen);
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
     if (offscreen) {
         RECT vd{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0};
@@ -154,7 +155,7 @@ static void window_thread() {
                              WS_OVERLAPPEDWINDOW, x, y, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance,
                              nullptr);
     // Automated test runs (they set HWDER_LOG) open minimized without stealing focus.
-    ShowWindow(g_hwnd, offscreen ? SW_SHOWNOACTIVATE : getenv("HWDER_LOG") && !getenv("HWDER_SHOW") ? SW_SHOWMINNOACTIVE : SW_SHOW);
+    ShowWindow(g_hwnd, offscreen ? SW_SHOWNOACTIVATE : debug::flag(debug::Log) && !debug::flag(debug::Show) ? SW_SHOWMINNOACTIVE : SW_SHOW);
     g_window_ready = true;
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -257,7 +258,7 @@ static void init_vulkan() {
     ici.ppEnabledExtensionNames = inst_ext;
     bool messenger = false;
     const char* layer = "VK_LAYER_KHRONOS_validation";
-    if (getenv("HWDER_VALIDATION")) {
+    if (debug::flag(debug::Validation)) {
         // The layer ships with the Vulkan SDK, not the GPU driver. Requesting a missing layer fails
         // vkCreateInstance (VK_ERROR_LAYER_NOT_PRESENT), so check first and run without it.
         u32 nl = 0;
@@ -409,7 +410,7 @@ static void frame_limit(u32 interval, u32 release_hz) {
     static LARGE_INTEGER freq, next;
     static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-    const char* env = getenv("HWDER_FPS");
+    const char* env = debug::str(debug::Fps);
     // The presenter runs at a fixed 60 Hz like the console's display. A swap interval of 2 means the
     // frame stays up for two vsyncs: pace such a present two slots ahead instead of re-targeting the
     // limiter to 30 fps (the title screen alternates 1/2 every second, which made that stutter).
@@ -425,7 +426,7 @@ static void frame_limit(u32 interval, u32 release_hz) {
     }
     u32 slots = release_hz == 120 ? 1 : std::max(1u, std::min(interval, 4u));
     // Experiment: release every frame at the 60 Hz grid even when the game asks for interval 2.
-    static const bool force1 = getenv("HWDER_FORCE_INTERVAL1") != nullptr;
+    static const bool force1 = debug::flag(debug::ForceInterval1);
     if (force1 && !release_hz) slots = 1;
     if (fps <= 0) return;
     // The compositor's timer wake-ups must not be delayed by other busy threads (a late wake-up shows
@@ -696,7 +697,7 @@ void present_image(VkImage image, u32 width, u32 height, u32 swap_interval, VkSe
     g_present_ms += (t2.QuadPart - t1.QuadPart) * 1000.0 / f.QuadPart;
     // HWDER_PACE_TRACE=1: one line per present (interval since the previous present call, requested swap
     // interval, fence wait / acquire / whole present() / limiter time) for frame pacing analysis.
-    static const bool trace = getenv("HWDER_PACE_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::PaceTrace);
     if (trace) {
         static LARGE_INTEGER prev;
         double dt = prev.QuadPart ? (t0.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0;

@@ -17,6 +17,7 @@
 
 #include "fs_internal.h"
 #include "nsp.h"
+#include "debug_flags.h"
 
 namespace hwfs {
 
@@ -412,7 +413,7 @@ RomFsImage* image() {
         hw_log("romfs: built virtual image: %zu files, %.2f GiB, in %.1f ms", img->file_count(),
                img->size() / (1024.0 * 1024.0 * 1024.0), ms);
         g_image = img;
-        if (const char* e = getenv("HWDER_FS_SELFTEST"); e && *e && *e != '0') img->self_test();
+        if (const char* e = debug::str(debug::FsSelftest); e && *e && *e != '0') img->self_test();
     });
     return g_image;
 }

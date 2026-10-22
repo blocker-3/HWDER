@@ -7,7 +7,9 @@
 
 #include "kernel/kernel.h"
 #include "vk_common.h"
+#include "texture_layout.h"
 #include "gpu/graphics_audit.h"
+#include "debug_flags.h"
 
 namespace gpu::vk {
 
@@ -126,54 +128,6 @@ u64 readable_size(u64 addr, u64 size) {
 }
 
 namespace {
-u32 mip_shift(u32 shift, u32 unit, u32 dim) {
-    while (shift > 0 && (unit << (shift - 1)) >= dim) shift--;
-    return shift;
-}
-
-struct LevelParams {
-    u32 w, h, d;           // texels
-    u32 bx, by;            // blocks
-    u32 width_bytes;
-    u32 bhs, bds;          // block-linear shifts
-    u32 gobs_w = 0;
-    u64 size;              // guest bytes
-};
-
-LevelParams level_params(const ImageInfo& info, u32 l) {
-    LevelParams p;
-    p.w = std::max(1u, info.width >> l);
-    p.h = std::max(1u, info.height >> l);
-    p.d = info.type == ImageType::e3D ? std::max(1u, info.depth >> l) : 1;
-    p.bx = (p.w + info.fmt.bw - 1) / info.fmt.bw;
-    p.by = (p.h + info.fmt.bh - 1) / info.fmt.bh;
-    p.width_bytes = p.bx * info.fmt.bpb;
-    if (!info.block_linear) {
-        u32 pitch = info.pitch ? info.pitch : p.width_bytes;
-        p.bhs = p.bds = 0;
-        p.size = (u64)pitch * p.by * p.d;
-        return p;
-    }
-    if (info.levels == 1 && l == 0) {
-        p.bhs = info.bh;
-        p.bds = info.type == ImageType::e3D ? info.bd : 0;
-    } else {
-        p.bhs = mip_shift(info.bh, 8, p.by);
-        p.bds = info.type == ImageType::e3D ? mip_shift(info.bd, 1, p.d) : 0;
-    }
-    u32 gobs_w = (p.width_bytes + 63) / 64;
-    if (info.tws) {
-        u32 a = 1u << info.tws;
-        if (gobs_w > a) gobs_w = (gobs_w + a - 1) & ~(a - 1);
-    }
-    p.gobs_w = gobs_w;
-    u32 gobs_h = (p.by + 7) / 8;
-    u32 bh = 1u << p.bhs, bd = 1u << p.bds;
-    u64 blocks = (u64)gobs_w * ((gobs_h + bh - 1) / bh) * ((p.d + bd - 1) / bd);
-    p.size = blocks * (512ull << (p.bhs + p.bds));
-    return p;
-}
-
 // Block-linear <-> linear copy of one mip level (all slices). linear rows are width_bytes apart.
 void bl_copy(const LevelParams& p, u8* guest, u8* linear, bool to_linear, u64 guest_size) {
     u32 gobs_w = p.gobs_w;
@@ -222,35 +176,6 @@ bool formats_compatible(const FormatInfo& a, const FormatInfo& b) {
     return vk_format_bytes(a.vk) == vk_format_bytes(b.vk);
 }
 }  // namespace
-
-u64 TextureCache::compute_layout(const ImageInfo& info, u64* level_offset, u64* layer_stride) {
-    u64 off = 0;
-    for (u32 l = 0; l < info.levels && l < 16; l++) {
-        if (level_offset) level_offset[l] = off;
-        off += level_params(info, l).size;
-    }
-    u64 stride = off;
-    if (info.layers > 1) {
-        if (info.layer_stride) {
-            stride = info.layer_stride;
-        } else if (info.block_linear) {
-            u32 bh = info.bh, bd = info.bd;
-            u32 rows = (info.height + info.fmt.bh - 1) / info.fmt.bh;
-            if (info.tws) {
-                u64 a = 512ull << (info.tws + bh + bd);
-                stride = (stride + a - 1) & ~(a - 1);
-            } else {
-                while (bh && rows <= (8u << (bh - 1))) bh--;
-                while (bd && info.depth <= (1u << (bd - 1))) bd--;
-                u64 a = 512ull << (bh + bd);
-                stride = (stride + a - 1) & ~(a - 1);
-            }
-        }
-    }
-    if (layer_stride) *layer_stride = stride;
-    return stride * (info.layers - 1) + off;
-}
-
 void TextureCache::link(Image* img) {
     for (u64 p = img->addr >> 16; p <= (img->addr + img->guest_size - 1) >> 16; p++) pages_[p].push_back(img);
 }
@@ -619,7 +544,7 @@ void TextureCache::alloc_image(Image* img) {
     if (!vk_format_compressed(info.fmt.vk)) {  // clears are not allowed on block-compressed formats
         VkImageSubresourceRange all{img->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         if (img->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-            static const float init_depth = getenv("HWDER_VK_INIT_DEPTH") ? (float)atof(getenv("HWDER_VK_INIT_DEPTH")) : 1.0f;
+            static const float init_depth = (float)debug::value(debug::VkInitDepth, 1.0);
             VkClearDepthStencilValue ds{init_depth, 0};
             vkCmdClearDepthStencilImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all);
         } else {
@@ -667,9 +592,9 @@ Image* TextureCache::create(u64 addr, const ImageInfo& info) {
         static bool init = false;
         if (!init) {
             init = true;
-            const char* e = getenv("HWDER_RES_SCALE");
-            const char* ex = getenv("HWDER_RES_SCALE_X");  // test aid: emulate another window aspect
-            const char* ey = getenv("HWDER_RES_SCALE_Y");
+            const char* e = debug::str(debug::ResScale);
+            const char* ex = debug::str(debug::ResScaleX);  // test aid: emulate another window aspect
+            const char* ey = debug::str(debug::ResScaleY);
             g_res_scale = g_res_scale_y = e ? (float)atof(e) : settings::video().res_scale;
             if (!e && settings::video().unlocked_res) {
                 float sx = GetSystemMetrics(SM_CXSCREEN) / 1920.0f, sy = GetSystemMetrics(SM_CYSCREEN) / 1080.0f;

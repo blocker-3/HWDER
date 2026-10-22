@@ -6,7 +6,15 @@ else()
 endif()
 list(APPEND RUNTIME_SOURCES
     runtime/src/gpu/vk/vk_renderer.cpp
+    runtime/src/gpu/vk/vk_sched.cpp
+    runtime/src/gpu/vk/vk_resources.cpp
+    runtime/src/gpu/vk/vk_pipelines.cpp
+    runtime/src/gpu/vk/vk_interp_objects.cpp
+    runtime/src/gpu/vk/vk_draw.cpp
+    runtime/src/gpu/vk/vk_present.cpp
+    runtime/src/gpu/vk/vk_debug.cpp
     runtime/src/gpu/vk/texture_cache.cpp
+    runtime/src/gpu/vk/texture_layout.cpp
     runtime/src/gpu/vk/formats.cpp
     runtime/src/gpu/vk/astc.cpp
     runtime/src/gpu/vk/pipeline_warmup_cache.cpp
@@ -35,7 +43,8 @@ target_compile_options(pipeline_warmup_cache_test PRIVATE ${HW_CODEC_TEST_FLAGS}
 set(CATALOG_TRANSLATOR_SOURCES
     runtime/src/shader/decode.cpp runtime/src/shader/fallback.cpp
     runtime/src/shader/translate.cpp runtime/src/shader/program.cpp
-    runtime/src/shader/emit_alu.cpp runtime/src/shader/emit_mem.cpp)
+    runtime/src/shader/emit_alu.cpp runtime/src/shader/emit_mem.cpp
+    runtime/src/debug_flags.cpp)  # translate.cpp reads HWDER_SHADER_* through the table
 add_executable(pipeline_catalog_test EXCLUDE_FROM_ALL
     runtime/tests/pipeline_catalog_test.cpp
     runtime/src/gpu/vk/catalog_game_sources.cpp

@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "shader/translator.h"
+#include "debug_flags.h"
 
 namespace shader {
 
@@ -290,7 +291,7 @@ void Translator::emit_predicated(Inst in, Op op) {
 
 void Translator::emit_kill(Inst in) {
     // Debug: HWDER_SHADER_NO_KIL=1 turns every (conditional) KIL into a no-op (alpha-test diagnosis).
-    static const bool no_kill = getenv("HWDER_SHADER_NO_KIL") != nullptr;
+    static const bool no_kill = debug::flag(debug::ShaderNoKil);
     if (no_kill) return;
     uses_discard = true;
     Id c = guard_cond(in, true);
@@ -368,7 +369,7 @@ std::string listing(Environment& env, Stage stage) {
 Program translate(Environment& env, Stage stage, const Options& opt, Environment* vertex_a) {
     if (vertex_a) log_once("VertexA programs are not supported; translating VertexB only");
     // Debug: HWDER_SHADER_FALLBACK=all replaces every stage, =frag only fragment shaders (solid magenta).
-    static const char* force = getenv("HWDER_SHADER_FALLBACK");
+    static const char* force = debug::str(debug::ShaderFallback);
     if (force && (!strcmp(force, "all") || (stage == Stage::Fragment && !strcmp(force, "frag"))))
         return make_fallback(stage);
     try {

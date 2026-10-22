@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "sync.h"
+#include "debug_flags.h"
 
 Ctx* hw_ctx_new(u64 stack_top);
 void hw_ctx_bind(Ctx* c);
@@ -45,30 +46,6 @@ void KernelLock::reacquire(int depth) {
     m_.lock();
     owner_.store(GetCurrentThreadId(), std::memory_order_relaxed);
     depth_ = depth;
-}
-
-// ------------------------------------------------------------------ handles
-Handle HandleTable::add(ObjectPtr obj) {
-    KGuard g(g_kernel_lock);
-    Handle h = (next_++ << 15) | 0x10;  // HOS-like handle values (non-zero, low bits set)
-    table_[h] = std::move(obj);
-    return h;
-}
-ObjectPtr HandleTable::get(Handle h) const {
-    KGuard g(g_kernel_lock);
-    if (h == kCurrentThread) {
-        Thread* t = current_thread();
-        // The current thread's object is kept alive by its own handle entry.
-        for (auto& [k, v] : table_)
-            if (v.get() == t) return v;
-        return nullptr;
-    }
-    auto it = table_.find(h);
-    return it == table_.end() ? nullptr : it->second;
-}
-bool HandleTable::close(Handle h) {
-    KGuard g(g_kernel_lock);
-    return table_.erase(h) != 0;
 }
 
 // ------------------------------------------------------------------ objects
@@ -426,7 +403,7 @@ Result wait_synchronization(const Handle* handles, s32 count, s64 timeout_ns, s3
     Result r = wait_synchronization_impl(handles, count, timeout_ns, out_index);
     QueryPerformanceCounter(&b);
     double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
-    static const bool trace = getenv("HWDER_WAIT_TRACE") != nullptr;
+    static const bool trace = debug::flag(debug::WaitTrace);
     if (trace && ms > 150.0) {
         ObjectPtr o = g_handles.get(handles[0]);
         hw_log("kernel: wait on %d handle(s) [0x%x %s %p%s] took %.0f ms (timeout %lld ms, result 0x%x, index %d)", count,

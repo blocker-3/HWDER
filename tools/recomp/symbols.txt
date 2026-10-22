@@ -1,0 +1,44 @@
+# Named guest symbols for the recompiled modules (runtime/src/game, docs/camera.md, docs/frame-loop.md).
+#
+#   <address>  <Name>  [func|data]  [hook]   # note
+#
+# Name is a C identifier. For a func, gen_main.py emits in generated/symbols.h
+#   #define f_<Name> f_<addr>            (and f_<Name>_orig for a hook)
+#   #define HW_ADDR_<Name> <addr>ULL
+# and a name table (hw_symbols[]) that backtraces and logs use. A hook keeps its generated body as
+# f_<addr>_orig and the runtime defines f_<addr> (see runtime/src/game/hook.h). A data symbol only
+# gets HW_ADDR_<Name>. Addresses are guest addresses (main at 0x1000000000). Names are ours, inferred.
+
+# ---- camera (docs/camera.md)
+0x100057cee0  Camera_BuildProj         func hook   # projection from fov/aspect/near/far; runtime/src/game/widescreen.cpp
+0x100057cb78  Camera_Update            func        # (cam, view dirty, proj dirty): rebuilds view, proj, viewproj
+0x100057cc3c  Camera_BuildView         func        # view matrix from eye/at/up (+roll)
+0x10003e6ee4  Camera_CopyFrom          func        # copies 0x150 bytes from +0x10
+0x10003d45cc  RenderCamera_Sync        func hook   # (scene, slot): game camera -> render slot, once per tick; runtime/src/interp/camera.cpp
+0x10003d61a4  RenderCamera_SyncAll     func        # calls RenderCamera_Sync for the active screens
+0x10003d6634  Scene_GetRenderCamera    func        # (scene, screen) reads the slot at scene+0x710e0
+0x10003d0a74  CameraConstants_Upload   func        # render side: fNear/fFar/fFov/vViewInfo constant buffer
+0x1000c21880  g_CameraManager          data        # ptr; per screen camera at +0x350 + screen * 0x5a0
+0x1000c2b5e8  g_Scene                  data        # ptr to the scene object S (render cameras at S+0x71360)
+0x1000c21de0  g_GfxGlobals             data        # ptr; [[+64]+88] is the window target passed to GfxDevice_PresentWindow
+0x100000fd70  game_sincosf             func
+
+# ---- frame loop (docs/frame-loop.md)
+0x10002ad35c  MainThread_FrameLoop     func        # per-frame function on MainThread
+0x10002acb54  Battle_Tick              func hook   # (scene x19, frame state x20, gfx device x21): the whole battle tick; runtime/src/interp/interp_draw.cpp
+0x10002ac87c  Menu_Frame               func        # non-battle screens draw through this instead
+0x100051e9c4  GfxDevice_BeginFrame     func hook   # (dev, w, h, ..); runtime/src/interp/interp_draw.cpp
+0x1000387f9c  Scene_Draw               func        # (scene): scene slot 5 and the camera constants
+0x100052f6bc  GfxDevice_PresentWindow  func        # (dev, 0, 0, window target, 0), when the scene asks (vcall scene+192)
+0x100051ea20  GfxDevice_EndFrame       func        # (dev, 1)
+0x100051e67c  GfxDevice_Present        func        # (dev, 0): SubmitGPFIFO, QueueBuffer, DequeueBuffer
+0x10001e2f7c  Profiler_Marker          func        # when [x20+662] == 0
+0x10003878d0  UpdateJob_Body           func        # scene update job (slot 2), also called on MainThread
+0x100045dcdc  JobSystem_Run            func
+0x10001766a4  SceneA_PublishCameras    func        # scene class A (vtable 0x1000ba6008) slot 3
+0x10001767e8  SceneA_Draw              func        # slot 5
+0x100017672c  SceneA_Slot18            func
+0x1000176490  SceneA_Update            func        # slot 2
+0x10001763bc  SceneA_PostUpdate        func        # slot 4
+0x10002d96b4  SceneB_PublishCameras    func        # scene class B (vtable 0x1000bd36f8) slot 3
+0x10002d9878  SceneB_Draw              func        # slot 5

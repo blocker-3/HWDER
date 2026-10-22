@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include <shellapi.h>
+#include "debug_flags.h"
 #pragma comment(lib, "shell32.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -208,7 +209,7 @@ void init(HWND hwnd, VkInstance instance, VkPhysicalDevice phys, VkDevice dev, u
         return;
     }
     g_inited = true;
-    if (getenv("HWDER_OVERLAY")) set_visible(true);
+    if (debug::flag(debug::Overlay)) set_visible(true);
     QueryPerformanceCounter(&g_last_t);
     hw_log("overlay: ready (Escape, F1 or holding View opens the menu)");
 }
@@ -560,14 +561,14 @@ static void tab_graphics(bool& changed) {
     help("On: a new shader is compiled on a worker thread and its draws are skipped for the frames that takes\n"
          "(no hitch, an object may pop in late). Off: the frame waits for the compile (a short hitch, nothing\n"
          "missing). Light frames such as menus always compile synchronously. Same as HWDER_SYNC_PIPELINES.");
-    restart_marker(d.async_shaders == (getenv("HWDER_SYNC_PIPELINES") != nullptr));
+    restart_marker(d.async_shaders == (debug::flag(debug::SyncPipelines)));
 }
 
 static void tab_audio(bool& changed) {
     settings::Audio& a = settings::audio();
     opt_volume(changed);
     if (ImGui::Checkbox("Mute while another window is active", &a.mute_background)) changed = true;
-    if (getenv("HWDER_MUTE")) ImGui::TextDisabled("HWDER_MUTE is set: audio output is off for this run.");
+    if (debug::flag(debug::Mute)) ImGui::TextDisabled("HWDER_MUTE is set: audio output is off for this run.");
 }
 
 // Binds the next host button pressed to the remap row being captured; Escape or 5 s cancels. A button

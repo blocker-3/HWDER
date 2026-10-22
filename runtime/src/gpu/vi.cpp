@@ -8,7 +8,8 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
-extern "C" u32 hw_game_interp_release_hz();  // interp/interp_draw.cpp, called on the guest thread
+#include "interp/interp.h"
+#include "debug_flags.h"
 
 
 namespace ipc {
@@ -311,7 +312,7 @@ private:
     }
 
     static bool pace_trace() {
-        static const bool t = getenv("HWDER_PACE_TRACE") != nullptr;
+        static const bool t = debug::flag(debug::PaceTrace);
         return t;
     }
 
@@ -504,7 +505,7 @@ public:
             u32 code = rq.pop<u32>();
             ParcelReader pr((const u8*)in.addr, in.size);
             ParcelWriter pw;
-            static const bool trace = getenv("HWDER_VI_TRACE") != nullptr;
+            static const bool trace = debug::flag(debug::ViTrace);
             if (trace) hw_log("vi: binder %d transact %u", id, code);
             layer_queue().transact(code, pr, pw);
             if (out.addr) pw.serialize((u8*)out.addr, out.size);
