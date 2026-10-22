@@ -1,6 +1,6 @@
-// Diagnostics of the Vulkan renderer: the per-draw log (HWDER_DRAWLOG), the draw-path profile (HWDER_PROFILE_MS),
-// frame dumps (HWDER_DUMP_FRAMES, HWDER_VK_FRAME_DUMP) and the filmstrip capture (HWDER_FILMSTRIP). Moved
-// text-for-text from vk_renderer.cpp.
+// Diagnostics of the Vulkan renderer: the per-draw log (HWDER_DRAWLOG), frame dumps (HWDER_DUMP_FRAMES,
+// HWDER_VK_FRAME_DUMP) and the filmstrip capture (HWDER_FILMSTRIP). Moved text-for-text from vk_renderer.cpp;
+// the draw-path profile flush is in gpu/diag.cpp.
 #include "interp/interp.h"
 #include "vk_renderer.h"
 #include "debug_flags.h"
@@ -22,23 +22,6 @@ bool drawlog_active() {
 }
 
 const u64 g_start_ms = GetTickCount64();
-
-using gpu::vk::g_prof;
-using gpu::vk::g_prof_draws;
-double prof_flush() {
-    double total = 0;
-    for (double v : g_prof) total += v;
-    static const double limit = debug::value(debug::ProfileMs, 200.0);
-    if (total > limit) {
-        char line[512];
-        int o = snprintf(line, sizeof(line), "vk: profile: %u draws, %.0f ms:", g_prof_draws, total);
-        for (int i = 0; i < kProfCount; i++) o += snprintf(line + o, sizeof(line) - o, " %s %.0f", kProfNames[i], g_prof[i]);
-        hw_log("%s", line);
-    }
-    memset(g_prof, 0, sizeof(g_prof));
-    g_prof_draws = 0;
-    return total;
-}
 
 void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt) {
     static const char* dir = debug::str(debug::DumpFrames);

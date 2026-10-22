@@ -2,7 +2,7 @@
 // picture) and present(), which picks the presented image, blacks out stale ultrawide side bands, runs the frame
 // diagnostics and hands the image to the display. Moved text-for-text from vk_renderer.cpp.
 #include "gpu/settings.h"
-#include "gpu/graphics_audit.h"
+#include "gpu/diag.h"
 #include "interp/interp.h"
 #include "post_spv.h"
 #include "vk_renderer.h"

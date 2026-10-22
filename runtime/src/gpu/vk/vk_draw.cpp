@@ -4,7 +4,7 @@
 #include <cmath>
 
 #include "gpu/settings.h"
-#include "gpu/graphics_audit.h"
+#include "gpu/diag.h"
 #include "vk_renderer.h"
 #include "debug_flags.h"
 

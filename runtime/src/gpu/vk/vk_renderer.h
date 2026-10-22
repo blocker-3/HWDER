@@ -369,7 +369,6 @@ struct DrawCtx {
 
 // Shared across the renderer's units (defined in the unit the comment names).
 extern const char* kPipelineCacheFile;  // vk_pipelines.cpp
-double prof_flush();                    // vk_debug.cpp
 bool drawlog_active();                  // vk_debug.cpp
 extern FILE* g_drawlog;                 // vk_debug.cpp
 extern const u64 g_start_ms;            // vk_debug.cpp

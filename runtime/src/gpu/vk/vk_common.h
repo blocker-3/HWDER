@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "gpu/diag.h"
 #include "gpu/display.h"
 #include "gpu/maxwell_3d.h"
 #include "gpu/renderer.h"
@@ -100,48 +101,16 @@ struct Slice {
     u8* ptr = nullptr;
 };
 
-// Draw-path profile (GPU thread): accumulated ms per phase since the last flush; logged when large.
-enum ProfPhase {
-    kProfProgram, kProfFramebuffer, kProfVertex, kProfIndex, kProfDescriptors, kProfPipeline, kProfRecord,
-    kProfCbuf, kProfTexGet, kProfTexView, kProfSampler, kProfDescAlloc, kProfDescUpdate, kProfFbGet, kProfFbView,
-    kProfReadable, kProfCreateImage, kProfAllocBind, kProfUpload, kProfStage, kProfDecode,
-    kProfGetLayout, kProfGetOverlaps, kProfGetMatch, kProfGetValidate, kProfGetMiss, kProfClear, kProfInvalidate, kProfPresent,
-    kProfKeyBuild, kProfDrawTotal, kProfCount
-};
-static const char* const kProfNames[kProfCount] = {
-    "program", "framebuffer", "vertex", "index", "descriptors", "pipeline", "record",
-    "|cbuf", "tex-get", "tex-view", "sampler", "desc-alloc", "desc-update", "fb-get", "fb-view",
-    "|readable", "create-image", "alloc-bind", "upload", "stage", "decode",
-    "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "|draw-total"};
-extern double g_prof[kProfCount];
+// The draw-path profile and the slow-scope log live in gpu/diag.h; the same names are available here.
+using diag::ProfPhase;
+using enum diag::ProfPhase;
+using diag::kProfNames;
+using diag::g_prof;
+using diag::g_prof_draws;
+using diag::ProfScope;
+using diag::SlowTimer;
+using diag::prof_flush;
 extern float g_res_scale, g_res_scale_y;  // internal resolution scale (x, y) for large render targets
-extern u32 g_prof_draws;
-struct ProfScope {
-    ProfPhase ph;
-    LARGE_INTEGER a;
-    explicit ProfScope(ProfPhase p) : ph(p) { QueryPerformanceCounter(&a); }
-    ~ProfScope() {
-        LARGE_INTEGER b, f;
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
-        g_prof[ph] += (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
-    }
-};
-
-// Logs scopes that exceed `limit_ms` (stall diagnostics).
-struct SlowTimer {
-    const char* what;
-    double limit_ms;
-    LARGE_INTEGER a;
-    SlowTimer(const char* w, double limit) : what(w), limit_ms(limit) { QueryPerformanceCounter(&a); }
-    ~SlowTimer() {
-        LARGE_INTEGER b, f;
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
-        double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
-        if (ms > limit_ms) hw_log("vk: slow: %s took %.0f ms", what, ms);
-    }
-};
 
 // ------------------------------------------------------------------ command recording
 class Recorder {
