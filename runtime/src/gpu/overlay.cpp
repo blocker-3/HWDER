@@ -825,6 +825,57 @@ static void tab_tools(bool& changed) {
         }
     }
 
+    // Every startup switch the runtime knows (debug::table(), the same list as the README table), the ones
+    // set for this run first with their value. Read-only and read once: the subsystems saw these values at
+    // startup (the saved switches above are applied before anything reads them), so nothing changes here.
+    section("All startup switches");
+    {
+        struct Row {
+            const debug::Flag* flag;
+            bool set;
+            std::string value;
+        };
+        static std::vector<Row> rows;
+        static size_t set_count = 0;
+        if (rows.empty()) {
+            size_t n = 0;
+            const debug::Flag* t = debug::table(&n);
+            for (int pass = 0; pass < 2; pass++)
+                for (size_t i = 0; i < n; i++) {
+                    const char* v = getenv(t[i].name);
+                    if ((v != nullptr) != (pass == 0)) continue;
+                    rows.push_back({&t[i], v != nullptr, v ? std::string(v) : std::string()});
+                    if (v) set_count++;
+                }
+        }
+        ImGui::TextDisabled("%zu of %zu set for this run (listed first). Each is read once at startup; the README has the same table.",
+                            set_count, rows.size());
+        if (ImGui::BeginTable("##switches", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Switch", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+            ImGui::TableSetupColumn("Meaning", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+            ImGui::TableHeadersRow();
+            for (const Row& r : rows) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (r.set) ImGui::TextColored(kGold, "%s", r.flag->name);
+                else ImGui::TextUnformatted(r.flag->name);
+                ImGui::TableSetColumnIndex(1);
+                if (!r.set) ImGui::TextDisabled("-");
+                else if (r.value.empty()) ImGui::TextDisabled("(empty)");
+                else ImGui::TextUnformatted(r.value.c_str());
+                ImGui::TableSetColumnIndex(2);
+                if (r.set) ImGui::TextWrapped("%s", r.flag->meaning);
+                else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("%s", r.flag->meaning);
+                    ImGui::PopStyleColor();
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+
     section("Build");
     // Build identity for bug reports (same string as the first line of hwder.log).
     static char version[160];

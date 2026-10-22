@@ -34,6 +34,11 @@ def main():
         print("SKIP first-run/source-package exclusion suite: separate candidate is not integrated in this checkout", flush=True)
         if os.environ.get("GITHUB_ACTIONS"):
             print("::warning::Source-package exclusion coverage awaits explicit first-run candidate integration", flush=True)
+    # README debug-switch table must match runtime/src/debug_flags.cpp (tools/gen_debug_flags_md.py).
+    flags_suite = unittest.defaultTestLoader.discover(str(ROOT / "tools/tests"), pattern="test_debug_flags_md.py")
+    if not flags_suite.countTestCases():
+        raise RuntimeError("Debug-flags README suite discovered zero tests")
+    suite.addTests(flags_suite)
     if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
         return 1
     if args.python_only:
