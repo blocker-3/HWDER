@@ -237,68 +237,17 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
     return true;
 }
 
-void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size) {
-    draws_++;
-    st_.draws++;
-    if (!p.count) return;
-    if (!warmup_first_draw_) {
-        warmup_first_draw_ = true;
-        log_warmup("before_first_live_draw");
-    }
-    u64 prog_key = 0;
-    g_prof_draws++;
-    GfxProgram* prog;
-    {
-        ProfScope ps(kProfProgram);
-        prog = get_program(regs, &prog_key);
-    }
-    if (!prog || !prog->ok) {
-        skipped_++;
-        st_.skipped++;
-        VK_LOG_ONCE("vk: draw skipped (no usable program)");
-        return;
-    }
-    ProfScope* phase = new ProfScope(kProfFramebuffer);
-    // The render-target registers rarely change between draws: reuse the last resolved framebuffer
-    // while they (and the texture cache's image set) are unchanged.
-    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
-    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
-    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
-    Framebuffer fb;
-    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
-        fb = fb_cache_;
-    } else {
-        fb = resolve_framebuffer(regs, false, 0);
-        fb_cache_ = fb;
-        fb_cache_key_ = fbkey;
-        fb_cache_gen_ = tc_.generation;
-        fb_cache_valid_ = true;
-    }
-
-    delete phase;
-    phase = new ProfScope(kProfKeyBuild);
-    DrawCtx d;
-    build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
+void VkRenderer::stage_vertex_input(const u32* regs, const DrawParams& p, DrawCtx& d) {
     PipelineKey& key = d.key;
-    u32& topo = d.topo;
-    bool& quads = d.quads;
-    u32& attrs_used = d.attrs_used;
-    u32& streams_used = d.streams_used;
-    bool& need_const = d.need_const;
-
-    if (!read_indices(regs, p, inline_idx, inline_size, d)) return;
-    bool& indexed = d.indexed;
-    u32& isize = d.isize;
-    std::vector<u32>& converted = d.converted;
-    const u8*& idx_src = d.idx_src;
-    u32& vmin = d.vmin;
-    u32& vmax = d.vmax;
-    u32& count = d.count;
-
-    delete phase;
-    phase = new ProfScope(kProfVertex);
-    VkBuffer vbufs[32];
-    VkDeviceSize voffs[32];
+    const u32 streams_used = d.streams_used;
+    const bool need_const = d.need_const;
+    const bool indexed = d.indexed;
+    const u32 isize = d.isize;
+    const u8* const idx_src = d.idx_src;
+    const u32 vmin = d.vmin, vmax = d.vmax;
+    // ---- vertex streams
+    VkBuffer* vbufs = d.vbufs;
+    VkDeviceSize* voffs = d.voffs;
     u32 vb_first = 32, vb_last = 0;
     for (u32 s = 0; s < 16; s++) {
         if (!(streams_used & (1u << s))) continue;
@@ -395,6 +344,71 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         vbufs[kConstBinding] = sl.buf;
         voffs[kConstBinding] = sl.offset;
     }
+}
+
+void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size) {
+    draws_++;
+    st_.draws++;
+    if (!p.count) return;
+    if (!warmup_first_draw_) {
+        warmup_first_draw_ = true;
+        log_warmup("before_first_live_draw");
+    }
+    u64 prog_key = 0;
+    g_prof_draws++;
+    GfxProgram* prog;
+    {
+        ProfScope ps(kProfProgram);
+        prog = get_program(regs, &prog_key);
+    }
+    if (!prog || !prog->ok) {
+        skipped_++;
+        st_.skipped++;
+        VK_LOG_ONCE("vk: draw skipped (no usable program)");
+        return;
+    }
+    ProfScope* phase = new ProfScope(kProfFramebuffer);
+    // The render-target registers rarely change between draws: reuse the last resolved framebuffer
+    // while they (and the texture cache's image set) are unchanged.
+    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
+    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
+    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
+    Framebuffer fb;
+    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
+        fb = fb_cache_;
+    } else {
+        fb = resolve_framebuffer(regs, false, 0);
+        fb_cache_ = fb;
+        fb_cache_key_ = fbkey;
+        fb_cache_gen_ = tc_.generation;
+        fb_cache_valid_ = true;
+    }
+
+    delete phase;
+    phase = new ProfScope(kProfKeyBuild);
+    DrawCtx d;
+    build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
+    PipelineKey& key = d.key;
+    u32& topo = d.topo;
+    bool& quads = d.quads;
+    u32& attrs_used = d.attrs_used;
+    u32& streams_used = d.streams_used;
+    bool& need_const = d.need_const;
+
+    if (!read_indices(regs, p, inline_idx, inline_size, d)) return;
+    bool& indexed = d.indexed;
+    u32& isize = d.isize;
+    std::vector<u32>& converted = d.converted;
+    const u8*& idx_src = d.idx_src;
+    u32& vmin = d.vmin;
+    u32& vmax = d.vmax;
+    u32& count = d.count;
+
+    delete phase;
+    phase = new ProfScope(kProfVertex);
+    stage_vertex_input(regs, p, d);
+    VkBuffer* vbufs = d.vbufs;
+    VkDeviceSize* voffs = d.voffs;
 
     delete phase;
     phase = new ProfScope(kProfIndex);

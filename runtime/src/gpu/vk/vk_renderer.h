@@ -355,6 +355,10 @@ struct DrawCtx {
     std::vector<u32> converted; // quads converted to a triangle list
     const u8* idx_src = nullptr;
     u32 vmin = 0, vmax = 0, count = 0;
+    // staged vertex streams (stage_vertex_input): only the bindings in streams_used (and kConstBinding
+    // when need_const) are set
+    VkBuffer vbufs[32];
+    VkDeviceSize voffs[32];
 };
 
 // Shared across the renderer's units (defined in the unit the comment names).
@@ -650,6 +654,7 @@ private:
     void build_pipeline_key(const u32* regs, const DrawParams& p, const void* inline_idx, u64 prog_key, const Framebuffer& fb,
                             const GfxProgram* prog, DrawCtx& d);
     bool read_indices(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size, DrawCtx& d);
+    void stage_vertex_input(const u32* regs, const DrawParams& p, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
