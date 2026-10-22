@@ -149,7 +149,10 @@ def source_fingerprints(root):
     return digest(generator), digest(runtime)
 
 
-def check_prerequisites(root):
+def check_prerequisites(root, managed=None):
+    if managed is not None:
+        import managed_tools
+        return managed_tools.prerequisites(root, managed)
     if os.name != "nt" or sys.maxsize <= 2**32 or sys.version_info < (3, 10):
         raise ValueError("Setup requires Windows x64 and Python 3.10+ x64")
     versions = {}
@@ -194,7 +197,7 @@ def run_command(argv, cwd):
     subprocess.run([str(a) for a in argv], cwd=cwd, check=True)
 
 
-def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None):
+def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None):
     """Injectable stage boundary permits meaningful synthetic orchestration/failure tests."""
     from local_game import read_program, supported_profile
     root, cache, nsp, keys = map(Path, (root, cache, nsp, keys))
@@ -221,6 +224,8 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
                       "lz4": toolchain.get("lz4")})
     def generate(out):
         args = [sys.executable, "-m", "recomp.gen_main", "--exefs", exefs, "--out", out]
+        if toolchain.get("managed_directory"):
+            args[1:1] = ["-B", "-X", "utf8"]
         # Explicit entries remove gen_main's implicit dependency on the working directory.
         args += ["--extra", root / "tools" / "recomp" / "extra_entries.txt"]
         if (root / "data" / "extra_entries.txt").is_file():
@@ -250,8 +255,13 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         # whenever the output lacks a valid completion certificate; preserve partial objects.
         exe.unlink(missing_ok=True)
         try:
-            run([sys.executable, root / "tools" / "build.py", "--jobs", str(jobs),
-                 "--build-dir", bdir, "--generated-dir", generated], root)
+            command = [sys.executable, root / "tools" / "build.py", "--jobs", str(jobs),
+                       "--build-dir", bdir, "--generated-dir", generated]
+            if toolchain.get("managed_directory"):
+                command[1:1] = ["-B", "-X", "utf8"]
+                command += ["--managed-toolchain", toolchain["managed_directory"],
+                            "--managed-temp-dir", bdir/"tmp"]
+            run(command, root)
         finally:
             # A failed/interrupted compiler can still leave objects that consumed
             # changed input. Check every exit before allowing any partial reuse.
@@ -285,7 +295,14 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
     if (before != (nsp.stat().st_size, nsp.stat().st_mtime_ns)
             or keys_before != (keys.stat().st_size, keys.stat().st_mtime_ns)):
         raise ValueError("Game or keys input changed during setup; rerun")
+    if toolchain.get("managed_directory"):
+        import managed_tools
+        # Verify fresh AND reused output before the stable play transaction.
+        # The static GNU ABI may not borrow host/toolchain DLLs at gameplay.
+        managed_tools.game_image(exe)
     # Stable play directory retains user settings, saves and private caches across source updates.
+    if before_publish:
+        before_publish()  # UI commit permission: no stable play transaction has started yet.
     play = cache / "play"
     play.mkdir(parents=True, exist_ok=True)
     target = play / "hwder.exe"

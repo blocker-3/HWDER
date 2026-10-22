@@ -1,3 +1,5 @@
+> The native setup prototype on this branch uses its own verified private tools; see [Windows setup](windows-setup.md). The commands below describe the retained developer CLI with installed Python/VS prerequisites. The CLI does not automatically install private tools or migrate its older cache root.
+
 # Local first-run build
 
 `play-local.bat --nsp "your-game.nsp" --keys "your-prod.keys"` runs a complete user-local

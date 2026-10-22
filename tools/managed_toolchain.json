@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "owner": "hwder-private-tools-v1",
+  "target": "windows-x86_64-ucrt",
+  "abi": "llvm-mingw-ucrt-static-cxx-v1",
+  "artifacts": [
+    {
+      "id": "python",
+      "version": "3.13.16",
+      "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+      "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
+      "max_download_bytes": 20000000,
+      "max_unpacked_bytes": 100000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "python.exe"
+      ],
+      "license": "PSF-2.0 and bundled notices",
+      "license_source": "https://docs.python.org/3.13/license.html",
+      "metadata_source": "https://www.python.org/downloads/release/python-31316/"
+    },
+    {
+      "id": "llvm",
+      "version": "20260908-ucrt-x86_64",
+      "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip",
+      "sha256": "1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6",
+      "max_download_bytes": 190677197,
+      "max_unpacked_bytes": 2000000000,
+      "max_entries": 50000,
+      "archive_root": "llvm-mingw-20260908-ucrt-x86_64",
+      "required": [
+        "bin/x86_64-w64-mingw32-clang++.exe"
+      ],
+      "license": "LLVM Apache-2.0 WITH LLVM-exception; mingw-w64/component notices; ISC wrappers",
+      "license_source": "https://raw.githubusercontent.com/mstorsjo/llvm-mingw/20260908/LICENSE.txt",
+      "metadata_source": "https://github.com/mstorsjo/llvm-mingw/releases/expanded_assets/20260908"
+    },
+    {
+      "id": "cmake",
+      "version": "3.31.12",
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-windows-x86_64.zip",
+      "sha256": "0c4baa40f28b3f8225eb3fdf6946c987b4fe901403b4eaf2fbbd9378100aaa0c",
+      "max_download_bytes": 46666397,
+      "max_unpacked_bytes": 500000000,
+      "max_entries": 50000,
+      "archive_root": "cmake-3.31.12-windows-x86_64",
+      "required": [
+        "bin/cmake.exe"
+      ],
+      "license": "BSD-3-Clause and bundled notices",
+      "license_source": "https://raw.githubusercontent.com/Kitware/CMake/v3.31.12/Copyright.txt",
+      "metadata_source": "https://github.com/Kitware/CMake/releases/expanded_assets/v3.31.12"
+    },
+    {
+      "id": "ninja",
+      "version": "1.13.2",
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
+      "sha256": "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65",
+      "max_download_bytes": 291570,
+      "max_unpacked_bytes": 5000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "ninja.exe"
+      ],
+      "license": "Apache-2.0",
+      "license_source": "https://raw.githubusercontent.com/ninja-build/ninja/v1.13.2/COPYING",
+      "metadata_source": "https://github.com/ninja-build/ninja/releases/expanded_assets/v1.13.2"
+    },
+    {
+      "id": "cryptography",
+      "version": "47.0.0",
+      "url": "https://files.pythonhosted.org/packages/b2/dc/1b901990b174786569029f67542b3edf72ac068b6c3c8683c17e6a2f5363/cryptography-47.0.0-cp311-abi3-win_amd64.whl",
+      "sha256": "f5c3296dab66202f1b18a91fa266be93d6aa0c2806ea3d67762c69f60adc71aa",
+      "max_download_bytes": 3775309,
+      "max_unpacked_bytes": 50000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "cryptography/__init__.py"
+      ],
+      "license": "Apache-2.0 OR BSD-3-Clause and bundled OpenSSL notices",
+      "license_source": "https://github.com/pyca/cryptography/tree/47.0.0",
+      "metadata_source": "https://pypi.org/pypi/cryptography/47.0.0/json"
+    },
+    {
+      "id": "lz4",
+      "version": "4.4.5",
+      "url": "https://files.pythonhosted.org/packages/18/e0/f06028aea741bbecb2a7e9648f4643235279a770c7ffaf70bd4860c73661/lz4-4.4.5-cp313-cp313-win_amd64.whl",
+      "sha256": "da68497f78953017deb20edff0dba95641cc86e7423dfadf7c0264e1ac60dc22",
+      "max_download_bytes": 99502,
+      "max_unpacked_bytes": 5000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "lz4/__init__.py"
+      ],
+      "license": "BSD-3-Clause and LZ4 BSD-2-Clause notices",
+      "license_source": "https://github.com/python-lz4/python-lz4/blob/v4.4.5/LICENSE",
+      "metadata_source": "https://pypi.org/pypi/lz4/4.4.5/json"
+    },
+    {
+      "id": "cffi",
+      "version": "2.0.0",
+      "url": "https://files.pythonhosted.org/packages/37/18/6519e1ee6f5a1e579e04b9ddb6f1676c17368a7aba48299c3759bbc3c8b3/cffi-2.0.0-cp313-cp313-win_amd64.whl",
+      "sha256": "19f705ada2530c1167abacb171925dd886168931e0a7b78f5bffcae5c6b5be75",
+      "max_download_bytes": 183402,
+      "max_unpacked_bytes": 5000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "cffi/__init__.py"
+      ],
+      "license": "MIT and bundled libffi notices",
+      "license_source": "https://pypi.org/project/cffi/2.0.0/",
+      "metadata_source": "https://pypi.org/pypi/cffi/2.0.0/json"
+    },
+    {
+      "id": "pycparser",
+      "version": "3.0",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "max_download_bytes": 48172,
+      "max_unpacked_bytes": 5000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "pycparser/__init__.py"
+      ],
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/project/pycparser/3.0/",
+      "metadata_source": "https://pypi.org/pypi/pycparser/3.0/json"
+    }
+  ]
+}

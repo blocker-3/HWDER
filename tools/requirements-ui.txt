@@ -1,0 +1,6 @@
+# Explicit user-consented install into HWDER's owned venv only. No wheels are bundled.
+# Windows x64 standard CPython 3.11–3.14. All four direct/transitive dependencies pinned.
+cryptography==47.0.0
+lz4==4.4.5
+cffi==2.0.0
+pycparser==3.0

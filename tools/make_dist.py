@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.bat", "third_party/README.md"}
 SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
 SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
+PUBLIC_SCRIPTS = {"tools/setup_ui/install_private_python.ps1"}
 THIRD_PARTY_SOURCE_SUFFIXES = SOURCE_SUFFIXES | {".in", ".def", ".rc", ".s", ".asm", ".m", ".mm",
                                               ".metal", ".glsl", ".vert", ".frag", ".xml", ".natvis",
                                               ".ac", ".am", ".sh", ".bat", ".ps1", ".cmakein", ".yml"}
@@ -47,7 +48,7 @@ def release_files(root, list_tracked=tracked):
     files = {}
     for name in list_tracked(root):
         p = PurePosixPath(name)
-        allowed = name in TOP_FILES or (p.parts[0] in ("runtime", "tools", "docs")
+        allowed = name in TOP_FILES or name in PUBLIC_SCRIPTS or (p.parts[0] in ("runtime", "tools", "docs")
                                        and p.suffix.lower() in SOURCE_SUFFIXES)
         if not allowed:
             continue
