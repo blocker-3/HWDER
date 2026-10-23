@@ -44,7 +44,8 @@ the game needs it, so the opening minutes (and each new stage the first time) ca
 an object appearing a moment late. Graphics > Shaders > "Compile shaders in the background" (on by
 default) picks late objects over hitches. Compiled pipelines are saved beside `hwder.exe`
 (`pipeline_cache.bin`, `pipeline_warmup.bin`) and prebuilt before the startup screen on later
-launches, so this fades as you play. Setup keeps them when it rebuilds the game; deleting them is safe.
+launches, so this fades as you play. A new HWDER version, GPU or graphics driver starts the warmup list
+over (the driver cache may still help). Deleting both files is safe.
 
 **Advanced** also holds the Data folder choice, Check requirements, Open game folder and the Details log.
 Next time, Setup opens straight on **Play**. More detail: [Windows setup](docs/windows-setup.md).
