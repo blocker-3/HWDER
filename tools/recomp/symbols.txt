@@ -23,6 +23,12 @@
 0x1000c21de0  g_GfxGlobals             data        # ptr; [[+64]+88] is the window target passed to GfxDevice_PresentWindow
 0x100000fd70  game_sincosf             func
 
+# ---- stage props (runtime/src/game/stage_props.cpp)
+0x100044660c  StageLod_Update          func hook   # (stage renderer): per-layer draw distances, docked crowd rule zeroes layer 1; runtime/src/game/stage_props.cpp
+0x10004555d0  StageLod_ScaleFlag       func        # bit 0 of a mode word; doubles the crowd count (the original then also zeroes layer 1)
+0x10003cf0e8  Perf_IsHandheld          func        # 1 for performance configuration 0x10001 (handheld), 0 for 0x20003/0x20004 (docked)
+0x1000c2ba80  StageLod_CrowdOwner      data        # **ptr: object whose +88 is the crowd count n the rule compares with 60
+
 # ---- frame loop (docs/frame-loop.md)
 0x10002ad35c  MainThread_FrameLoop     func        # per-frame function on MainThread
 0x10002acb54  Battle_Tick              func hook   # (scene x19, frame state x20, gfx device x21): the whole battle tick; runtime/src/interp/interp_draw.cpp

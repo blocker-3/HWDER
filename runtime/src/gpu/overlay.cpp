@@ -554,6 +554,9 @@ static void tab_graphics(bool& changed) {
     if (ImGui::SliderInt("Sharpening", &v.sharpen, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp)) changed = true;
     help("Contrast-adaptive sharpening of the 3D picture (0% = off). Counters the game's soft look,\n"
          "and the softening from FXAA. The HUD is not affected.");
+    if (ImGui::Checkbox("Keep props in big battles", &v.keep_crowd_props)) changed = true;
+    help("Docked Switch rule: when more than 60 characters are near, the game stops drawing small stage props\n"
+         "(fences, rubble). On keeps them drawn; off matches the original.");
 
     section("Shaders");
     settings::Debug& d = settings::debug();
