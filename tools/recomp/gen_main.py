@@ -113,6 +113,10 @@ def main():
                 if st in hooks:
                     body = body.replace(f"void {fn_name(st)}(Ctx* restrict c) {{",
                                         f"void {fn_name(st)}_orig(Ctx* restrict c) {{", 1)
+                    # A runtime without this hook (a worktree on an older branch building against this
+                    # generated dir) still links: f_<addr> falls back to the original body.
+                    body += (f"void {fn_name(st)}_default(Ctx* restrict c) {{ HW_MUSTTAIL return {fn_name(st)}_orig(c); }}\n"
+                             f'#pragma comment(linker, "/alternatename:{fn_name(st)}={fn_name(st)}_default")\n')
             # Per-file prototypes (not a global header) so unrelated changes don't rebuild everything.
             protos = sorted(set(re.findall(r"\bf_[0-9a-f]+\b", body)))
             text = ('#include "hwder/cpu.h"\n#include "hwder/dispatch.h"\n'
