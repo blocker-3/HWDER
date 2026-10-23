@@ -56,6 +56,10 @@ def require_baseline(root, contains=git_contains):
     return commit
 
 
+def git_text(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
 def project_file(name):
     p = PurePosixPath(name)
     # Every top-level file is ours (a dropped top file such as play-local.bat must not ship again).
@@ -117,6 +121,9 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
         if not make_dist.safe_member(name) or (root/name).is_symlink():
             raise ValueError("Private/nonregular project overlay: "+name)
         files[name] = (root/name).read_bytes()
+    # The kit has no .git, so tools/version.cmake reads the build's version stamp from here.
+    files["version.txt"] = (git_text(root, "describe", "--tags", "--match", "v*", "--always") + "\n"
+                            + git_text(root, "rev-parse", "--short=10", "HEAD") + "\n").encode()
     members = {"source/"+n:b for n,b in files.items()}
     members["source/source-manifest.json"] = json.dumps({n:digest(b) for n,b in files.items()},indent=2).encode()
     members["HWDER Setup.exe"] = data  # The ONLY binary exception. Never a generic *.exe allowance.

@@ -243,7 +243,9 @@ def installed_paths(data, exe):
         if any(c in value for c in "\r\n\0") or len((key + "=" + value).encode("utf-8")) >= 2046:
             raise ValueError("The selected path cannot be stored in the game's settings. Choose a shorter path.")
     settings = exe.parent / "hwder_settings.ini"
-    original = settings.read_bytes() if settings.exists() else b"version=2\n"
+    # A new file carries the game's first-run defaults: without a face_labels line the game treats the file
+    # as an older install and keeps face buttons by position.
+    original = settings.read_bytes() if settings.exists() else b"version=2\nface_labels=1\n"
     # Runtime reads flat key=value records. Preserve all unrelated bytes, including line endings.
     result = []
     seen = set()
@@ -310,7 +312,8 @@ def launch(data, popen=subprocess.Popen, managed=None, identity=process_identity
         for name in list(env):
             if name.startswith("HWDER_"):
                 del env[name]
-        env.update(HWDER_NSP=str(nsp), HWDER_KEYS=str(keys))
+        # The paths are in hwder_settings.ini (installed_paths). HWDER_NSP/HWDER_KEYS would make the startup
+        # screen warn that they override the picked files.
         if managed is not None:
             windows=Path(os.environ.get("SystemRoot",r"C:\Windows"))
             env["PATH"]=os.pathsep.join(map(str,(windows/"System32",windows)))

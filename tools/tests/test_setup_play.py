@@ -105,7 +105,8 @@ class Play(unittest.TestCase):
         b.launch(self.data, lambda *a, **k: calls.append(k) or SimpleNamespace(pid=54321), identity=identity)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["cwd"], self.exe.parent)
-        self.assertEqual(calls[0]["env"]["HWDER_NSP"], str(self.nsp))
+        self.assertNotIn("HWDER_NSP", calls[0]["env"])
+        self.assertIn(b"face_labels=1", (self.exe.parent / "hwder_settings.ini").read_bytes())
         self.assertEqual(b.first_run.read_json(self.data / "game-running.json"), {})
         self.assertIn('"type": "launched"', self.output.getvalue())
 

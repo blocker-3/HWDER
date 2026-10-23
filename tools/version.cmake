@@ -3,9 +3,19 @@
 # build does not recompile version.cpp.
 set(version "unknown")
 set(commit "unknown")
-find_package(Git QUIET)
+# A setup kit has no .git; make_setup_dist.py writes version.txt (version, then commit) into its source.
+if(EXISTS "${SRC}/version.txt")
+    file(STRINGS "${SRC}/version.txt" stamp LIMIT_COUNT 2)
+    list(LENGTH stamp n)
+    if(n EQUAL 2)
+        list(GET stamp 0 version)
+        list(GET stamp 1 commit)
+    endif()
+else()
+    find_package(Git QUIET)
+endif()
 if(GIT_FOUND)
-    execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty WORKING_DIRECTORY ${SRC}
+    execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags --match "v*" --always --dirty WORKING_DIRECTORY ${SRC}
                     OUTPUT_VARIABLE out RESULT_VARIABLE rc OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(rc EQUAL 0 AND out)
         set(version "${out}")
