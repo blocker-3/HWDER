@@ -253,6 +253,7 @@ void Translator::store_attribute(u32 addr, Id v) {
             b.capability(spv::CapabilityClipDistance);
             clip_distance = io_var(spv::StorageClassOutput, b.t_array(t_f32, 8), -1, spv::BuiltInClipDistance);
         }
+        if (pillar_clip_only) return;  // after an exit already declared the two pillarbox slots (see emit_epilogue)
         b.store(component_ptr(b, spv::StorageClassOutput, t_f32, clip_distance, u((addr - 0x2C0) >> 2)), bc_f(v));
         return;
     }
@@ -387,6 +388,22 @@ void Translator::emit_epilogue() {
             Id sx = b.op(spv::OpSelect, t_f32, {ortho, sxo, sxp});
             Id x = b.op(spv::OpCompositeExtract, t_f32, {p, 0});
             p = b.op(spv::OpCompositeInsert, t_v4f, {fop(spv::OpFMul, t_f32, {x, sx}), p, 0});
+            // A pillarboxed (squeezed) 2D draw must stay inside the centred 16:9 area: the guest relies on its
+            // 16:9 clip volume to hide what lies beyond the screen edge (the menus' parchment is wider than the
+            // screen), which the squeeze would otherwise pull into the side bands. Two clip distances keep the
+            // unsqueezed |x| <= w; any other vertex writes 1 (never clipped).
+            Id gate = b.op(spv::OpLogicalAnd, t_bool, {ortho, b.op(spv::OpFOrdLessThan, t_bool, {sxo, fc(1.0f)})});
+            Id d0 = b.op(spv::OpSelect, t_f32, {gate, fop(spv::OpFSub, t_f32, {w, x}), fc(1.0f)});
+            Id d1 = b.op(spv::OpSelect, t_f32, {gate, fop(spv::OpFAdd, t_f32, {w, x}), fc(1.0f)});
+            u32 first = 6;  // the guest's own clip distances (if any) keep slots 0..5
+            if (!clip_distance) {
+                b.capability(spv::CapabilityClipDistance);
+                clip_distance = io_var(spv::StorageClassOutput, b.t_array(t_f32, 2), -1, spv::BuiltInClipDistance);
+                pillar_clip_only = true;
+            }
+            if (pillar_clip_only) first = 0;
+            b.store(component_ptr(b, spv::StorageClassOutput, t_f32, clip_distance, u(first)), d0);
+            b.store(component_ptr(b, spv::StorageClassOutput, t_f32, clip_distance, u(first + 1)), d1);
         }
         if (opt.flip_y) {
             Id y = b.op(spv::OpCompositeExtract, t_f32, {p, 1});
