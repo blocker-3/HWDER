@@ -642,10 +642,11 @@ static void tab_input(bool& changed) {
 
     section("Players");
     {
-        static const char* kb_names[] = {"Off", "Automatic", "Player 1", "Player 2", "Player 3", "Player 4"};
-        int cur = std::clamp(in.keyboard_slot + 1, 0, 5);
+        // The game has two players; the host keeps more slots, but only these two are offered.
+        static const char* kb_names[] = {"Off", "Automatic", "Player 1", "Player 2"};
+        int cur = std::clamp(in.keyboard_slot + 1, 0, 3);
         if (ImGui::BeginCombo("Keyboard plays as", kb_names[cur])) {
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < 4; i++) {
                 if (ImGui::Selectable(kb_names[i], i == cur)) {
                     in.keyboard_slot = i - 1;
                     changed = true;
@@ -653,9 +654,9 @@ static void tab_input(bool& changed) {
             }
             ImGui::EndCombo();
         }
-        help("Controllers take players 1 to 4 in the order they connect. Automatic: the keyboard is the first player\n"
+        help("Controllers take players 1 and 2 in the order they connect. Automatic: the keyboard is the first player\n"
              "without a controller, so with one controller plugged in the keyboard is player 2 for local co-op.");
-        for (int i = 0; i < hid::kPlayerSlots; i++) {
+        for (int i = 0; i < 2; i++) {
             char name[96];
             hid::slot_name(i, name, sizeof(name));
             if (name[0]) ImGui::Text("Player %d: %s", i + 1, name);

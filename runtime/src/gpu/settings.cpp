@@ -101,7 +101,7 @@ void load() {
         else if (k == "invert_rx") g_input.invert_rx = atoi(v) != 0;
         else if (k == "invert_ry") g_input.invert_ry = atoi(v) != 0;
         else if (k == "motion") g_input.motion = atoi(v) != 0;
-        else if (k == "keyboard_slot") g_input.keyboard_slot = std::clamp(atoi(v), -1, 4);
+        else if (k == "keyboard_slot") g_input.keyboard_slot = std::clamp(atoi(v), -1, 2);  // off, automatic, player 1 or 2
         else if (k.rfind("remap_", 0) == 0) {
             for (int fam = 0; fam < kPadFamilies; fam++)
                 if (k == kFamilyKeys[fam]) parse_remap(v, g_input.remap[fam]);
