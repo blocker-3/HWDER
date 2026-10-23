@@ -230,7 +230,7 @@ def ready_status(data, managed=None, identity=process_identity):
         running = running_game(data, exe, identity) or discovered_game(exe)
         if not running:
             installed_paths(data, exe)
-    emit("ready_available", "Ready to play. Use Play now, or create a desktop shortcut for next time.", exe=str(exe), paths_ready="no" if running else "yes")
+    emit("ready_available", "Ready to play. Use Play now, or create a desktop shortcut or add it to Steam for next time.", exe=str(exe), paths_ready="no" if running else "yes")
     if running:
         emit("launched", "Game is running. Play will be available when it closes.", **running)
 

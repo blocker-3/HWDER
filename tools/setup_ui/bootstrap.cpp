@@ -1,6 +1,7 @@
 // Code-free native Windows setup shell. Links only Windows system libraries.
 // One screen, one primary button whose label follows the installation state
-// (Next / Install / Prepare / Retry / Play); everything else is under Advanced.
+// (Next / Install / Prepare / Retry / Play), and once ready the Desktop shortcut and Add to Steam;
+// everything else is under Advanced.
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
@@ -9,6 +10,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -19,14 +21,15 @@
 #include <algorithm>
 #include <memory>
 #include <cstring>
+#include "steam_shortcut.h"
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace fs=std::filesystem;
 constexpr UINT Event=WM_APP+1;
-enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced };
+enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced,Steam };
 enum class Step { Inputs,Install,Prepare,Retry,Play };
 constexpr int Width=866;
-HWND window,gameBox,keyBox,dataBox,statusBox,progress,progressBox,detailBox,primaryButton,shortcutButton,cancelButton,locationBox,titleBox,advancedButton;
+HWND window,gameBox,keyBox,dataBox,statusBox,progress,progressBox,detailBox,primaryButton,shortcutButton,steamButton,cancelButton,locationBox,titleBox,advancedButton;
 std::vector<HWND> advancedControls;
 HFONT font,titleFont;fs::path source,application;bool demo=false,busy=false,publishing=false,closeDeferred=false,ready=false,pendingReady=false,launching=false,committed=false,hadPublishPermission=false;
 bool advanced=false,detailsShown=false,toolsMissingHint=false,retryHint=false;
@@ -34,7 +37,7 @@ std::wstring activeData,certifiedData,activeAction,failureMessage,failureNext,st
 int stageStep=0,stageSteps=0;unsigned long long actionStart=0,buildStart=0;unsigned buildDone=0,buildTotal=0,buildFirst=0;
 bool demoFail=false;
 bool noPythonPreview=false;
-bool lifecycleRace=false;bool pathsReady=false;bool lifecyclePreview=false;fs::path installedExe,shortcutDirectory;HANDLE runningGame=nullptr;
+bool lifecycleRace=false;bool pathsReady=false;bool lifecyclePreview=false;fs::path installedExe,shortcutDirectory,steamDirectory;HANDLE runningGame=nullptr;
 unsigned generation=0;std::atomic<bool> cancelRequested{false};std::mutex handles;HANDLE currentJob=nullptr,inputWrite=nullptr;
 struct Notice{unsigned generation;std::wstring line;DWORD exit=STILL_ACTIVE;bool control=false;};
 std::wstring wide(const std::string& s){if(s.empty())return{};int n=MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),nullptr,0);std::wstring r(n,0);MultiByteToWideChar(CP_UTF8,0,s.data(),(int)s.size(),r.data(),n);return r;}
@@ -109,7 +112,7 @@ std::wstring hint(Step s){
     case Step::Install:return L"Private tools (Python, compiler, CMake, Ninja) go into your Data folder. Choose Install; downloads need your confirmation.";
     case Step::Prepare:return L"Everything is in place. Choose Prepare to build your game. This takes several minutes.";
     case Step::Retry:return L"Choose Retry to run preparation again. Nothing was changed.";
-    default:return L"Ready to play. Choose Play now, or create a Desktop shortcut under Advanced.";}
+    default:return L"Ready to play. Choose Play now. A Desktop shortcut or Add to Steam starts it later without Setup.";}
 }
 void layout(){
     bool details=advanced&&detailsShown;for(HWND h:advancedControls)ShowWindow(h,advanced?SW_SHOW:SW_HIDE);ShowWindow(detailBox,details?SW_SHOW:SW_HIDE);
@@ -122,7 +125,8 @@ void controls(){
     SetWindowTextW(primaryButton,label(s));
     EnableWindow(primaryButton,!busy&&!runningGame&&(s!=Step::Play||!demo||lifecyclePreview));
     SendMessageW(primaryButton,BM_SETSTYLE,BS_DEFPUSHBUTTON,TRUE);
-    EnableWindow(shortcutButton,!busy&&bound&&pathsReady&&(!demo||lifecyclePreview));
+    EnableWindow(shortcutButton,!busy&&bound&&pathsReady&&(!demo||lifecyclePreview));EnableWindow(steamButton,IsWindowEnabled(shortcutButton));
+    ShowWindow(shortcutButton,bound?SW_SHOW:SW_HIDE);ShowWindow(steamButton,bound?SW_SHOW:SW_HIDE);
     EnableWindow(GetDlgItem(window,OpenGame),!busy&&bound);SetWindowTextW(titleBox,bound?L"Ready to play":L"Let\u2019s get HWDER ready");
     SetWindowTextW(locationBox,bound?(L"Installed game: "+installedExe.wstring()+(pathsReady?L"\r\nThe installed game needs no setup kit; a Desktop shortcut starts it directly.":L"\r\nGame running. The installed shortcut handoff finishes when it closes.")).c_str():L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.");
     EnableWindow(cancelButton,busy&&!publishing&&!launching);
@@ -225,6 +229,48 @@ void shortcut(){
         link->SetPath(installedExe.c_str());link->SetDescription(L"HWDER \u2014 play your installed game");link->SetWorkingDirectory(installedExe.parent_path().c_str());
         IPersistFile* file=nullptr;if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))){auto path=(shortcutDirectory.empty()?fs::path(desktop):shortcutDirectory)/L"HWDER.lnk";if(fs::exists(path))state(L"A Desktop HWDER shortcut already exists; it was not overwritten.");else if(SUCCEEDED(file->Save(path.c_str(),TRUE)))state(L"Desktop HWDER shortcut created. It opens your installed game, even without this setup kit.");else state(L"Could not create a Desktop shortcut. Open the game folder to launch hwder.exe.");file->Release();}link->Release();}
 }
+bool processRunning(const wchar_t* name){
+    HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);if(snap==INVALID_HANDLE_VALUE)return false;
+    PROCESSENTRY32W entry{sizeof entry};bool found=false;for(BOOL more=Process32FirstW(snap,&entry);more&&!found;more=Process32NextW(snap,&entry))found=CompareStringOrdinal(entry.szExeFile,-1,name,-1,TRUE)==CSTR_EQUAL;
+    CloseHandle(snap);return found;
+}
+// The Steam account to add to: the most recent login in config/loginusers.vdf, else the only userdata account.
+std::wstring steamAccount(const fs::path& root){
+    std::ifstream in(root/L"config"/L"loginusers.vdf",std::ios::binary);std::string text((std::istreambuf_iterator<char>(in)),{});
+    std::vector<std::string> tokens;for(size_t at=text.find('"');at!=text.npos;){size_t end=text.find('"',at+1);if(end==text.npos)break;tokens.push_back(text.substr(at+1,end-at-1));at=text.find('"',end+1);}
+    std::string id;std::error_code e;
+    for(size_t i=0;i+1<tokens.size();++i){
+        if(tokens[i].size()==17&&tokens[i].find_first_not_of("0123456789")==std::string::npos)id=tokens[i];
+        else if(!id.empty()&&_stricmp(tokens[i].c_str(),"MostRecent")==0&&tokens[i+1]=="1"){auto account=std::to_wstring(std::stoull(id)-76561197960265728ull);if(fs::is_directory(root/L"userdata"/account,e))return account;}
+    }
+    std::vector<std::wstring> accounts;for(auto& entry:fs::directory_iterator(root/L"userdata",e)){auto name=entry.path().filename().wstring();if(entry.is_directory(e)&&name!=L"0"&&name.find_first_not_of(L"0123456789")==name.npos)accounts.push_back(name);}
+    return accounts.size()==1?accounts[0]:std::wstring();
+}
+// Adds the installed game to Steam's non-Steam shortcuts (steam_shortcut.h). Steam keeps the list in memory and
+// writes it back when it closes, so this refuses while Steam runs. The previous list is kept as shortcuts.vdf.hwder-backup.
+void addToSteam(){
+    if(!ready||!pathsReady||certifiedData!=text(dataBox)||installedExe.empty())return;
+    fs::path root=steamDirectory;
+    if(root.empty()){
+        wchar_t found[32768];DWORD bytes=sizeof found;std::error_code e;
+        if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam",L"SteamPath",RRF_RT_REG_SZ,nullptr,found,&bytes)!=ERROR_SUCCESS||!fs::is_directory(fs::path(found),e)){state(L"Steam was not found on this PC. Install Steam and sign in once, then try again.");return;}
+        root=fs::path(found).make_preferred();
+        if(processRunning(L"steam.exe")){state(L"Close Steam first (Steam menu, Exit), then choose Add to Steam again. Steam rewrites its game list when it closes.");return;}
+    }
+    auto account=steamAccount(root);if(account.empty()){state(L"Could not tell which Steam account to use. Sign in to Steam once, close it, then try again.");return;}
+    auto file=root/L"userdata"/account/L"config"/L"shortcuts.vdf";std::error_code e;
+    std::string existing;if(fs::exists(file,e)){std::ifstream in(file,std::ios::binary);if(!in){state(L"Steam's game list could not be read, so it was left unchanged.");return;}existing.assign(std::istreambuf_iterator<char>(in),{});}
+    std::string out;switch(steam::add(existing,{"HWDER",utf8(installedExe.wstring()),utf8(installedExe.parent_path().wstring()),utf8(installedExe.wstring())},out)){
+    case steam::Added::AlreadyThere:state(L"HWDER is already in your Steam library.");return;
+    case steam::Added::Unreadable:state(L"Steam's game list is in a format Setup does not know, so it was left unchanged.");return;
+    default:break;}
+    fs::create_directories(file.parent_path(),e);
+    if(!existing.empty()){fs::copy_file(file,fs::path(file)+=L".hwder-backup",fs::copy_options::overwrite_existing,e);if(e){state(L"Could not back up Steam's game list, so it was left unchanged.");return;}}
+    auto temp=fs::path(file)+=L".hwder-new";
+    {std::ofstream o(temp,std::ios::binary|std::ios::trunc);o.write(out.data(),(std::streamsize)out.size());if(!o){state(L"Could not write Steam's game list; it was left unchanged.");return;}}
+    if(!MoveFileExW(temp.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){fs::remove(temp,e);state(L"Could not write Steam's game list; it was left unchanged.");return;}
+    state(L"Added to Steam as a non-Steam game. Start Steam and HWDER is in your library.");
+}
 HWND control(const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int w,int h,int id=0,bool hidden=false){HWND c=CreateWindowExW(cls==std::wstring(L"EDIT")?WS_EX_CLIENTEDGE:0,cls,label,WS_CHILD|WS_VISIBLE|style,x,y,w,h,window,(HMENU)(INT_PTR)id,GetModuleHandleW(nullptr),nullptr);SendMessageW(c,WM_SETFONT,(WPARAM)font,TRUE);if(hidden)advancedControls.push_back(c);return c;}
 void primary(){
     switch(step()){
@@ -243,15 +289,17 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         progressBox=control(L"STATIC",L"",0,28,242,790,22);
         progress=control(PROGRESS_CLASSW,L"",PBS_MARQUEE,28,268,790,12);
         primaryButton=control(L"BUTTON",L"Next",BS_DEFPUSHBUTTON,28,296,170,40,Primary);cancelButton=control(L"BUTTON",L"Cancel",BS_PUSHBUTTON,210,298,90,36,Cancel);advancedButton=control(L"BUTTON",L"Advanced \u25BE",BS_PUSHBUTTON,690,298,132,36,Advanced);
+        // Shown once the game is ready (controls()), in the room Cancel's row leaves free.
+        shortcutButton=control(L"BUTTON",L"Create desktop shortcut",BS_PUSHBUTTON,312,298,200,36,Shortcut);steamButton=control(L"BUTTON",L"Add to Steam",BS_PUSHBUTTON,524,298,140,36,Steam);
         // Advanced: hidden until expanded.
         control(L"STATIC",L"Data folder",0,28,360,180,24,0,true);dataBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,356,505,28,Data,true);control(L"BUTTON",L"Choose\u2026",BS_PUSHBUTTON,727,356,95,28,BrowseData,true);
         locationBox=control(L"STATIC",L"",0,28,392,790,42,0,true);
-        control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,438,170,36,Check,true);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,210,438,190,36,Components,true);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,412,438,150,36,OpenGame,true);shortcutButton=control(L"BUTTON",L"Create Desktop shortcut",BS_PUSHBUTTON,574,438,200,36,Shortcut,true);
+        control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,438,170,36,Check,true);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,210,438,190,36,Components,true);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,412,438,150,36,OpenGame,true);
         control(L"BUTTON",L"Open data folder",BS_PUSHBUTTON,28,482,150,36,ToolsSite,true);control(L"BUTTON",L"About tools",BS_PUSHBUTTON,190,482,120,36,PythonSite,true);control(L"BUTTON",L"Details",BS_AUTOCHECKBOX,322,486,90,30,Details,true);
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,522,790,185);
         statusBox=control(L"STATIC",L"",0,28,186,790,54); // created last: the tests read the final STATIC as the status line
         layout();refresh();return 0;}
-    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components)run(L"tools");else if(id==Shortcut)shortcut();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
+    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components)run(L"tools");else if(id==Shortcut)shortcut();else if(id==Steam)addToSteam();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
         else if(id==Advanced){advanced=!advanced;layout();}
         else if(id==Details){detailsShown=SendMessageW(GetDlgItem(h,Details),BM_GETCHECK,0,0)==BST_CHECKED;layout();}
         else if(id==PythonSite){MessageBoxW(h,L"HWDER uses its own pinned Python, LLVM-MinGW, CMake and Ninja, plus cryptography, lz4, cffi and pycparser.\n\nInstall is the only action that downloads. Prepare, Check and Play only verify existing tools.\n\nTools and full license notices live in the Data folder. No global PATH, registry or administrator installation is needed.",L"About private tools",MB_OK|MB_ICONINFORMATION);}
@@ -281,7 +329,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int){
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED);CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);INITCOMMONCONTROLSEX cc{sizeof cc,ICC_PROGRESS_CLASS};InitCommonControlsEx(&cc);
     wchar_t exe[32768];GetModuleFileNameW(nullptr,exe,32768);application=exe;source=application.parent_path()/L"source";if(!fs::is_regular_file(source/L"tools/setup_bridge.py")){source=application.parent_path();for(int n=0;n<4&&!fs::is_regular_file(source/L"tools/setup_bridge.py");++n)source=source.parent_path();}
     if(!fs::is_regular_file(source/L"tools/setup_bridge.py")||!fs::is_regular_file(source/L"tools/managed_toolchain.json")||!fs::is_regular_file(source/L"tools/setup_ui/install_private_python.ps1")){MessageBoxW(nullptr,L"Keep HWDER Setup.exe beside its complete source folder. Extract the whole setup kit first.",L"Setup files missing",MB_OK|MB_ICONERROR);return 1;}
-    int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);std::wstring selected;bool autoPlay=false;for(int i=1;i<argc;++i){if(std::wstring(argv[i])==L"--demo")demo=true;else if(std::wstring(argv[i])==L"--demo-lifecycle-race"){demo=true;lifecyclePreview=true;lifecycleRace=true;}else if(std::wstring(argv[i])==L"--demo-lifecycle"){demo=true;lifecyclePreview=true;}else if(std::wstring(argv[i])==L"--shortcut-directory"&&i+1<argc)shortcutDirectory=argv[++i];else if(std::wstring(argv[i])==L"--demo-no-python"){demo=true;noPythonPreview=true;}else if(std::wstring(argv[i])==L"--demo-fail"){demo=true;demoFail=true;}else if(std::wstring(argv[i])==L"--play")autoPlay=true;else if(std::wstring(argv[i])==L"--data"&&i+1<argc)selected=argv[++i];else if(std::wstring(argv[i])==L"--advanced")advanced=true;}LocalFree(argv);if(!lifecyclePreview)shortcutDirectory.clear();
+    int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);std::wstring selected;bool autoPlay=false;for(int i=1;i<argc;++i){if(std::wstring(argv[i])==L"--demo")demo=true;else if(std::wstring(argv[i])==L"--demo-lifecycle-race"){demo=true;lifecyclePreview=true;lifecycleRace=true;}else if(std::wstring(argv[i])==L"--demo-lifecycle"){demo=true;lifecyclePreview=true;}else if(std::wstring(argv[i])==L"--shortcut-directory"&&i+1<argc)shortcutDirectory=argv[++i];else if(std::wstring(argv[i])==L"--steam-directory"&&i+1<argc)steamDirectory=argv[++i];else if(std::wstring(argv[i])==L"--demo-no-python"){demo=true;noPythonPreview=true;}else if(std::wstring(argv[i])==L"--demo-fail"){demo=true;demoFail=true;}else if(std::wstring(argv[i])==L"--play")autoPlay=true;else if(std::wstring(argv[i])==L"--data"&&i+1<argc)selected=argv[++i];else if(std::wstring(argv[i])==L"--advanced")advanced=true;}LocalFree(argv);if(!lifecyclePreview){shortcutDirectory.clear();steamDirectory.clear();}
     // Remembered Data folder (default Local AppData\HWDER), then the paths bound to the prepared game, then the last picked paths.
     std::wstring chosen=demo?std::wstring():readJson(prefsPath());
     if(selected.empty()){auto remembered=field(chosen,L"data");std::error_code e;if(!remembered.empty()&&fs::is_directory(fs::path(remembered),e))selected=remembered;}

@@ -36,8 +36,8 @@ You do not need to clone this repository or install any developer tools. Windows
    it to C and compiles `hwder.exe` on your PC. It shows the step (k of 6) and the time remaining; expect
    several minutes and several GB of disk space.
 6. **Play** starts the game. The first launch shows a startup screen that checks your game and keys.
-   Under **Advanced** you can create a desktop shortcut; after that you can start the game from the
-   shortcut (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
+   Once it is ready, **Create desktop shortcut** and **Add to Steam** (a non-Steam game; close Steam
+   first) let you start the game from the shortcut, from Steam (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
    `prod.keys` where they are: the game reads them every time it starts.
 
 **The first minutes on a fresh install can hitch.** Each graphics pipeline is compiled the first time

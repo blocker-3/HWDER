@@ -9,6 +9,8 @@ EXE = Path(sys.argv[1]).resolve()
 assert EXE.is_relative_to(ROOT.resolve()) and EXE.is_file()
 shortcut_dir = OUT / "desktop-fixture"
 shortcut_dir.mkdir()
+steam_dir = OUT / "steam-fixture"  # synthetic Steam root: one account, no shortcut list yet
+(steam_dir / "userdata" / "12345" / "config").mkdir(parents=True)
 observed = []
 
 
@@ -17,7 +19,7 @@ def lifecycle(name, mode="--demo-lifecycle"):
     system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     env = {**os.environ, "PATH": os.pathsep.join(map(str, (system / "System32", system)))}
     child = subprocess.Popen([str(EXE), mode, "--data", str(data),
-                              "--shortcut-directory", str(shortcut_dir)], env=env)
+                              "--shortcut-directory", str(shortcut_dir), "--steam-directory", str(steam_dir)], env=env)
     active.append(child)
     wait(lambda: any(classname(h) == "HWDERSetupPrototype" for h in windows(child.pid)))
     hwnd = next(h for h in windows(child.pid) if classname(h) == "HWDERSetupPrototype")
@@ -61,6 +63,15 @@ try:
     require(Path(shortcut["target"]).resolve() == Path(record["exe"]).resolve(), "Shortcut targets source kit rather than installed entry")
     require(Path(shortcut["cwd"]).resolve() == Path(record["exe"]).parent.resolve() and shortcut["arguments"] == "", "Shortcut cwd/arguments depend on kit")
     observed.append("Quick Ready enables explicit installed path/folder/shortcut; launch disables duplicates; owned child exit restores Play")
+    require(enabled(h, 118) and u.IsWindowVisible(u.GetDlgItem(h, 118)), "Ready has no visible Add to Steam")
+    u.SendMessageW(h, 0x111, 118, 0)
+    vdf = steam_dir / "userdata" / "12345" / "config" / "shortcuts.vdf"
+    require(vdf.is_file() and ('"' + str(Path(record["exe"]))).encode() in vdf.read_bytes(), "Add to Steam wrote no shortcut")
+    require("Added to Steam" in status(h), "Add to Steam reported no result")
+    before = vdf.read_bytes()
+    u.SendMessageW(h, 0x111, 118, 0)
+    require(vdf.read_bytes() == before and "already" in status(h), "Add to Steam duplicated the shortcut")
+    observed.append("Add to Steam writes one non-Steam shortcut for the installed exe and refuses a duplicate")
     click(h, 111)
     wait(lambda: json.loads((data / "preview-child.json").read_text())["pid"] != record["pid"])
     second = json.loads((data / "preview-child.json").read_text())
