@@ -46,7 +46,9 @@ class ApmSession : public SimpleService {
 public:
     ApmSession() : SimpleService("apm:ISession") {
         nop({0});
-        ret<u32>(1, 0x00020003);  // GetPerformanceConfiguration
+        // GetPerformanceConfiguration: docked (0x00020003). The game picks docked-only behaviour from it, such as the
+        // crowd rule that hides small stage props (Perf_IsHandheld; kept drawn by game/stage_props.cpp).
+        ret<u32>(1, 0x00020003);
         nop({2});
     }
 };
