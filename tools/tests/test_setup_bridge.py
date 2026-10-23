@@ -56,6 +56,15 @@ class Bridge(unittest.TestCase):
         for name, version in bridge.PINS.items():
             self.assertIn(name + "==" + version, pins)
 
+    def test_avx2_check_trusts_only_new_windows_and_maps_to_a_sentence(self):
+        bridge.require_avx2(present=lambda feature: True, build=22631)
+        bridge.require_avx2(present=lambda feature: False, build=17763)  # pre-2004 Windows cannot report AVX2
+        with self.assertRaisesRegex(ValueError, "CPU lacks AVX2"):
+            bridge.require_avx2(present=lambda feature: feature != 40, build=19041)
+        message, step = bridge.recovery("CPU lacks AVX2")
+        self.assertIn("AVX2", message)
+        self.assertEqual(step, "close")
+
     def test_unknown_existing_environment_refused_before_installer(self):
         (self.data / "setup-python").mkdir()
         with self.assertRaisesRegex(ValueError, "not owned"):
