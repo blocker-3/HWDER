@@ -1077,7 +1077,7 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
         apply_theme(scale);
         g_style_scale = scale;
     }
-    if (g_visible) feed_gamepad();
+    if (g_visible || g_screen) feed_gamepad();  // the menu, or a full-window screen such as the startup one
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
