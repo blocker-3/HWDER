@@ -58,7 +58,8 @@ def require_baseline(root, contains=git_contains):
 
 def project_file(name):
     p = PurePosixPath(name)
-    return name in make_dist.TOP_FILES or name in make_dist.PUBLIC_SCRIPTS or p.parts[0] in PROJECT_ROOTS
+    # Every top-level file is ours (a dropped top file such as play-local.bat must not ship again).
+    return len(p.parts) == 1 or name in make_dist.TOP_FILES or name in make_dist.PUBLIC_SCRIPTS or p.parts[0] in PROJECT_ROOTS
 
 
 def verified_source(path):
