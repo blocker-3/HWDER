@@ -28,4 +28,4 @@ Add every new file to `runtime/src/gpu/vk/sources.cmake`.
 ## Verification per commit
 1. `python tools\build.py` succeeds.
 2. `python tools\tests\run_synthetic.py --jobs 2` passes.
-3. After the final commit (not every one): `run-baseline.ps1` with the output folder `runs\split-<short sha>` and `python tools\compare_runs.py runs\baseline-7a4fee3 runs\split-<sha>`: the per-frame draw-count series must match the baseline for the whole run, and the log must have no CRASH/fatal/TERMINATE lines.
+3. After the final commit (not every one): a local autoplay baseline run (its launcher is machine-specific and not in the repository) with the output folder `runs\split-<short sha>` and `python tools\compare_runs.py runs\baseline-7a4fee3 runs\split-<sha>`: the per-frame draw-count series must match the baseline for the whole run, and the log must have no CRASH/fatal/TERMINATE lines.

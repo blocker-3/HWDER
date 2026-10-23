@@ -39,3 +39,10 @@ shots/
 pipeline_warmup.bin
 pipeline_catalog.bin
 runs/
+
+# local launchers (machine-specific game paths); users start Setup or hwder.exe
+*.bat
+*.ps1
+!tools/setup_ui/install_private_python.ps1
+!tools/tests/test_private_python.ps1
+!tools/screenshot.ps1

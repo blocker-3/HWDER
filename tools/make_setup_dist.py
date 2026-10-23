@@ -132,13 +132,17 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
                 raise ValueError("Bootstrap runtime notice hash mismatch")
             members[name]=payload
     members["START HERE.txt"] = (
-        "HWDER setup prototype\n\nExtract the complete kit into a permanent writable application folder, then open HWDER Setup.exe.\n"
-        "The window opens without Python. Its one main button leads through Next (pick your NSP and prod.keys),\n"
-        "Install (verified private tools into your Data folder), Prepare (build your game) and Play. Advanced holds the rest.\n"
-        "Your own NSP and keys remain in place. No game, generated C, key file, Python package or compiler is bundled.\n"
-        "Only confirm Install after reviewing its network/private-environment consent. No system installation is needed.\n"
-        "Preparation can take minutes and several GB. Your data folder keeps saves/settings separately from this kit.\n"
-        "This local unsigned prototype is not published or a claim of clean-machine support.\n"
+        "HWDER setup (Windows 10/11 x64)\n\nExtract the complete zip into a folder you will keep, then open HWDER Setup.exe.\n"
+        "It is not code-signed yet: if Windows shows \"Windows protected your PC\", choose More info > Run anyway.\n\n"
+        "One main button leads through the steps:\n"
+        "  Next     pick your game .nsp and prod.keys, both from your own Switch and your own copy of the game.\n"
+        "           They stay where they are; keys are never copied.\n"
+        "  Install  downloads pinned build tools (checked by SHA-256) into your Data folder after you confirm.\n"
+        "           No administrator rights or system installation.\n"
+        "  Prepare  checks your dump and builds the game on this PC. Several minutes and several GB of disk.\n"
+        "  Play     starts the game. Advanced > Create Desktop shortcut lets you start it without Setup.\n\n"
+        "No game, generated C, key file, Python package or compiler is bundled. Your Data folder keeps\n"
+        "saves and settings separately from this kit. Keep your .nsp and prod.keys where you picked them.\n"
     ).encode()
     manifest = {n:digest(b) for n,b in members.items()}
     members["setup-manifest.json"] = json.dumps({"schema":1,"bootstrap":cert,"baseline":baseline,"files":manifest},indent=2).encode()

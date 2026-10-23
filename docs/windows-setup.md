@@ -1,6 +1,6 @@
-# Private Windows setup prototype
+# Windows setup (HWDER Setup.exe)
 
-IMPLEMENTED / PENDING REVIEW OR MERGE (R5, 2026-10-21: one-button flow, see [windows-setup-ux.md](windows-setup-ux.md)). LOCAL WINDOWS ONLY; unsigned and unpublished. The native window opens before Python exists. It contains no game code. The user completed real R2 preparation and a normal game launch/close. This does not establish clean-machine coverage or graphics correctness.
+Merged (one-button flow, R7, 2026-10-22; see [windows-setup-ux.md](windows-setup-ux.md)). Windows only. Players get it in the setup zip `HWDER-setup-<version>.zip`. The exe is not code-signed, so Windows SmartScreen may ask for confirmation (More info > Run anyway). The native window opens before Python exists and contains no game code. Real preparation and gameplay have been completed on the maintainer's PC; other machines and graphics correctness are covered by playtests, not by this tool.
 
 Extract the complete kit and open **HWDER Setup.exe**, keeping its source folder beside it. One main button leads through Next, Install, Prepare and Play; the Data folder and every secondary action sit under **Advanced**. Choose the Data folder before installing tools. It contains private tools, generated/build stages and `play/` with the executable, settings and saves. The default is Local AppData/HWDER. Existing CLI users may select their older Local AppData/hwder/local-build-v1 root to reuse its data; the wizard does not migrate folders automatically.
 
@@ -26,4 +26,4 @@ Eight pinned download/extract transactions and private AES/LZ4 imports passed. A
 
 The full runtime/static-SDL synthetic-guest link probe is a separate NOT-A-GAME artifact, never executed or packaged; its result is tracked in the workspace owner note. It cannot certify a real game. The full public runtime/static-SDL link passed with the private compiler and only OS/UCRT imports; its synthetic executable was not run. Full clean-machine/real NSP preparation, gameplay, signing and distribution remain pending. Tests/evidence are retained under runs/managed-checks and runs/setup-preview-* in the unmerged worktree.
 
-The Ready/Play lifecycle repair is a separate unmerged candidate until its native fixture, binary/package identity and closed-kit update are reviewed. Do not replace an open setup or running game. An update at the existing canonical extracted-kit path retains its private-tool identity and existing prepared game; a different extraction path can select another tool identity. The setup never changes save_dir during launch-path repair.
+Do not replace an open setup or running game. An update at the existing canonical extracted-kit path retains its private-tool identity and existing prepared game; a different extraction path can select another tool identity. The setup never changes save_dir during launch-path repair.

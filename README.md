@@ -14,34 +14,39 @@ The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys`
 
 ---
 
-## Playing (source/setup kit)
+## Playing
 
-The native Windows setup prototype on this branch opens without installed Python or Visual
-Studio. See [the setup guide and validation limits](docs/windows-setup.md).
+You do not need to clone this repository or install any developer tools. Windows 10/11 x64 only.
 
-1. Extract the entire setup kit into a permanent writable folder and open **HWDER Setup.exe**.
-2. The window has one main button that tells you the next step. **Next** opens the file pickers for
-   your own supported `.nsp` and `prod.keys`; the paths are used in place and keys are never copied.
-3. **Install** downloads pinned private tools into the Data folder (default `%LOCALAPPDATA%\HWDER`)
-   after you confirm the download: Python, LLVM-MinGW, CMake, Ninja and four Python packages. No
-   administrator access, system installation or global PATH change; the kit itself bundles no toolchain.
-4. **Prepare** checks the tools and your dump, extracts, generates C and builds the game, showing the
-   step, file count and remaining time. **Play** starts the installed game; Setup can be closed.
-5. **Advanced** holds the Data folder, Check requirements (an optional diagnostic), Open game folder,
-   Create Desktop shortcut and the Details log. Next time, Setup opens straight on **Play**.
+1. **Download** the latest `HWDER-setup-<version>.zip` from this repository's **Releases** page (not the
+   green "Code > Download ZIP" button, which is source only).
+2. **Extract** the whole zip into a folder you will keep (for example `C:\Games\HWDER-setup`) and open
+   **HWDER Setup.exe**. The exe is not code-signed yet, so Windows may show "Windows protected your PC":
+   choose **More info > Run anyway**.
+3. **Next**: pick your game file (`.nsp`) and your `prod.keys`. Both must come from your own Switch and
+   your own copy of *Hyrule Warriors: Definitive Edition*: the game dumped from your cartridge or eShop
+   purchase, and the keys dumped from the same console with homebrew tools. HWDER ships neither and
+   cannot help you obtain them. The files are used where they are; keys are never copied.
+4. **Install**: after you confirm, Setup downloads pinned build tools (Python, LLVM-MinGW, CMake, Ninja
+   and four Python packages, each checked against a fixed SHA-256) from python.org, GitHub and PyPI into
+   its Data folder (default `%LOCALAPPDATA%\HWDER`). No administrator rights, system installs or PATH
+   changes.
+5. **Prepare**: Setup checks that your dump is the supported version, extracts the game code, translates
+   it to C and compiles `hwder.exe` on your PC. It shows the step (k of 6) and the time remaining; expect
+   several minutes and several GB of disk space.
+6. **Play** starts the game. The first launch shows a startup screen that checks your game and keys.
+   Under **Advanced** you can create a desktop shortcut; after that you can start the game from the
+   shortcut (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
+   `prod.keys` where they are: the game reads them every time it starts.
 
-Preparation validates the exact supported five-module SHA-256 profile, extracts ExeFS, generates
-C and compiles the complete native program locally. Verified stages can be reused. Allow several
-minutes and substantial disk space. Check, Prepare and Play never download missing tools.
+**Advanced** also holds the Data folder choice, Check requirements, Open game folder and the Details log.
+Next time, Setup opens straight on **Play**. More detail: [Windows setup](docs/windows-setup.md).
+Developers who want to build from a checkout: [local-build.md](docs/local-build.md).
 
-This local unsigned prototype has verified private tool installation, public compiler contracts
-and native setup controls. Real game preparation and clean-machine gameplay remain validation
-limits; this is not a published release. The legacy installed-Python/Visual Studio CLI remains
-available for developers in [local-build.md](docs/local-build.md).
-
-**The game-linked `hwder.exe`, PDB and generated C are private game-derived outputs. They are
-excluded from release packaging.** `tools/make_dist.py` creates a source/setup kit, with no game
-dump, keys, generated program, saves or private shader cache.
+**No game code or assets are in this repository or the release zip.** The game-linked `hwder.exe`,
+PDB and generated C are made on your machine from your own dump and are never packaged. `tools/make_dist.py`
+and `tools/make_setup_dist.py` create the source and setup kits, with no game dump, keys, generated
+program, saves or private shader cache.
 
 Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AVX2 CPU, and
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
