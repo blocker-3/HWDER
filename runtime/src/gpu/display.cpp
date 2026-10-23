@@ -246,8 +246,20 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL validation_callback(VkDebugUtilsMessageSev
 }
 void validation_report() { validation_summary(true); }
 
+// A player without a working Vulkan driver would otherwise see the game close with only a log line.
+[[noreturn]] static void no_vulkan(const char* why) {
+    MessageBoxW(nullptr,
+                L"HWDER could not start because no Vulkan 1.2 graphics driver was found.
+
+"
+                L"Install the latest driver for your graphics card (NVIDIA, AMD or Intel) and try again.",
+                L"HWDER", MB_OK | MB_ICONERROR);
+    hw_fatal(why);
+    ExitProcess(1);
+}
+
 static void init_vulkan() {
-    if (!hw_vk_load_global()) hw_fatal("vulkan-1.dll not found - a Vulkan capable GPU driver is required");
+    if (!hw_vk_load_global()) no_vulkan("vulkan-1.dll not found - a Vulkan capable GPU driver is required");
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "HWDER";
     app.apiVersion = VK_API_VERSION_1_3;
@@ -302,7 +314,7 @@ static void init_vulkan() {
             g_dev.props = p;
         }
     }
-    if (!g_dev.phys) hw_fatal("no Vulkan device");
+    if (!g_dev.phys) no_vulkan("no Vulkan device");
     vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &g_dev.mem);
     hw_log("vulkan: %s (api %u.%u)", g_dev.props.deviceName, VK_API_VERSION_MAJOR(g_dev.props.apiVersion),
            VK_API_VERSION_MINOR(g_dev.props.apiVersion));
