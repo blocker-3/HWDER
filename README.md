@@ -25,7 +25,8 @@ You do not need to clone this repository or install any developer tools. Windows
    choose **More info > Run anyway**.
 3. **Next**: pick your game file (`.nsp`) and your `prod.keys`. Both must come from your own Switch and
    your own copy of *Hyrule Warriors: Definitive Edition*: the game dumped from your cartridge or eShop
-   purchase, and the keys dumped from the same console with homebrew tools. HWDER ships neither and
+   purchase (the base game, without an update merged in), and the keys dumped from the same console
+   with homebrew tools. HWDER ships neither and
    cannot help you obtain them. The files are used where they are; keys are never copied.
 4. **Install**: after you confirm, Setup downloads pinned build tools (Python, LLVM-MinGW, CMake, Ninja
    and four Python packages, each checked against a fixed SHA-256) from python.org, GitHub and PyPI into
@@ -58,6 +59,8 @@ program, saves or private shader cache.
 
 Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AVX2 CPU, and
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
+There is no friendly error for the first two yet: without an AVX2 CPU or a working Vulkan driver the
+game closes at start, with the reason only in `hwder.log`.
 
 In game: **F1** opens the options overlay (internal resolution scale, unlocked resolution for
 ultrawide, vsync, borderless, anisotropic filtering, FPS counter, opt-in 60 Hz monitor switch, and
