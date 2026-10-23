@@ -496,9 +496,6 @@ static void tab_display(VkExtent2D extent, bool& changed) {
         g_swapchain_dirty = true;
     }
     help("Off = mailbox presentation (lowest latency).\nOn = classic vsync; use it if you see tearing.");
-    ImGui::TextWrapped("Game logic runs at a fixed 60 fps: the game advances one step per frame, so releasing frames faster "
-                       "speeds the whole game up. Presentation pacing is locked to 60 Hz; true 120/144 fps needs a "
-                       "game-side timestep change (on the roadmap).");
 
     section("Window");
     opt_borderless(changed);
