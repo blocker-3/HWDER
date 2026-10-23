@@ -23,7 +23,7 @@ bool has_files(const std::string& dir);  // any file anywhere under dir
 // copied to a backup folder beside it (<to>.bak-<date>-<time>). Nothing in `from` is changed. `report` says what
 // happened in plain words, on failure too.
 bool copy_saves(const std::string& from, const std::string& to, std::string& report);
-// Copies zmha.bin + zmhasd.bin from a folder outside the console layout into <root>0AE00096EA000\<user>,
+// Copies zmha.bin + zmhasd.bin from a folder outside the console layout into <root>/0100AE00096EA000/<user>,
 // with the same backup of what it replaces. Nothing in `from` is changed.
 bool import_save(const std::string& from, const std::string& root, std::string& report);
 // True when `dir` holds zmha.bin directly (an import source rather than a save root).
