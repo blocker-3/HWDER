@@ -2,9 +2,9 @@
 
 # Local first-run build
 
-`play-local.bat --nsp "your-game.nsp" --keys "your-prod.keys"` runs a complete user-local
-build and launches only after success. `python tools/first_run.py` with the same arguments
-prepares without launching. Environment variables `HWDER_NSP` and `HWDER_KEYS` can supply
+`python tools/first_run.py --launch --nsp "your-game.nsp" --keys "your-prod.keys"` runs a
+complete user-local build and launches only after success. Without `--launch` it prepares
+without launching. Environment variables `HWDER_NSP` and `HWDER_KEYS` can supply
 these paths. Keys are read from their original location; their contents are never copied or
 stored in a manifest. The game and keys must remain available on every launch.
 

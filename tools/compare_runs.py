@@ -1,4 +1,4 @@
-"""Compare two autoplay runs made by run-baseline.ps1 (runs/<name>/filmstrip).
+"""Compare two autoplay runs (runs/<name>/filmstrip, from HWDER_AUTOPLAY with the filmstrip and drawlog on).
 
 Each run folder holds filmstrip/index.txt ("<capture> <seconds> <tag> present=<n>" per captured
 frame), filmstrip/f_<capture>.raw (96x54 RGBA8 thumbnails) and filmstrip/drawlog.txt (one line per
