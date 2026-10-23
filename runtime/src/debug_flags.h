@@ -74,6 +74,7 @@ enum Id {
     ThreadDump,  // HWDER_THREAD_DUMP
     ThreadStats,  // HWDER_THREAD_STATS
     Update,  // HWDER_UPDATE
+    UsedMemMb,  // HWDER_USED_MEM_MB
     Validation,  // HWDER_VALIDATION
     ViTrace,  // HWDER_VI_TRACE
     VkDumpCbuf,  // HWDER_VK_DUMP_CBUF

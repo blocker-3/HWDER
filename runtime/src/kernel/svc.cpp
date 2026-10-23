@@ -6,6 +6,7 @@
 #include <random>
 
 #include "../service/ipc.h"
+#include "debug_flags.h"
 #include "kernel.h"
 #include "sync.h"
 #include "perf_stats.h"
@@ -13,6 +14,21 @@
 namespace kern {
 
 static u64 now_ticks() { return hw_cntvct(); }
+
+// UsedMemorySize: Horizon reports what the process has mapped (code images, stacks, heap). The game sizes its
+// heap at boot as TotalMemorySize - UsedMemorySize (nn::os::QueryMemoryInfo, then SetMemoryHeapSize), so every
+// byte over-reported here is a byte less of game heap. The five ExeFS images total 43.3 MiB plus the 1 MiB main
+// stack, about 45 MiB on a Switch; the old fixed figure of 256 MiB left the game a heap 208 MiB smaller than on
+// hardware (3028 instead of 3236 MiB). HWDER_USED_MEM_MB=<n> overrides the fixed part (256 = the old figure).
+static u64 used_memory() {
+    static const u64 fixed = [] {
+        int v = debug::value(debug::UsedMemMb, 48);
+        u64 mb = v > 0 ? (u64)v : 48;
+        hw_log("svc: UsedMemorySize reports %llu MiB fixed + heap", (unsigned long long)mb);
+        return mb << 20;
+    }();
+    return mem::heap_size() + fixed;
+}
 
 static void svc_query_memory(Ctx* c) {
     mem::Region r = mem::query(c->x[2]);
@@ -36,7 +52,7 @@ static Result get_info(u32 id0, Handle h, u64 id1, u64* out) {
     case 4: *out = mem::kHeapBase; return 0;
     case 5: *out = mem::kHeapMax; return 0;
     case 6: *out = g_process.total_memory; return 0;           // TotalMemorySize
-    case 7: *out = mem::heap_size() + 0x10000000; return 0;    // UsedMemorySize (approx.)
+    case 7: *out = used_memory(); return 0;                    // UsedMemorySize
     case 8: *out = 0; return 0;                                // DebuggerAttached
     case 9: *out = 0; return 0;                                // ResourceLimit (no handle)
     case 10: *out = 0; return 0;                               // IdleTickCount
@@ -54,7 +70,7 @@ static Result get_info(u32 id0, Handle h, u64 id1, u64* out) {
     case 18: *out = g_process.title_id; return 0;              // ProgramId
     case 20: *out = 0; return 0;                               // UserExceptionContextAddress
     case 21: *out = g_process.total_memory; return 0;          // TotalNonSystemMemorySize
-    case 22: *out = mem::heap_size() + 0x10000000; return 0;   // UsedNonSystemMemorySize
+    case 22: *out = used_memory(); return 0;                   // UsedNonSystemMemorySize
     case 23: *out = 1; return 0;                               // IsApplication
     case 0xF0000002: *out = now_ticks(); return 0;             // ThreadTickCount
     default:
@@ -75,6 +91,9 @@ void svc_dispatch(Ctx* c, u32 imm) {
     switch (imm) {
     case 0x01: {  // SetHeapSize(size) -> addr
         u64 addr = 0;
+        if (c->x[1] != mem::heap_size())
+            hw_log("svc: SetHeapSize %llu MiB (was %llu MiB)", (unsigned long long)(c->x[1] >> 20),
+                   (unsigned long long)(mem::heap_size() >> 20));
         r = mem::set_heap_size(c->x[1], &addr);
         c->x[1] = addr;
         break;
