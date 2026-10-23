@@ -1,4 +1,4 @@
-> The native setup prototype on this branch uses its own verified private tools; see [Windows setup](windows-setup.md). The commands below describe the retained developer CLI with installed Python/VS prerequisites. The CLI does not automatically install private tools or migrate its older cache root.
+> Players should use the setup zip and HWDER Setup.exe, which installs its own verified private tools; see [Windows setup](windows-setup.md). The commands below describe the retained developer CLI with installed Python/VS prerequisites. The CLI does not automatically install private tools or migrate its older cache root.
 
 # Local first-run build
 
