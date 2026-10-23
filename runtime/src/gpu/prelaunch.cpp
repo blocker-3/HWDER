@@ -247,7 +247,9 @@ void draw(VkExtent2D extent) {
     if (ImGui::Checkbox("Skip this screen next time (hold Shift at launch to show it again)", &settings::launch().skip_prelaunch))
         changed = true;
     ImGui::Separator();
-    overlay::key_hint("A / Enter", "Select");
+    char select_key[32];
+    snprintf(select_key, sizeof(select_key), "%s / Enter", overlay::accept_button_name());
+    overlay::key_hint(select_key, "Select");
     overlay::key_hint("D-pad", "Move");
     overlay::key_hint("Esc", "Quit");
     ImGui::TextDisabled("Settings save automatically");
