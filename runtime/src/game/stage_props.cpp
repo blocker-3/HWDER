@@ -37,11 +37,12 @@ HW_HOOK(StageLod_Update) {
     const u64 owner = c->x[0];
     bool restore = false;
     if (settings::video().keep_crowd_props) {
-        u64 crowd = game::deref(game::deref(HW_ADDR(StageLod_CrowdOwner)));
+        u64 holder = game::deref(HW_ADDR(StageLod_CrowdOwner));  // null until the battle's crowd object exists
+        u64 crowd = holder ? game::deref(holder) : 0;
         u32 n = crowd ? game::read<u32>(crowd + 88) : 0;
-        bool doubled = guest_flag(c, f_StageLod_ScaleFlag) != 0;
+        bool doubled = guest_flag(c, f_StageLod_ScaleFlag) != 0;  // the original zeroes layer 1 then anyway
         bool handheld = (guest_flag(c, f_Perf_IsHandheld) & 1) != 0;
-        restore = !handheld && !doubled && (n << (doubled ? 1 : 0)) > kCrowdLimit;
+        restore = !handheld && !doubled && n > kCrowdLimit;
     }
     HW_ORIG(StageLod_Update)(c);
     if (!restore || game::read<float>(owner + 224) != 0.0f) return;
