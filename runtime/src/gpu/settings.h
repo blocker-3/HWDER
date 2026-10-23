@@ -48,7 +48,7 @@ struct Input {
     bool rumble = true;
     int rumble_strength = 100;   // percent
     bool background_pad = true;  // read the controller while another window has focus
-    bool face_labels = false;    // face buttons by printed label (Xbox A = Switch A) instead of by position
+    bool face_labels = true;     // face buttons by printed label (Xbox A = Switch A) instead of by position
     int deadzone_l = 24;         // radial stick deadzones, percent (XInput's defaults)
     int deadzone_r = 27;
     bool invert_lx = false, invert_ly = false, invert_rx = false, invert_ry = false;
