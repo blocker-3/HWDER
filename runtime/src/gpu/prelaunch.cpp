@@ -5,6 +5,7 @@
 #include "gpu/overlay.h"
 #include "gpu/overlay_ui.h"
 #include "gpu/settings.h"
+#include "hid/host_input.h"
 #include "hwder/runtime.h"
 
 #include <shobjidl.h>
@@ -247,7 +248,9 @@ void draw(VkExtent2D extent) {
     if (ImGui::Checkbox("Skip this screen next time (hold Shift at launch to show it again)", &settings::launch().skip_prelaunch))
         changed = true;
     ImGui::Separator();
-    overlay::key_hint("A / Enter", "Select");
+    char select_key[32];
+    snprintf(select_key, sizeof(select_key), "%s / Enter", overlay::accept_button_name());
+    overlay::key_hint(select_key, "Select");
     overlay::key_hint("D-pad", "Move");
     overlay::key_hint("Esc", "Quit");
     ImGui::TextDisabled("Settings save automatically");
@@ -295,6 +298,9 @@ bool run(const std::string& exe_dir) {
     const char* frames_env = debug::str(debug::PrelaunchFrames);
     const int max_frames = frames_env ? atoi(frames_env) : 0;
     for (int frame = 1; !g_play && !g_quit; frame++) {
+        // The HID thread starts with the game, so poll the controller here for the screen's navigation.
+        hid::HostInput pad_in;
+        hid::poll_host_input(pad_in);
         display::present_overlay_frame();
         if (g_pick != Pick::None) {
             const Pick p = g_pick;

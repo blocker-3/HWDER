@@ -62,6 +62,10 @@ void load() {
     loaded = true;
     FILE* f = fopen(kFile, "r");
     if (!f) return;
+    // By printed label is the first-run default only: a file written before it (no face_labels line) keeps
+    // the old by-position layout.
+    g_input.face_labels = false;
+    for (int fam = 0; fam < kPadFamilies; fam++) hid::default_remap(g_input.remap[fam], fam, false);
     int version = 1;  // files without a version line predate versioning
     char line[2048];  // long enough for the file paths
     while (fgets(line, sizeof(line), f)) {

@@ -265,9 +265,26 @@ bool swapchain_dirty() {
     return d;
 }
 
+// The menus confirm with whatever host button plays Switch A and go back with Switch B, so A is the same
+// physical button in the game and in every HWDER screen (by default the right face button, by position).
+// A or B bound off the face buttons, or both on one, falls back to ImGui's positional South / East.
+MenuButtons menu_buttons(const hid::RawPad& pad) {
+    const int* map = settings::input().remap[pad.family];
+    auto face = [](int h) { return h >= hid::kHostSouth && h <= hid::kHostNorth; };
+    MenuButtons m{map[0], map[1]};
+    if (!face(m.accept) || !face(m.back) || m.accept == m.back) m = {hid::kHostSouth, hid::kHostEast};
+    return m;
+}
+
+const char* accept_button_name() {
+    const hid::RawPad pad = hid::raw_pad();
+    return hid::host_button_name(menu_buttons(pad).accept, pad.connected ? pad.type : hid::kPadTypeXboxOne);
+}
+
 // The host controller drives ImGui's gamepad navigation (the Win32 backend's XInput path is compiled out),
-// so PlayStation and Nintendo pads work too. Positional, as ImGui expects: South accepts, East goes back.
-// Mirrors imgui_impl_win32's mapping and thresholds.
+// so PlayStation and Nintendo pads work too. ImGui's FaceDown accepts and FaceRight goes back; they follow
+// menu_buttons(), the other two face keys take the remaining face buttons. Mirrors imgui_impl_win32's
+// thresholds.
 static void feed_gamepad() {
     ImGuiIO& io = ImGui::GetIO();
     const hid::RawPad p = hid::raw_pad();
@@ -284,10 +301,14 @@ static void feed_gamepad() {
     };
     button(ImGuiKey_GamepadStart, hid::kHostStart);
     button(ImGuiKey_GamepadBack, hid::kHostBack);
-    button(ImGuiKey_GamepadFaceLeft, hid::kHostWest);
-    button(ImGuiKey_GamepadFaceRight, hid::kHostEast);
-    button(ImGuiKey_GamepadFaceUp, hid::kHostNorth);
-    button(ImGuiKey_GamepadFaceDown, hid::kHostSouth);
+    const MenuButtons mb = menu_buttons(p);
+    int rest[2], n = 0;
+    for (int h : {hid::kHostWest, hid::kHostNorth, hid::kHostSouth, hid::kHostEast})
+        if (h != mb.accept && h != mb.back) rest[n++] = h;
+    button(ImGuiKey_GamepadFaceDown, mb.accept);
+    button(ImGuiKey_GamepadFaceRight, mb.back);
+    button(ImGuiKey_GamepadFaceLeft, rest[0]);
+    button(ImGuiKey_GamepadFaceUp, rest[1]);
     button(ImGuiKey_GamepadDpadLeft, hid::kHostDpadLeft);
     button(ImGuiKey_GamepadDpadRight, hid::kHostDpadRight);
     button(ImGuiKey_GamepadDpadUp, hid::kHostDpadUp);
@@ -761,8 +782,9 @@ static void tab_input(bool& changed) {
         }
         ImGui::EndTable();
     }
+    const MenuButtons mb = menu_buttons(pad);
     ImGui::TextDisabled("In this menu: D-pad or left stick to move, %s to select, %s to go back or close, %s / %s to switch tabs.",
-                        hid::host_button_name(hid::kHostSouth, type), hid::host_button_name(hid::kHostEast, type),
+                        hid::host_button_name(mb.accept, type), hid::host_button_name(mb.back, type),
                         hid::host_button_name(hid::kHostLeftShoulder, type), hid::host_button_name(hid::kHostRightShoulder, type));
 }
 
@@ -1012,9 +1034,10 @@ static void build_ui(VkExtent2D extent) {
         char tabs_key[32], close_key[32];
         snprintf(tabs_key, sizeof(tabs_key), "%s / %s", hid::host_button_name(hid::kHostLeftShoulder, type),
                  hid::host_button_name(hid::kHostRightShoulder, type));
-        snprintf(close_key, sizeof(close_key), "%s / Esc", hid::host_button_name(hid::kHostEast, type));
+        const MenuButtons mb = menu_buttons(pad);
+        snprintf(close_key, sizeof(close_key), "%s / Esc", hid::host_button_name(mb.back, type));
         key_hint(tabs_key, "Tabs");
-        key_hint(hid::host_button_name(hid::kHostSouth, type), "Select");
+        key_hint(hid::host_button_name(mb.accept, type), "Select");
         key_hint(close_key, "Close");
         ImGui::TextDisabled("Changes save automatically");
         ImGui::SameLine();
@@ -1056,7 +1079,7 @@ void render(VkCommandBuffer cb, VkImage image, VkExtent2D extent) {
         apply_theme(scale);
         g_style_scale = scale;
     }
-    if (g_visible) feed_gamepad();
+    if (g_visible || g_screen) feed_gamepad();  // the menu, or a full-window screen such as the startup one
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
