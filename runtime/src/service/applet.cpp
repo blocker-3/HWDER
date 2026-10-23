@@ -90,6 +90,7 @@ public:
             hw_log("am: message %u", msg);
             rs.push<u32>(msg);
         });
+        // Docked answers: the game chooses docked behaviour from them (see game/stage_props.cpp for one effect).
         ret<u8>(5, 1);          // GetOperationMode: console (docked)
         ret<u32>(6, 1);         // GetPerformanceMode: boost (docked)
         ret<u8>(8, 0);          // GetBootMode

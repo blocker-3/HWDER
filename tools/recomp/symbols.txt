@@ -23,6 +23,23 @@
 0x1000c21de0  g_GfxGlobals             data        # ptr; [[+64]+88] is the window target passed to GfxDevice_PresentWindow
 0x100000fd70  game_sincosf             func
 
+# ---- stage props (runtime/src/game/stage_props.cpp)
+0x100044660c  StageLod_Update          func hook   # (stage renderer): per-layer draw distances, docked crowd rule zeroes layer 1; runtime/src/game/stage_props.cpp
+0x10004555d0  StageLod_ScaleFlag       func        # bit 0 of a mode word; doubles the crowd count (the original then also zeroes layer 1)
+0x10003cf0e8  Perf_IsHandheld          func        # 1 for performance configuration 0x10001 (handheld), 0 for 0x20003/0x20004 (docked)
+0x1000c2ba80  StageLod_CrowdOwner      data        # **ptr: object whose +88 is the crowd count n the rule compares with 60
+0x1000170b9c  StageLod_CrowdCap        func        # returns *(0x1000c337b8), the crowd rule's upper bound (210 in battle)
+0x10004559b0  StageLod_ModeGate        func        # true for global mode *(*(0x1000c22d68)+3408) in 7..19: far stage parts keep their alpha
+0x10003cf064  Perf_ReadConfiguration   func        # sets the performance configurations and stores the current one at 0x1000ca3358
+0x100043f318  StagePart_UpdateLod      func        # (part, view): camera distance and detail level of one stage part, then fade and append
+0x100043f910  StagePart_UpdateFade     func        # (part, view, d, bias): range = table[layer] + bias + r/2, fade state part+392, alpha part+384
+0x1000446a44  StagePart_Append         func        # (owner, view, part, ...): draw item for a visible stage part in the pass's bucket
+0x100003c04c  DrawBucket_CountMeshes   func        # (bucket, item): per-slot mesh counts, totals at bucket+2080/+2084
+0x10003d5514  DrawBucket_CopyToList    func        # (renderer, pass, sub, bucket): bucket entries -> draw list (sub-passes 5..8 variant)
+0x10003d7bdc  StageList_Draw           func        # (list owner, slot): draws list +8+8*slot with count +80+4*slot via DrawList_Render
+0x10003d864c  DrawList_Render          func        # (ctx, n, list, ...): draws every {hdr, item} entry, grouped by material
+0x1000047544  StageRecord_Register     func        # (base, obj): adds obj to the per-frame 700-entry stage record array (skips when full)
+
 # ---- frame loop (docs/frame-loop.md)
 0x10002ad35c  MainThread_FrameLoop     func        # per-frame function on MainThread
 0x10002acb54  Battle_Tick              func hook   # (scene x19, frame state x20, gfx device x21): the whole battle tick; runtime/src/interp/interp_draw.cpp
