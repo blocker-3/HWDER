@@ -73,9 +73,10 @@ The wizard keeps its playable result in the selected Data folder, initially
 `%LOCALAPPDATA%\HWDER\play\hwder.exe`. The legacy CLI defaults to
 `%LOCALAPPDATA%\hwder\local-build-v1`; select that existing folder in the wizard to reuse it.
 There is no automatic data migration. Files created beside the exe: `hwder_settings.ini`, `hwder.log` (attach to bug reports),
-`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). The save folder can be
-moved on the startup screen or in the menu's Gameplay tab; your saves are copied there only if you say so, and
-nothing in the old folder is moved or deleted.
+`save\` (console save layout), `cache\` and `pipeline_cache.bin` (safe to delete). To use another save, choose
+its `zmha.bin` on the startup screen or in the menu's Gameplay tab (Choose save file). A save in the console
+layout is used where it is; any other (an emulator export, a backup) is imported into the current save folder
+after asking, with the save it replaces backed up first. Nothing is moved or deleted.
 
 ## Reporting a bug
 

@@ -10,6 +10,9 @@ std::string chosen_save_dir();   // the setting, else the default
 // Accept a save root or this game's recognized account leaf; reads file metadata only.
 // On failure root is empty and report explains why the picker must keep the previous setting.
 bool resolve_save_folder(const std::string& selected, std::string& root, std::string& report);
+// The picker's choice of a zmha.bin (save_folder_selection.h). Either `root` is the save root to switch to, or
+// `import_from` is a folder whose zmha.bin + zmhasd.bin should be imported; on failure both are empty.
+bool resolve_save_file(const std::string& file, std::string& root, std::string& import_from, std::string& report);
 // The folder the running game uses. Fixed the first time the game opens its save; until then it follows the setting.
 std::string active_save_dir();
 std::wstring active_save_root();  // the same, with the \\?\ prefix, for the host filesystem
@@ -20,8 +23,13 @@ bool has_files(const std::string& dir);  // any file anywhere under dir
 // copied to a backup folder beside it (<to>.bak-<date>-<time>). Nothing in `from` is changed. `report` says what
 // happened in plain words, on failure too.
 bool copy_saves(const std::string& from, const std::string& to, std::string& report);
+// Copies zmha.bin + zmhasd.bin from a folder outside the console layout into <root>0AE00096EA000\<user>,
+// with the same backup of what it replaces. Nothing in `from` is changed.
+bool import_save(const std::string& from, const std::string& root, std::string& report);
+// True when `dir` holds zmha.bin directly (an import source rather than a save root).
+bool is_save_file_folder(const std::string& dir);
 
-// A copy asked for in the in-game menu runs at the next launch, before the game opens its save, so it picks up
+// A copy or import asked for in the in-game menu runs at the next launch, before the game opens its save, so it picks up
 // everything saved until then (settings::launch().save_copy_from). Call once at startup, after settings::load().
 void run_pending_save_copy();
 

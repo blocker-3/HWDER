@@ -1,7 +1,8 @@
-// The save folder option, shared by the startup screen and the in-game menu (overlay_ui.h).
-// Changing the folder never moves or deletes saves: when the old folder has any, the user is asked whether to copy
-// them, and whatever the copy would overwrite in the new folder is backed up first (hwfs::copy_saves). On the startup
-// screen the copy runs at once; in the game it runs at the next launch, so it includes everything saved until then.
+// The save option, shared by the startup screen and the in-game menu (overlay_ui.h). The picker asks for the save
+// file itself (zmha.bin; hwfs::inspect_save_file): a save in the console layout is used where it is (the save folder
+// switches to its root), any other is imported into the current save folder. Nothing is moved or deleted, and
+// whatever an import would overwrite is backed up first (hwfs::import_save). On the startup screen an import runs at
+// once; in the game it runs at the next launch, so the running game cannot save over it.
 #include "gpu/overlay_ui.h"
 
 #include "fs/save_dir.h"
@@ -25,15 +26,15 @@ namespace {
 const ImVec4 kOk(0.47f, 0.80f, 0.47f, 1.0f);
 const ImVec4 kPending(1.0f, 0.7f, 0.25f, 1.0f);
 const ImVec4 kError(0.95f, 0.42f, 0.36f, 1.0f);
-const char* kPopup = "Copy your saves?";
+const char* kPopup = "Import this save?";
 
 std::mutex g_m;
-bool g_picking = false;  // the folder dialog is open (on its own thread, so the frame keeps drawing)
+bool g_picking = false;  // the file dialog is open (on its own thread, so the frame keeps drawing)
 bool g_picked = false;
 std::string g_pick;      // its result, "" = cancelled
 
-std::string g_ask;       // folder waiting on the copy question
-bool g_ask_there = false;  // it already has saves
+std::string g_ask;         // folder whose save waits on the import question
+bool g_ask_there = false;  // the save folder already has a save the import would replace
 std::string g_status;
 ImVec4 g_status_color = kOk;
 
@@ -56,10 +57,12 @@ void pick_thread(std::string start) {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     IFileOpenDialog* dlg = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) {
-        dlg->SetTitle(L"Choose a folder for your saves");
+        dlg->SetTitle(L"Choose your save file (zmha.bin)");
         FILEOPENDIALOGOPTIONS opts = 0;
         dlg->GetOptions(&opts);
-        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
+        const COMDLG_FILTERSPEC filter[] = {{L"Hyrule Warriors save (zmha.bin)", L"zmha.bin"}, {L"All files", L"*.*"}};
+        dlg->SetFileTypes(2, filter);
         // Start in the current folder, or the nearest one that exists.
         for (std::filesystem::path p = to_wide(start); !p.empty(); p = p.parent_path()) {
             IShellItem* folder = nullptr;
@@ -83,7 +86,7 @@ void pick_thread(std::string start) {
         }
         dlg->Release();
     } else {
-        hw_log("save folder: folder dialog unavailable");
+        hw_log("save folder: file dialog unavailable");
     }
     if (SUCCEEDED(co)) CoUninitialize();
     std::lock_guard<std::mutex> l(g_m);
@@ -108,52 +111,53 @@ void set_status(const ImVec4& color, const std::string& text) {
     hw_log("save folder: %s", text.c_str());
 }
 
-// Switches to `dir`, copying the saves the game uses now when `copy` is set.
-void apply(const std::string& dir, bool copy, bool in_game, bool& changed) {
-    settings::Launch& l = settings::launch();
-    const std::string from = hwfs::active_save_dir(), previous = l.save_dir;
-    l.save_dir = hwfs::same_dir(dir, hwfs::default_save_dir()) ? "" : dir;
-    l.save_copy_from.clear();
-    changed = true;
-    const std::string restart = in_game && !hwfs::same_dir(dir, from) ? " Restart the game to use it." : "";
-    if (!copy) {
-        set_status(kOk, "Save folder set to " + dir + "." + restart);
-    } else if (in_game) {
-        l.save_copy_from = from;
-        set_status(kOk, "Your saves will be copied here from " + from + " when you next start the game. Nothing in " +
-                            from + " is moved or deleted.");
-    } else {
-        std::string report;
-        if (hwfs::copy_saves(from, dir, report)) {
-            set_status(kOk, report);
-        } else {
-            l.save_dir = previous;
-            set_status(kError, report + " The save folder was not changed.");
-        }
-    }
-}
-
-void on_pick(const std::string& selected, bool in_game, bool& changed) {
-    std::string dir, report;
-    if (!hwfs::resolve_save_folder(selected, dir, report)) {
-        set_status(kError, report + " The save folder was not changed.");
-        return;
-    }
+// Switching to a save root asks nothing: the picked save is the one to play.
+void switch_to(const std::string& dir, bool in_game, bool& changed) {
     if (!writable(dir)) {
-        set_status(kError, "Can't write to " + dir + ". Choose another folder.");
+        set_status(kError, "Can't write to " + dir + ". Copy the save somewhere you can write to and choose it there.");
         return;
     }
     if (hwfs::same_dir(dir, hwfs::chosen_save_dir())) {
-        set_status(kOk, report.empty() ? "That is already the save folder." : report);
+        set_status(kOk, "That save is already the one in use.");
         return;
     }
+    settings::Launch& l = settings::launch();
     const std::string from = hwfs::active_save_dir();
-    if (!hwfs::same_dir(dir, from) && hwfs::has_files(from)) {
-        g_ask = dir;  // the question opens this frame
-        g_ask_there = hwfs::has_files(dir);
-    } else {
-        apply(dir, false, in_game, changed);
+    l.save_dir = hwfs::same_dir(dir, hwfs::default_save_dir()) ? "" : dir;
+    l.save_copy_from.clear();
+    changed = true;
+    set_status(kOk, "Save folder set to " + dir + "." + (in_game && !hwfs::same_dir(dir, from) ? " Restart the game to use it." : ""));
+}
+
+void import_from(const std::string& from, bool in_game, bool& changed) {
+    const std::string to = hwfs::chosen_save_dir();
+    if (!writable(to)) {
+        set_status(kError, "Can't write to " + to + ". Choose Use default, then import the save again.");
+        return;
     }
+    if (in_game) {
+        settings::launch().save_copy_from = from;
+        changed = true;
+        set_status(kOk, "The save in " + from + " will be imported into " + to +
+                            " when you next start the game. Anything it replaces is backed up first.");
+        return;
+    }
+    std::string report;
+    set_status(hwfs::import_save(from, to, report) ? kOk : kError, report);
+}
+
+void on_pick(const std::string& file, bool in_game, bool& changed) {
+    std::string root, from, report;
+    if (!hwfs::resolve_save_file(file, root, from, report)) {
+        set_status(kError, report + " Nothing was changed.");
+        return;
+    }
+    if (!root.empty()) {
+        switch_to(root, in_game, changed);
+        return;
+    }
+    g_ask = from;  // the import question opens this frame
+    g_ask_there = hwfs::is_save_file_folder(hwfs::chosen_save_dir() + "\\0100AE00096EA000\\48574445525F55530000000000000001");
 }
 
 }  // namespace
@@ -174,7 +178,8 @@ void opt_save_folder(bool in_game, bool& changed) {
     if (in_game && !hwfs::same_dir(chosen, active))
         ImGui::TextColored(kPending, "Restart the game to use it. Until then it keeps saving to %s.", active.c_str());
     if (!ls.save_copy_from.empty())
-        ImGui::TextColored(kPending, "Your saves will be copied from %s at the next start.", ls.save_copy_from.c_str());
+        ImGui::TextColored(kPending, "Your save will be %s from %s at the next start.",
+                           hwfs::is_save_file_folder(ls.save_copy_from) ? "imported" : "copied", ls.save_copy_from.c_str());
 
     bool picking;
     {
@@ -182,19 +187,19 @@ void opt_save_folder(bool in_game, bool& changed) {
         picking = g_picking;
     }
     ImGui::BeginDisabled(picking);
-    if (ImGui::Button("Choose save folder...")) {
+    if (ImGui::Button("Choose save file...")) {
         std::lock_guard<std::mutex> l(g_m);
         g_picking = true;
         std::thread(pick_thread, chosen).detach();
     }
     ImGui::EndDisabled();
     help("Where your saves are kept. The default is the save folder next to hwder.exe.\n"
-         "Choose the save root, or the account folder containing zmha.bin and zmhasd.bin; its root is used automatically.\n"
-         "Changing it never moves or deletes saves: if the current folder has any, you are asked whether to copy them,\n"
-         "and anything the copy would replace in the new folder is backed up beside it first.");
+         "Choose your save file, zmha.bin (zmhasd.bin must be next to it). A save kept by HWDER, or copied from a\n"
+         "console in the same layout, is used where it is; any other (an emulator export, a backup) is imported\n"
+         "into the current save folder. Nothing is moved or deleted, and a save an import replaces is backed up first.");
     ImGui::SameLine();
     ImGui::BeginDisabled(ls.save_dir.empty());
-    if (ImGui::Button("Use default")) on_pick(hwfs::default_save_dir(), in_game, changed);
+    if (ImGui::Button("Use default")) switch_to(hwfs::default_save_dir(), in_game, changed);
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Open save folder")) {
@@ -210,28 +215,21 @@ void opt_save_folder(bool in_game, bool& changed) {
     ImGui::SetNextWindowPos(ImVec2(view.x * 0.5f, view.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(view.x * 0.9f, 640.0f * s), 0));
     if (ImGui::BeginPopupModal(kPopup, nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
-        const std::string from = hwfs::active_save_dir();
         const bool there = g_ask_there;
-        ImGui::TextWrapped("Your saves are in %s.", from.c_str());
-        ImGui::TextWrapped("Copy them to %s?", g_ask.c_str());
+        ImGui::TextWrapped("Import the save in %s into %s?", g_ask.c_str(), hwfs::chosen_save_dir().c_str());
         if (there)
-            ImGui::TextColored(kPending, "That folder already has saves. Copying replaces them, after backing them up beside it.");
-        ImGui::TextDisabled("Nothing in the current folder is moved or deleted.");
-        if (in_game) ImGui::TextDisabled("The copy is made when you next start the game, so it includes this session's saves.");
+            ImGui::TextColored(kPending, "The save folder already has a save. Importing replaces it, after backing it up beside it.");
+        ImGui::TextDisabled("Only zmha.bin and zmhasd.bin are copied. Nothing in %s is moved or deleted.", g_ask.c_str());
+        if (in_game) ImGui::TextDisabled("The import happens when you next start the game.");
         ImGui::Spacing();
         const float bw = 220.0f * s;
         bool close = false;
-        if (ImGui::Button("Copy my saves", ImVec2(bw, 0))) {
-            apply(g_ask, true, in_game, changed);
+        if (ImGui::Button("Import", ImVec2(bw, 0))) {
+            import_from(g_ask, in_game, changed);
             close = true;
         }
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
         ImGui::SetItemDefaultFocus();
-        ImGui::SameLine();
-        if (ImGui::Button(there ? "Use the saves there" : "Start with no saves", ImVec2(bw, 0))) {
-            apply(g_ask, false, in_game, changed);
-            close = true;
-        }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(bw * 0.5f, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
             ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))

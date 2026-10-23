@@ -74,6 +74,19 @@ bool resolve_save_folder(const std::string& selected, std::string& root, std::st
     return !result.error;
 }
 
+bool resolve_save_file(const std::string& file, std::string& root, std::string& import_from, std::string& report) {
+    const auto result = inspect_save_file(fsys::path(normalize(file)));
+    root = result.root.empty() ? "" : wide_to_utf8(result.root.wstring());
+    import_from = result.import_from.empty() ? "" : wide_to_utf8(result.import_from.wstring());
+    report = result.error ? result.error : "";
+    return !result.error;
+}
+
+bool is_save_file_folder(const std::string& dir) {
+    std::error_code ec;
+    return fsys::is_regular_file(fsys::path(long_path(dir)) / L"zmha.bin", ec);
+}
+
 std::wstring active_save_root() {
     std::lock_guard<std::mutex> l(g_m);
     if (g_active.empty()) {
@@ -100,7 +113,12 @@ bool has_files(const std::string& dir) {
     return false;
 }
 
-bool copy_saves(const std::string& from, const std::string& to, std::string& report) {
+namespace {
+
+// copy_saves and import_save: copy `files` (relative to from, or every file under it when empty) into to\sub,
+// backing up what they replace first into <to>.bak-<date>-<time>\sub.
+bool copy_files(const std::string& from, const std::string& to, const fsys::path& sub, std::vector<fsys::path> files,
+                std::string& report) {
     if (same_dir(from, to)) {
         report = "The old and new save folders are the same; nothing to copy.";
         return true;
@@ -109,11 +127,11 @@ bool copy_saves(const std::string& from, const std::string& to, std::string& rep
         report = "Can't copy: the new folder is inside the old save folder.";
         return false;
     }
-    const fsys::path src = long_path(from), dst = long_path(to);
+    const fsys::path src = long_path(from), dst = fsys::path(long_path(to)) / sub;
     std::error_code ec;
-    std::vector<fsys::path> files;  // relative to src
-    for (fsys::recursive_directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec))
-        if (it->is_regular_file(ec)) files.push_back(fsys::relative(it->path(), src, ec));
+    if (files.empty())  // relative to src
+        for (fsys::recursive_directory_iterator it(src, ec), end; !ec && it != end; it.increment(ec))
+            if (it->is_regular_file(ec)) files.push_back(fsys::relative(it->path(), src, ec));
     if (ec) {
         report = "Can't read " + from + ": " + ec.message();
         return false;
@@ -129,8 +147,9 @@ bool copy_saves(const std::string& from, const std::string& to, std::string& rep
     localtime_s(&lt, &now);
     strftime(stamp, sizeof(stamp), ".bak-%Y%m%d-%H%M%S", &lt);
     const std::wstring dw = normalize(to);
-    fsys::path backup = dw.size() > 3 ? fsys::path(long_path(to) + utf8_to_wide(stamp))       // beside it
-                                      : fsys::path(long_path(to) + L"\\hwder-save" + utf8_to_wide(stamp));  // drive root
+    const fsys::path backup = (dw.size() > 3 ? fsys::path(long_path(to) + utf8_to_wide(stamp))                    // beside it
+                                             : fsys::path(long_path(to) + L"\\hwder-save" + utf8_to_wide(stamp))) /  // drive root
+                              sub;
     size_t backed_up = 0;
     for (const fsys::path& rel : files) {
         if (!fsys::exists(dst / rel, ec)) continue;
@@ -159,16 +178,33 @@ bool copy_saves(const std::string& from, const std::string& to, std::string& rep
     return true;
 }
 
+}  // namespace
+
+bool copy_saves(const std::string& from, const std::string& to, std::string& report) {
+    return copy_files(from, to, {}, {}, report);
+}
+
+bool import_save(const std::string& from, const std::string& root, std::string& report) {
+    const fsys::path sub = fsys::path(L"0100AE00096EA000") / L"48574445525F55530000000000000001";
+    const std::string leaf = wide_to_utf8((fsys::path(normalize(root)) / sub).wstring());
+    if (inside(leaf, from) || inside(from, leaf) || same_dir(from, leaf)) {
+        report = "That save is already in the save folder.";
+        return false;
+    }
+    return copy_files(from, root, sub, {L"zmha.bin", L"zmhasd.bin"}, report);
+}
+
 void run_pending_save_copy() {
     settings::Launch& l = settings::launch();
     if (l.save_copy_from.empty()) return;
     const std::string from = l.save_copy_from, to = chosen_save_dir();
     std::string report;
-    const bool ok = copy_saves(from, to, report);
+    const bool ok = is_save_file_folder(from) ? import_save(from, to, report) : copy_saves(from, to, report);
     hw_log("fs: save copy to %s %s: %s", to.c_str(), ok ? "done" : "FAILED", report.c_str());
     l.save_copy_from.clear();
     // On failure keep playing from the old folder rather than a new one with no (or half-copied) saves.
-    if (!ok) l.save_dir = same_dir(from, default_save_dir()) ? "" : from;
+    // (An import never changed the folder.)
+    if (!ok && !is_save_file_folder(from)) l.save_dir = same_dir(from, default_save_dir()) ? "" : from;
     settings::save();
     if (!ok && !debug::flag(debug::Mute))
         MessageBoxW(nullptr, utf8_to_wide("Your saves could not be copied to the new save folder.\n\n" + report +
