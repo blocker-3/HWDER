@@ -39,6 +39,13 @@ You do not need to clone this repository or install any developer tools. Windows
    shortcut (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
    `prod.keys` where they are: the game reads them every time it starts.
 
+**The first minutes on a fresh install can hitch.** Each graphics pipeline is compiled the first time
+the game needs it, so the opening minutes (and each new stage the first time) can show short hitches or
+an object appearing a moment late. Graphics > Shaders > "Compile shaders in the background" (on by
+default) picks late objects over hitches. Compiled pipelines are saved beside `hwder.exe`
+(`pipeline_cache.bin`, `pipeline_warmup.bin`) and prebuilt before the startup screen on later
+launches, so this fades as you play. Setup keeps them when it rebuilds the game; deleting them is safe.
+
 **Advanced** also holds the Data folder choice, Check requirements, Open game folder and the Details log.
 Next time, Setup opens straight on **Play**. More detail: [Windows setup](docs/windows-setup.md).
 Developers who want to build from a checkout: [local-build.md](docs/local-build.md).
