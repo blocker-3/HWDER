@@ -10,12 +10,14 @@ Sched g_s;
 Recorder g_rec;
 
 namespace {
+// Command buffers in flight (one per flush; a big battle frame flushes several times).
+constexpr size_t kMaxFramesInFlight = 64;
 Frame* new_frame() {
     Frame* f = nullptr;
     {
         std::unique_lock<std::mutex> l(g_s.m);
         // bound the number of frames in flight
-        while (g_s.free_frames.empty() && g_s.in_flight.size() >= 16) g_s.cv.wait(l);
+        while (g_s.free_frames.empty() && g_s.in_flight.size() >= kMaxFramesInFlight) g_s.cv.wait(l);
         if (!g_s.free_frames.empty()) {
             f = g_s.free_frames.back();
             g_s.free_frames.pop_back();
@@ -31,10 +33,7 @@ Frame* new_frame() {
         ai.commandPool = f->pool;
         ai.commandBufferCount = 1;
         VK_CHECK(vkAllocateCommandBuffers(dev(), &ai, &f->cb));
-    } else {
-        vkResetCommandPool(dev(), f->pool, 0);
-        for (VkDescriptorPool p : f->dpools) vkResetDescriptorPool(dev(), p, 0);
-    }
+    }  // a recycled frame's pools were reset by the waiter thread when it retired
     f->dpool_index = 0;
     f->serial = g_rec.serial_;
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -75,6 +74,10 @@ void waiter_thread() {
         vkGetSemaphoreCounterValue(dev(), g_s.timeline, &v);
         for (auto& fn : f->deferred) fn();
         f->deferred.clear();
+        // Reset the finished frame's pools here rather than on the GPU thread when it is reused (~0.4 ms per
+        // submission in big battles). The frame belongs to this thread until it is back in free_frames.
+        vkResetCommandPool(dev(), f->pool, 0);
+        for (VkDescriptorPool p : f->dpools) vkResetDescriptorPool(dev(), p, 0);
         std::vector<std::function<void()>> run;
         {
             std::lock_guard<std::mutex> l(g_s.m);
@@ -95,6 +98,7 @@ Recorder& rec() { return g_rec; }
 
 VkCommandBuffer Recorder::cmd_in_pass() {
     if (!g_s.cur) {
+        ProfScope ps(kProfFrameBegin);
         g_s.cur = new_frame();
         cb_ = g_s.cur->cb;
     }

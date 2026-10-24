@@ -238,17 +238,21 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
         if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
         Slice s = g_rec.stage(bytes, props.minUniformBufferOffsetAlignment);
+        g_prof_cbufs++;
+        g_prof_cbuf_bytes += bytes;
         // Object blending: vertex-stage c3 holds the object/bone transforms; build it in cached memory (the staging
         // slice is write-combined: reading it back is very slow), blend, then write it out once.
         const bool obj = bound && obj_candidate(c.index, bytes);
         alignas(16) static thread_local u8 obj_buf[4096];
         if (obj) {
+            ProfScope ops(kProfObj);
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, obj_buf, n);
             if (n < bytes) memset(obj_buf + n, 0, bytes - n);
             obj_transforms(c.index, obj_buf, bytes);
             memcpy(s.ptr, obj_buf, bytes);
         } else if (bound) {
+            ProfScope cps(kProfCbufCopy);
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);
@@ -345,6 +349,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         w.pTexelBufferView = &dw.texels[first];
     }
     // sampled textures
+    ProfScope* texs = new ProfScope(kProfTextures);
     for (const auto& t : res.textures) {
         u32 n = std::max(1u, t.count);
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n);
@@ -371,6 +376,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         te = &it->second;
                 }
                 if (te) {
+                    ProfScope hps(kProfTexHit);
                     st_.tic_hit++;
                     tc_.validate(te->img);
                     if (te->view) ii.imageView = te->view;
@@ -485,6 +491,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         }
         w.pImageInfo = &dw.images[first];
     }
+    delete texs;
     // storage images
     for (const auto& im : res.images) {
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1);

@@ -11,6 +11,7 @@
 
 #include "interp/interp.h"
 #include "debug_flags.h"
+#include "perf_stats.h"
 
 extern "C" u64 hw_cntvct();
 
@@ -80,6 +81,7 @@ bool syncpoint_wait(u32 id, u32 threshold, s64 timeout_ns) {
     if (id >= kMaxSyncpoints) return true;
     std::unique_lock<std::mutex> l(g_sp.m);
     auto ok = [&] { return reached(g_sp.value[id], threshold); };
+    perf::WaitScope ws(perf::kWaitSyncpt);
     if (timeout_ns < 0) {
         g_sp.cv.wait(l, ok);
         return true;

@@ -418,6 +418,11 @@ public:
         cbufs_[stage][slot] = {va, size, valid};
     }
 
+    void yield_to_present() override {
+        // std::recursive_mutex is not fair: the GPU thread re-took it for every draw and the compositor's present waited
+        // until a whole submission was translated (7-16 ms in big battles), delaying every shown frame.
+        while (present_waiting_.load(std::memory_order_acquire)) std::this_thread::yield();
+    }
     void draw(const u32* regs, const DrawParams& p) override {
         ProfScope ps(kProfDrawTotal);
         std::lock_guard<std::recursive_mutex> l(m_);
@@ -425,6 +430,7 @@ public:
         do_draw(regs, p, nullptr, 0);
     }
     void draw_inline_indices(const u32* regs, const DrawParams& p, const void* indices, u32 index_size) override {
+        ProfScope ps(kProfDrawTotal);
         std::lock_guard<std::recursive_mutex> l(m_);
         process_invalidations();
         do_draw(regs, p, indices, index_size);
@@ -484,6 +490,7 @@ public:
         if (prof_flush() > 50.0)
             hw_log("vk: profile tex (frame so far): %u created, %u uploads (%llu KiB), %u downloads", tc_.n_creates, tc_.n_uploads,
                    (unsigned long long)(tc_.upload_bytes >> 10), tc_.n_downloads);
+        ProfScope ps(kProfSubmit);
         g_rec.flush();
     }
     void wait_idle() override {
@@ -670,6 +677,7 @@ private:
     MemoryManager* mm_;
     TextureCache tc_;
     std::recursive_mutex m_;
+    std::atomic<int> present_waiting_{0};  // compositor threads waiting for m_ in present()
     std::mutex inv_m_;
     std::vector<std::pair<u64, u64>> invalidations_;
     CbufBinding cbufs_[5][18];
@@ -720,6 +728,33 @@ private:
         if (n > 128) h = hash_bytes(p + n - 64, 64, h);
         return h;
     }
+    // Persistent geometry: vertex/index ranges the game left unchanged stay in GPU-visible chunks across frames
+    // instead of being copied to the staging ring every frame (16 MB per frame in a big battle). Validity: the
+    // texture cache's write watch, checked once per submission, plus the sample hash. A rewritten range goes back
+    // to the ring and is kept again only after a few clean submissions. Index scans (vmin/vmax) use the same check.
+    static constexpr u64 kGeomChunk = 32ull << 20;
+    static constexpr u32 kGeomMaxChunks = 16;
+    struct GeomChunk {
+        Buffer buf;
+        u64 head = 0;
+        std::shared_ptr<std::atomic<u64>> live;  // bytes still held; frees run once the GPU is done with them
+    };
+    struct GeomEntry {
+        u64 watch_epoch = 0, checked_serial = 0, sample = 0, last_epoch = 0;
+        u32 clean = 0;           // consecutive clean submissions
+        bool clean_now = false;  // this submission's check
+        int chunk = -1;          // resident copy: chunk and offset
+        u64 off = 0, bytes = 0;
+        bool has_range = false;  // index scan result
+        u32 vmin = 0, vmax = 0;
+    };
+    std::vector<GeomChunk> geom_chunks_;
+    int geom_cur_ = -1;
+    std::unordered_map<u64, GeomEntry> geom_;
+    u64 geom_swept_ = 0;
+    bool geom_check(GeomEntry& e, const u8* src, u64 bytes);
+    bool geom_slice(u64 key, const u8* src, u64 bytes, Slice& out);  // true: a resident copy of these bytes
+    void geom_release(GeomEntry& e);
     // Per-TIC lookup cache: texture handle words -> image/view, valid while no image was created or
     // destroyed (tc_.generation). Only plain textures are cached; images with a same-address alias or
     // GPU-written content keep going through TextureCache::get() for the alias refresh.
@@ -793,6 +828,18 @@ private:
         u32 w = 0, h = 0;
         bool failed = false;
     } post_;
+    // 120 fps mode: presenter-owned copies of presented frames, so the guest buffer is returned before the
+    // release grid wait (see vi.cpp). Three, reused once their screen blit has finished.
+    struct HoldImage {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        u32 w = 0, h = 0;
+        VkFormat fmt = VK_FORMAT_UNDEFINED;
+        u64 ticket = 0;
+    };
+    HoldImage hold_[3];
+    u32 hold_next_ = 0;
+    int capture_for_present(Image* img, u32 w, u32 h);  // index into hold_, -1 when no copy was made
     Framebuffer cur_fb_;
     u64 draws_ = 0, skipped_ = 0;
     struct Stats {

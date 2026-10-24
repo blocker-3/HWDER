@@ -8,6 +8,7 @@
 
 #include "sync.h"
 #include "debug_flags.h"
+#include "perf_stats.h"
 
 Ctx* hw_ctx_new(u64 stack_top);
 void hw_ctx_bind(Ctx* c);
@@ -129,7 +130,11 @@ bool park_current_thread(s64 timeout_ns) {
     int depth = g_kernel_lock.release_all();
     DWORD ms = INFINITE;
     if (timeout_ns >= 0) ms = (DWORD)std::min<s64>((timeout_ns + 999999) / 1000000, 0x7FFFFFFF);
-    DWORD r = WaitForSingleObject(t->wake_event, ms);
+    DWORD r;
+    {
+        perf::WaitScope ws(perf::kWaitKernel);
+        r = WaitForSingleObject(t->wake_event, ms);
+    }
     g_kernel_lock.reacquire(depth);
     t->waiting = false;
     return r == WAIT_OBJECT_0;

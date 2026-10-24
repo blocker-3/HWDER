@@ -423,6 +423,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
 }
 
 void TextureCache::validate(Image* img) {
+    ProfScope vps(kProfValidate);
     if (img->cpu_dirty) {
         img->cpu_dirty = false;
         upload(img);
@@ -451,29 +452,51 @@ void TextureCache::validate(Image* img) {
     u8* p = (u8*)img->addr;
     u64 h;
     {
+        ProfScope hps(kProfHash);
         SlowTimer t("texture hash check", 30.0);
         h = hash_bytes(p, img->readable);
     }
     if (h != img->hash) upload(img);
 }
 
-int TextureCache::written_since_check(Image* img) {
-    u64 start = img->addr & ~0xFFFull, end = (img->addr + img->readable + 0xFFF) & ~0xFFFull;
+int TextureCache::written_since_check(Image* img) { return written_since(img->addr, img->readable, img->watch_epoch); }
+
+int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
+    u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
-    watch_buf_.resize((end - start) >> 12);
-    ULONG_PTR n = watch_buf_.size();
-    ULONG gran = 0;
-    SlowTimer t("write watch query", 2.0);
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void*)start, end - start, watch_buf_.data(), &n, &gran) != 0)
-        return -1;  // range not reserved with MEM_WRITE_WATCH
-    for (ULONG_PTR i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+    // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
+    // images that share a few blocks, and each GetWriteWatch call cost ~5 us. The batch (recorder serial)
+    // advances after every guest submission, so writes the game made before submitting are still seen.
+    // Reports for pages of other images in the block are kept in written_pages_ like before.
+    const u64 serial = rec().serial();
+    for (u64 b = start & ~(kWatchBlock - 1); b < end; b += kWatchBlock) {
+        u64& queried = watch_blocks_[b];
+        if (queried == serial) continue;
+        // A block that cannot be queried whole (not inside one write-watched reservation) falls back to the
+        // image's own range, as before.
+        const bool whole = queried != kNotWatched;
+        const u64 qs = whole ? b : std::max(b, start), qe = whole ? b + kWatchBlock : std::min(b + kWatchBlock, end);
+        watch_buf_.resize((qe - qs) >> 12);
+        ULONG_PTR n = watch_buf_.size();
+        ULONG gran = 0;
+        SlowTimer t("write watch query", 2.0);
+        ProfScope wps(kProfWatch);
+        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void*)qs, qe - qs, watch_buf_.data(), &n, &gran) != 0) {
+            if (!whole) return -1;  // range not reserved with MEM_WRITE_WATCH
+            queried = kNotWatched;
+            b -= kWatchBlock;  // retry this block with the image's range
+            continue;
+        }
+        if (whole) queried = serial;
+        for (ULONG_PTR i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+    }
     if (epoch_ - watch_pruned_ >= 512) {  // forget old reports; images last checked before then re-hash once
         watch_pruned_ = epoch_ - 256;
         for (auto it = written_pages_.begin(); it != written_pages_.end();)
             it = it->second < watch_pruned_ ? written_pages_.erase(it) : std::next(it);
     }
-    u64 since = img->watch_epoch;
-    img->watch_epoch = epoch_;
+    u64 since = watch_epoch;
+    watch_epoch = epoch_;
     if (since < watch_pruned_) return 1;
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;

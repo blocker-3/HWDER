@@ -8,6 +8,7 @@
 #include "../service/ipc.h"
 #include "kernel.h"
 #include "sync.h"
+#include "perf_stats.h"
 
 namespace kern {
 
@@ -69,6 +70,7 @@ static void log_unimplemented(u32 imm, Ctx* c) {
 }
 
 void svc_dispatch(Ctx* c, u32 imm) {
+    perf::sample_core();
     Result r = ResultSuccess;
     switch (imm) {
     case 0x01: {  // SetHeapSize(size) -> addr
@@ -123,7 +125,16 @@ void svc_dispatch(Ctx* c, u32 imm) {
     case 0x0B: {  // SleepThread(ns)
         s64 ns = (s64)c->x[0];
         if (ns <= 0) SwitchToThread();
-        else hw_sleep_ns(ns);
+        else if (perf::enabled()) {
+            LARGE_INTEGER f, a, b;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&a);
+            hw_sleep_ns(ns);
+            QueryPerformanceCounter(&b);
+            perf::note_sleep(ns, (b.QuadPart - a.QuadPart) * 1000000000 / f.QuadPart);
+        } else {
+            hw_sleep_ns(ns);
+        }
         return;
     }
     case 0x0C: {  // GetThreadPriority(handle) -> prio

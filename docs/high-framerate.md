@@ -50,7 +50,10 @@ The earlier strict and per-bone (legacy) matching modes were removed with the fi
 `HWDER_GI_OBJ_TRACE=1` logs the blocks near the camera target, and `HWDER_GI_NO_OBJECTS=1` disables
 object interpolation for comparison.
 
-Triple buffering returns a guest buffer only after rendering and its presentation blit's source read
+In 120 fps mode the presenter copies each frame (after its rendering finished) into one of three images it owns and
+returns the guest buffer before the 120 Hz release wait (`capture_for_present`, `on_captured` in vi.cpp): the game
+has only three swap buffers, and holding them through that wait made busy battles skip every other in-between frame.
+Without a copy (it failed) a guest buffer is returned only after rendering and its presentation blit's source read
 finish. Timeouts produce diagnostics and further waits rather than freeing pending storage. Vulkan
 presentation-wait errors use the existing fatal path. A running, capped lateness budget skips an extra
 draw when battle ticks fall behind, with no consecutive skips.
@@ -72,3 +75,10 @@ measurements document earlier owner builds, not acceptance of every later combin
 report interval (default 5000 ms). The research switches described in `docs/frame-loop.md`
 (`HWDER_FRAME_PROBE`, `HWDER_DRAW_WRITES`, `HWDER_DRAW_TWICE`, `HWDER_CBUF_DUMP`, `HWDER_CAM_LOG`) are
 historical and no longer in the code.
+
+## Busy battles (2026-10-24)
+
+Measured on a ~1500-draw stage-4 battle (`hywar/docs/busy-stage-perf.md`): the GPU command thread was the limit
+(12.5 ms per frame on main). Batched write-watch queries, persistent vertex/index ranges, the copy-and-return presenter
+above, a P-core preference on hybrid CPUs, exact guest sleeps and pacer catch-up bring 120 mode to 8.35 ms per frame
+there and native 60 to 16.7 ms.

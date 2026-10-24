@@ -25,6 +25,7 @@
 #include "gpu/settings.h"
 #include "fs/nsp.h"
 #include "fs/save_dir.h"
+#include "perf_stats.h"
 #include "debug_flags.h"
 
 // ------------------------------------------------------------------ dispatch
@@ -192,10 +193,34 @@ extern "C" void hw_sleep_ns(s64 ns) {
     }
     static thread_local HANDLE timer =
         CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    LARGE_INTEGER due;
-    due.QuadPart = -(ns / 100);
-    if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
-    else Sleep((DWORD)((ns + 999999) / 1000000));
+    // Sleeps of a millisecond or more end on time: the game's frame limiter sleeps ~15 ms on a job worker every
+    // frame, and the high-resolution timer woke it ~0.3 ms late, so a busy battle ran at 17.0 ms instead of 16.7.
+    // The timer covers all but the last millisecond, the rest is a yielding spin to the deadline.
+    constexpr s64 kSpinNs = 1000000;
+    static const LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    const bool precise = ns >= kSpinNs;
+    const s64 timer_ns = precise ? ns - kSpinNs : ns;
+    if (timer_ns > 0) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(timer_ns / 100);
+        if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
+        else Sleep((DWORD)((timer_ns + 999999) / 1000000));
+    }
+    if (precise) {
+        const s64 end = start.QuadPart + ns * freq.QuadPart / 1000000000;
+        LARGE_INTEGER now;
+        for (;;) {
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart >= end) break;
+            SwitchToThread();
+        }
+    }
 }
 
 // ------------------------------------------------------------------ logging / crashes
@@ -549,6 +574,34 @@ static void load_npdm(const std::string& exefs) {
 // ------------------------------------------------------------------ boot
 void hw_config_load(const std::string& dir);
 
+// Hybrid CPUs (Intel P/E cores): keep the game's threads on the performance cores. In a big battle the GPU command
+// thread, the presenter and their helpers landing on efficiency cores cost about 10% of the 120 fps mode's frame rate
+// (stage-4 replay: 9.0 -> 7.6 ms per frame on the GPU thread). HWDER_ALL_CORES=1 keeps every core.
+static void prefer_performance_cores() {
+    if (debug::flag(debug::AllCores)) return;
+    ULONG len = 0;
+    GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
+    if (!len) return;
+    std::vector<char> buf(len);
+    if (!GetSystemCpuSetInformation((PSYSTEM_CPU_SET_INFORMATION)buf.data(), len, &len, GetCurrentProcess(), 0)) return;
+    BYTE lo = 255, hi = 0;
+    for (ULONG o = 0; o < len;) {
+        auto* s = (PSYSTEM_CPU_SET_INFORMATION)(buf.data() + o);
+        if (s->Type == CpuSetInformation) lo = std::min(lo, s->CpuSet.EfficiencyClass), hi = std::max(hi, s->CpuSet.EfficiencyClass);
+        o += s->Size;
+    }
+    if (lo >= hi) return;  // not a hybrid CPU
+    std::vector<ULONG> ids;
+    for (ULONG o = 0; o < len;) {
+        auto* s = (PSYSTEM_CPU_SET_INFORMATION)(buf.data() + o);
+        if (s->Type == CpuSetInformation && s->CpuSet.EfficiencyClass == hi) ids.push_back(s->CpuSet.Id);
+        o += s->Size;
+    }
+    if (ids.size() < 4) return;  // too few performance cores to give up the others
+    if (SetProcessDefaultCpuSets(GetCurrentProcess(), ids.data(), (ULONG)ids.size()))
+        hw_log("cpu: hybrid CPU, preferring its %zu performance logical processors (HWDER_ALL_CORES=1 to use all)", ids.size());
+}
+
 int main(int argc, char** argv) {
     std::string dir = exe_dir();
     SetCurrentDirectoryW(to_w(dir).c_str());  // caches, settings and saves live beside the exe
@@ -556,6 +609,7 @@ int main(int argc, char** argv) {
     if (log_path.empty()) log_path = dir + "\\hwder.log";
     g_log = fopen_u8(log_path, "w");
     hw_log("HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
+    prefer_performance_cores();
     std::string no_dump = env_u8("HWDER_NO_DUMP");
     if (no_dump.empty() || no_dump == "0") {
         wchar_t* file = nullptr;
@@ -671,6 +725,7 @@ int main(int argc, char** argv) {
            (unsigned long long)stack_base, (unsigned long long)stack_size);
     kern::start_thread(t.get());
     start_thread_dumper();
+    perf::start();
     WaitForSingleObject(t->host_handle, INFINITE);
     hw_log("main thread exited");
     return 0;

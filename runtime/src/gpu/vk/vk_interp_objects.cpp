@@ -181,6 +181,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     float pb[3];
     const bool has = obj_first_pos((const float*)data, nf, pb);
     if (!(tag & 1)) {  // real frame: remember this draw's transforms
+        ProfScope rps(kProfObjReal);
         if (!has) return;  // nothing to blend in it
         ObjEntry e{(u32)obj_cur_.arena.size(), (u32)bytes, {pb[0], pb[1], pb[2]}, true};
         obj_cur_.arena.insert(obj_cur_.arena.end(), data, data + bytes);
@@ -191,6 +192,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     // draw key), and their order changes between frames: pair each block with the previous frame's
     // block of the same key whose first world transform is nearest (each used once).
     obj_st_.draws++;
+    ProfScope xps(kProfObjExtra);
     // HWDER_GI_OBJ_TRACE: the block's outcome, recorded on every return when it is the nearest so far.
     static const bool trace = debug::flag(debug::GiObjTrace);
     u16 mats[1024 / 12 + 1];  // offsets (floats) of the block's matrices; outlives tr
@@ -274,8 +276,14 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     for (size_t k = lo; k < hi; k++) {
         if (used[k] || prevs[k].size != bytes || dist(k) > lim2) continue;
         const float* x = (const float*)(obj_prev_.arena.data() + prevs[k].off);
+        // The sum only grows: once it reaches the second-best so far this block cannot change the outcome (crowds of one
+        // model put dozens of candidates here, each a whole bone palette).
         float s = 0.0f;
-        for (u64 i = 0; i < nf; i++) s += std::fabs(x[i] - bb[i]);
+        for (u64 i = 0; i < nf && s < l2; i += 4) {
+            const u64 e = std::min<u64>(i + 4, nf);
+            for (u64 j = i; j < e; j++) s += std::fabs(x[j] - bb[j]);
+        }
+        if (s >= l2) continue;
         if (s < l1) l2 = l1, c2 = c1, l1 = s, c1 = (int)k;
         else if (s < l2) l2 = s, c2 = (int)k;
     }

@@ -46,6 +46,9 @@ struct FramebufferInfo {
     // Captured by QueueBuffer on the guest thread: 0 normal presenter semantics, 60 native GI
     // screen/unpaired tick, 120 a game-drawn extra or its paired real frame.
     u32 release_hz = 0;
+    // 120 fps mode: called once the frame has been copied into a presenter-owned image (before the release grid
+    // wait); the guest buffer can go back to the game then. Not called when no copy was made.
+    std::function<void()> on_captured;
 };
 
 class Renderer {
@@ -54,6 +57,8 @@ public:
 
     // Maxwell 3D (class 0xB197). regs: 0xE00 u32 register file.
     virtual void draw(const u32* regs, const DrawParams& p) = 0;
+    // GPU thread, between draws (holding no renderer lock): let a waiting present() take the renderer first.
+    virtual void yield_to_present() {}
     virtual void clear(const u32* regs, u32 clear_buffers_value) = 0;  // value written to CLEAR_SURFACE
     // Inline index data (INLINE_INDEX_* methods) are delivered as a buffer for the next draw.
     virtual void draw_inline_indices(const u32* regs, const DrawParams& p, const void* indices, u32 index_size) = 0;

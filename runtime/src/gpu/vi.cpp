@@ -10,6 +10,7 @@
 #include "service/common.h"
 #include "interp/interp.h"
 #include "debug_flags.h"
+#include "perf_stats.h"
 
 
 namespace ipc {
@@ -222,6 +223,7 @@ public:
         case 7: {  // QueueBuffer(slot, QueueBufferInput)
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
+            perf::note_present();
             {
                 std::lock_guard<std::mutex> l(m_);
                 if (slot >= 0 && slot < kSlots) {
@@ -339,6 +341,7 @@ private:
                 }
                 return best;
             }
+            perf::WaitScope ws(perf::kWaitDequeue);
             if (!cv_.wait_for(l, std::chrono::seconds(2), [&] { return any_free_locked(); })) {
                 hw_log("vi: DequeueBuffer timed out (no free buffer)");
                 return -1;
@@ -394,13 +397,8 @@ private:
             fb.crop_bottom = q.in.crop_bottom;
             fb.swap_interval = q.in.swap_interval ? q.in.swap_interval : 1;
             fb.release_hz = q.release_hz;
-            if (fb.address) gpu::renderer()->present(fb);
-            u64 ticket = fb.address ? display::last_present_ticket() : 0;
-            // Game-drawn extra frame (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
-            // instead of when the next frame arrives. The game can then queue two frames ahead (triple
-            // buffering), which absorbs a slow game tick at 120 Hz; the release grid still paces it.
-            if (fb.release_hz && ticket) {
-                wait_screen_read(ticket, q.slot);
+            bool released = false;
+            auto release_now = [&](u64 ticket) {
                 {
                     std::lock_guard<std::mutex> l(m_);
                     if (presented >= 0 && presented != q.slot && slots_[presented].state == SlotState::Acquired)
@@ -412,6 +410,26 @@ private:
                 }
                 cv_.notify_all();
                 buffer_event->signal();
+                released = true;
+            };
+            // The presenter copies a 120 fps frame and the guest buffer goes back before the 120 Hz release wait:
+            // with only three buffers, holding them through that wait made the game wait for the grid each tick.
+            if (fb.release_hz) fb.on_captured = [&] { release_now(0); };
+            if (fb.address) gpu::renderer()->present(fb);
+            u64 ticket = fb.address ? display::last_present_ticket() : 0;
+            if (released) {
+                if (frame == 1) {
+                    hw_log("vi: first frame presented (%ux%u)", fb.width, fb.height);
+                    display::set_status("game running");
+                }
+                continue;
+            }
+            // Game-drawn extra frame (HWDER_GAME_INTERP): the buffer is free once its screen blit has run, so hand it back now
+            // instead of when the next frame arrives. The game can then queue two frames ahead (triple
+            // buffering), which absorbs a slow game tick at 120 Hz; the release grid still paces it.
+            if (fb.release_hz && ticket) {
+                wait_screen_read(ticket, q.slot);
+                release_now(ticket);
                 if (frame == 1) {
                     hw_log("vi: first frame presented (%ux%u)", fb.width, fb.height);
                     display::set_status("game running");

@@ -139,6 +139,7 @@ set(RUNTIME_SOURCES
     runtime/src/threads.cpp
     runtime/src/config.cpp
     runtime/src/version.cpp
+    runtime/src/perf_stats.cpp
     runtime/src/kernel/kernel.cpp
     runtime/src/kernel/handles.cpp
     runtime/src/kernel/memory.cpp

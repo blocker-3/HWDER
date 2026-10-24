@@ -144,6 +144,87 @@ void VkRenderer::build_pipeline_key(const u32* regs, const DrawParams& p, const 
     d.need_const = need_const;
 }
 
+bool VkRenderer::geom_check(GeomEntry& e, const u8* src, u64 bytes) {
+    const u64 serial = g_rec.serial();
+    if (e.checked_serial == serial) return e.clean_now;
+    e.checked_serial = serial;
+    e.last_epoch = tc_.epoch();
+    const int written = src && bytes ? tc_.written_since((u64)(uintptr_t)src, bytes, e.watch_epoch) : -1;
+    const u64 sample = sample_hash(src, bytes);
+    e.clean_now = written == 0 && e.sample == sample;
+    e.sample = sample;
+    e.clean = e.clean_now ? e.clean + 1 : 0;
+    if (!e.clean_now) {
+        e.has_range = false;
+        if (e.chunk >= 0) geom_release(e);
+    }
+    return e.clean_now;
+}
+
+void VkRenderer::geom_release(GeomEntry& e) {
+    // The last submission that used the copy may still be on the GPU: free it once this one completes.
+    std::shared_ptr<std::atomic<u64>> live = geom_chunks_[e.chunk].live;
+    const u64 n = (e.bytes + 255) & ~255ull;
+    g_rec.defer([live, n] { live->fetch_sub(n); });
+    e.chunk = -1;
+}
+
+bool VkRenderer::geom_slice(u64 key, const u8* src, u64 bytes, Slice& out) {
+    {   // drop ranges not drawn for a while
+        const u64 epoch = tc_.epoch();
+        if (epoch - geom_swept_ >= 300 || geom_.size() > 200000) {
+            geom_swept_ = epoch;
+            const bool all = geom_.size() > 200000;
+            for (auto it = geom_.begin(); it != geom_.end();) {
+                if (all || epoch - it->second.last_epoch > 300) {
+                    if (it->second.chunk >= 0) geom_release(it->second);
+                    it = geom_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    GeomEntry& e = geom_[key];
+    if (!geom_check(e, src, bytes)) return false;
+    if (e.chunk >= 0 && e.bytes == bytes) {
+        GeomChunk& c = geom_chunks_[e.chunk];
+        out = {c.buf.buf, e.off, c.buf.map + e.off};
+        return true;
+    }
+    if (e.chunk >= 0) geom_release(e);
+    if (e.clean < 2) return false;  // rewritten recently: keep staging it per frame
+    const u64 need = (bytes + 255) & ~255ull;
+    if (need > kGeomChunk / 4) return false;
+    if (geom_cur_ < 0 || geom_chunks_[geom_cur_].head + need > kGeomChunk) {
+        geom_cur_ = -1;
+        for (int i = 0; i < (int)geom_chunks_.size(); i++)
+            if (geom_chunks_[i].live->load() == 0) {  // every range freed and done on the GPU: reuse from the start
+                geom_chunks_[i].head = 0;
+                geom_cur_ = i;
+                break;
+            }
+        if (geom_cur_ < 0) {
+            if (geom_chunks_.size() >= kGeomMaxChunks) return false;
+            GeomChunk c;
+            c.buf = create_buffer(kGeomChunk, kRingUsage, true, true);
+            c.live = std::make_shared<std::atomic<u64>>(0);
+            geom_chunks_.push_back(std::move(c));
+            geom_cur_ = (int)geom_chunks_.size() - 1;
+        }
+    }
+    GeomChunk& c = geom_chunks_[geom_cur_];
+    e.chunk = geom_cur_;
+    e.off = c.head;
+    e.bytes = bytes;
+    c.head += need;
+    c.live->fetch_add(need);
+    memcpy(c.buf.map + e.off, src, bytes);
+    g_prof_vtx_bytes += bytes;  // counted as a copy once, when it becomes resident
+    out = {c.buf.buf, e.off, c.buf.map + e.off};
+    return true;
+}
+
 bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* inline_idx, u32 inline_size, DrawCtx& d) {
     const PipelineKey& key = d.key;
     const u32 topo = d.topo;
@@ -179,6 +260,7 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
     if (indexed) {
         u64 ikey = 0, isample = 0;
         IdxRange* cached = nullptr;
+        GeomEntry* range = nullptr;  // persistent scan result, valid while the indices are unchanged
         if (!inline_idx) {
             u64 kw[3] = {(u64)(uintptr_t)idx_src, ((u64)p.count << 8) | (isize << 1) | (key.prim_restart ? 1 : 0), 0x1d1d};
             ikey = hash_bytes(kw, sizeof(kw), 0);
@@ -186,6 +268,14 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
             auto cit = idx_range_cache_.find(ikey);
             if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample)
                 cached = &cit->second;
+            range = &geom_[ikey ^ 0x5ca75ca75ca75ca7ull];
+            if (!geom_check(*range, idx_src, (u64)p.count * isize) || !range->has_range) {
+                if (cached) range->has_range = true, range->vmin = cached->vmin, range->vmax = cached->vmax;
+            }
+            if (range->has_range && !cached) {
+                idx_range_cache_[ikey] = {g_rec.serial(), isample, range->vmin, range->vmax};
+                cached = &idx_range_cache_[ikey];
+            }
         }
         if (cached) {
             st_.idx_hit++;
@@ -195,6 +285,7 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
             st_.idx_miss++;
             u32 restart = isize == 1 ? 0xFF : isize == 2 ? 0xFFFF : 0xFFFFFFFF;
             vmin = 0xFFFFFFFF;
+            g_prof_idx_scanned += p.count;
             for (u32 i = 0; i < p.count; i++) {
                 u32 v = idx_at(i);
                 if (key.prim_restart && v == restart) continue;
@@ -205,6 +296,9 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
             if (!inline_idx) {
                 if (idx_range_cache_.size() > 32768) idx_range_cache_.clear();
                 idx_range_cache_[ikey] = {g_rec.serial(), isample, vmin, vmax};
+                range->has_range = true;
+                range->vmin = vmin;
+                range->vmax = vmax;
             }
         }
         vmin += p.base_vertex;
@@ -282,13 +376,17 @@ void VkRenderer::stage_vertex_input(const u32* regs, const DrawParams& p, DrawCt
             u64 vkey = hash_bytes(kw, sizeof(kw), 0x7b7b);
             u64 vsample = sample_hash(src, avail);
             auto vit = vb_cache_.find(vkey);
-            if (vit != vb_cache_.end() && vit->second.serial == g_rec.serial() && vit->second.bytes == bytes &&
+            if (avail == bytes && geom_slice(vkey, src, bytes, sl)) {
+                st_.vb_hit++;
+            } else if (vit != vb_cache_.end() && vit->second.serial == g_rec.serial() && vit->second.bytes == bytes &&
                 vit->second.sample == vsample) {
                 st_.vb_hit++;
                 sl = vit->second.slice;
             } else {
                 st_.vb_miss++;
                 sl = g_rec.stage(std::max<u64>(bytes, 16), 16);
+                g_prof_vtx_copies++;
+                g_prof_vtx_bytes += bytes;
                 if (avail) memcpy(sl.ptr, src, avail);
                 if (avail < bytes) memset(sl.ptr + avail, 0, bytes - avail);
                 if (vb_cache_.size() > 32768) vb_cache_.clear();
@@ -387,11 +485,13 @@ void VkRenderer::stage_indices(const DrawParams& p, const void* inline_idx, Draw
             u64 ikey2 = hash_bytes(kw, sizeof(kw), 0x1b1b);
             u64 isample2 = sample_hash(idx_src, (u64)count * isize);
             auto iit = vb_cache_.find(ikey2);
-            if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
+            if (!inline_idx && geom_slice(ikey2, idx_src, (u64)count * isize, sl)) {
+            } else if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
                 iit->second.bytes == (u64)count * isize && iit->second.sample == isample2) {
                 sl = iit->second.slice;
             } else {
                 sl = g_rec.stage((u64)count * isize, 16);
+                g_prof_idx_bytes += (u64)count * isize;
                 memcpy(sl.ptr, idx_src, (u64)count * isize);
                 if (!inline_idx) vb_cache_[ikey2] = {g_rec.serial(), (u64)count * isize, isample2, sl};
             }
@@ -707,6 +807,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         {
             ProfScope aps(kProfDescAlloc);
             sets[s] = alloc_set(sl->layout);
+            g_prof_sets++;
         }
         u32 group = s;  // bind group of the stage
         auto cbuf = [this, group](u32 index, u32 offset) -> u32 {

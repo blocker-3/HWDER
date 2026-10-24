@@ -107,6 +107,13 @@ using enum diag::ProfPhase;
 using diag::kProfNames;
 using diag::g_prof;
 using diag::g_prof_draws;
+using diag::g_prof_cbuf_bytes;
+using diag::g_prof_cbufs;
+using diag::g_prof_sets;
+using diag::g_prof_vtx_bytes;
+using diag::g_prof_vtx_copies;
+using diag::g_prof_idx_bytes;
+using diag::g_prof_idx_scanned;
 using diag::ProfScope;
 using diag::SlowTimer;
 using diag::prof_flush;
@@ -239,6 +246,9 @@ public:
     u64 upload_bytes = 0;
     u64 hash_budget_epoch_ = 0, hash_budget_ = 0;
     int written_since_check(Image* img);  // 1 written, 0 clean, -1 memory not write-watched
+    // The same for any guest range; `watch_epoch` is the caller's record of its last check (0 at first).
+    int written_since(u64 addr, u64 size, u64& watch_epoch);
+    u64 epoch() const { return epoch_; }
     void download(Image* img);  // write GPU data back to guest memory (waits for the GPU)
     void collect_garbage();
     // helpers for image info from TIC
@@ -261,6 +271,8 @@ private:
     // reports are kept here for every image sharing the page; entries older than watch_pruned_ are dropped.
     std::map<u64, u64> written_pages_;
     std::vector<void*> watch_buf_;
+    static constexpr u64 kWatchBlock = 2ull << 20, kNotWatched = ~0ull;
+    std::unordered_map<u64, u64> watch_blocks_;  // 2 MiB block -> recorder serial of its last query (kNotWatched: query per image)
     u64 watch_pruned_ = 0;
     u64 epoch_ = 1;
 };
