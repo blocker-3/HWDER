@@ -1,6 +1,6 @@
 # Experimental native Linux x86-64 source port
 
-Status (2026-10-24): the `linux-native` branch is main v0.2.2 (e7df07f) plus the 18 Linux port commits of 2026-10-19 and one follow-up that ports main's newer code (renderer split, debug-flag table, perf stats, multi-player input, save picker) to the host layer. On the Ally (Bazzite, Ubuntu 24.04 `hwder-dev` distrobox, Clang 18, RADV Phoenix / Mesa 25.2): host tests 7/7, synthetic tests 6/6, Python tests pass apart from the two public-runtime-fixture tests that also fail on main (its guest allowlist predates the game layer), and the complete runtime compiles and links against the link-check fixture below. The same branch still builds on Windows and its synthetic tests pass. Not yet done on this branch: a real first-run build from the user's dump and any gameplay. Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan 1.3 graphics. Do not describe it as playable until the on-device tests below succeed.
+Status (2026-10-24): the `linux-native` branch is main v0.2.2 (e7df07f) plus the 18 Linux port commits of 2026-10-19 and one follow-up that ports main's newer code (renderer split, debug-flag table, perf stats, multi-player input, save picker) to the host layer. On the Ally (Bazzite, Ubuntu 24.04 `hwder-dev` distrobox, Clang 18, RADV Phoenix / Mesa 25.2): host tests 7/7, synthetic tests 6/6, Python tests pass apart from the two public-runtime-fixture tests that also fail on main (its guest allowlist predates the game layer), and the complete runtime compiles and links against the link-check fixture below. The same branch still builds on Windows and its synthetic tests pass. A first-run build from the dump played through the 60 fps checks and 120 on the Ally (2026-10-24, Max). Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan 1.3 graphics. Do not describe it as playable until the on-device tests below succeed.
 
 ### Link check without a game dump
 
@@ -13,7 +13,7 @@ python3 tools/build.py --generated-dir build/link-check-generated --build-dir bu
 
 ### Known gaps (Windows features without a Linux equivalent yet)
 
-- Texture invalidation: no GetWriteWatch, so every validated texture is re-hashed (`TextureCache::written_since` returns "unknown"). Expect extra CPU cost in busy scenes; a soft-dirty/mprotect tracker is the likely fix.
+- Texture/geometry write watch: done (8187ec6). Write-watched guest memory registers with userfaultfd async write-protect and `PAGEMAP_SCAN` reports written pages (kernel 6.7+; older kernels log "no write watch" and keep hashing). Max's Ally playtest 2026-10-24: all 60 fps checks good; at 120 busy areas dipped to ~75 before and ~100 after.
 - `HWDER_THREAD_STATS`: wait and sleep counters work, the per-thread CPU report is Windows-only.
 - Crash handling: no minidumps; Linux prints a signal message and leaves core dumps to the system.
 - Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
