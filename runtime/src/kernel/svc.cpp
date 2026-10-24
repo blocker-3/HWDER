@@ -8,6 +8,7 @@
 #include "../service/ipc.h"
 #include "kernel.h"
 #include "sync.h"
+#include "perf_stats.h"
 
 namespace kern {
 
@@ -69,6 +70,7 @@ static void log_unimplemented(u32 imm, Ctx* c) {
 }
 
 void svc_dispatch(Ctx* c, u32 imm) {
+    perf::sample_core();
     Result r = ResultSuccess;
     switch (imm) {
     case 0x01: {  // SetHeapSize(size) -> addr

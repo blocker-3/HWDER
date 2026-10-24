@@ -13,6 +13,7 @@
 #include "nvdrv_device.h"
 #include "swizzle.h"
 #include "debug_flags.h"
+#include "perf_stats.h"
 
 extern "C" u64 hw_cntvct();
 
@@ -928,11 +929,13 @@ static void gpu_thread() {
         std::pair<Channel*, Submission> item;
         {
             std::unique_lock<std::mutex> l(g_q.m);
+            perf::WaitScope ws(perf::kWaitGpuQueue);
             g_q.cv.wait(l, [] { return !g_q.queue.empty(); });
             item = std::move(g_q.queue.front());
             g_q.queue.pop_front();
         }
         g_q.drained.notify_all();
+        perf::sample_core();
         execute(item.first, item.second);
     }
 }
@@ -961,6 +964,7 @@ void channel_submit(Channel* ch, Submission&& s) {
         if (g_q.queue.size() >= kMaxQueuedSubmissions) {
             static int logged = 0;
             if (logged++ < 5) hw_log("gpu: guest waiting for the GPU thread (%zu submissions queued)", g_q.queue.size());
+            perf::WaitScope ws(perf::kWaitGpuQueue);
             g_q.drained.wait(l, [] { return g_q.queue.size() < kMaxQueuedSubmissions; });
         }
         g_q.queue.emplace_back(ch, std::move(s));

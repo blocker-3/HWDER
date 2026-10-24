@@ -10,6 +10,7 @@
 #include "service/common.h"
 #include "interp/interp.h"
 #include "debug_flags.h"
+#include "perf_stats.h"
 
 
 namespace ipc {
@@ -222,6 +223,7 @@ public:
         case 7: {  // QueueBuffer(slot, QueueBufferInput)
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
+            perf::note_present();
             {
                 std::lock_guard<std::mutex> l(m_);
                 if (slot >= 0 && slot < kSlots) {
@@ -339,6 +341,7 @@ private:
                 }
                 return best;
             }
+            perf::WaitScope ws(perf::kWaitDequeue);
             if (!cv_.wait_for(l, std::chrono::seconds(2), [&] { return any_free_locked(); })) {
                 hw_log("vi: DequeueBuffer timed out (no free buffer)");
                 return -1;

@@ -25,6 +25,7 @@
 #include "gpu/settings.h"
 #include "fs/nsp.h"
 #include "fs/save_dir.h"
+#include "perf_stats.h"
 #include "debug_flags.h"
 
 // ------------------------------------------------------------------ dispatch
@@ -671,6 +672,7 @@ int main(int argc, char** argv) {
            (unsigned long long)stack_base, (unsigned long long)stack_size);
     kern::start_thread(t.get());
     start_thread_dumper();
+    perf::start();
     WaitForSingleObject(t->host_handle, INFINITE);
     hw_log("main thread exited");
     return 0;
