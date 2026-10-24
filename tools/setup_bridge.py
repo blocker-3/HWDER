@@ -31,6 +31,17 @@ def compatible():
             and not bool(__import__("sysconfig").get_config_var("Py_GIL_DISABLED")))
 
 
+def require_avx2(present=None, build=None):
+    """The game is compiled for AVX2; without it hwder.exe would crash at start with no message."""
+    if present is None:
+        import ctypes
+        present = ctypes.windll.kernel32.IsProcessorFeaturePresent
+    build = sys.getwindowsversion().build if build is None else build
+    # PF_AVX2_INSTRUCTIONS_AVAILABLE (40) is only reported from Windows 10 2004 (build 19041); trust a "no" from there on.
+    if build >= 19041 and not present(40):
+        raise ValueError("CPU lacks AVX2")
+
+
 def components(data, create=None, run=subprocess.run):
     """Explicit consent is owned by the native UI. Injectable boundaries never install in tests."""
     with first_run.setup_lock(Path(data).resolve()):
@@ -95,6 +106,8 @@ def stage_log(message):
 
 RECOVERY = (
     # (substrings of the backend detail, user sentence, next step for the window)
+    (("CPU lacks AVX2",),
+     "This PC's processor lacks AVX2, which HWDER needs (most Intel and AMD processors from 2015 on have it).", "close"),
     (("updates/bundles unsupported", "Expected exactly one base-game program"),
      "This NSP has an update or is not the base game. Use the base game only, then Prepare again.", "inputs"),
     (("Unsupported ExeFS module set", "not a supported", "unsupported version", "supported version"),
@@ -416,6 +429,7 @@ def main():
         elif args.action == "components":
             components(args.data)
         elif args.action == "check":
+            require_avx2()
             first_run.check_prerequisites(first_run.ROOT,args.managed_toolchain)
             emit("checked", "Requirements ready. Private tools and this kit check out.")
             try:
@@ -424,6 +438,7 @@ def main():
             except ValueError:
                 pass
         elif args.action == "prepare":
+            require_avx2()
             if not args.nsp or not args.keys:
                 raise ValueError("Choose your NSP and prod.keys files.")
             prepare(args.data, args.nsp, args.keys, before_publish=commit_permission if args.ui_protocol else None,

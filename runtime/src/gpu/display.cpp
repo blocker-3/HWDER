@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cwchar>
 #include <cmath>
 #include <thread>
 #include <mutex>
@@ -246,8 +247,18 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL validation_callback(VkDebugUtilsMessageSev
 }
 void validation_report() { validation_summary(true); }
 
+// A player without a working Vulkan 1.2 driver would otherwise see the game close with only a log line.
+[[noreturn]] static void no_vulkan(const char* why, const std::wstring& found = L"") {
+    std::wstring msg = L"HWDER could not start because no Vulkan 1.2 graphics driver was found.\n\n";
+    if (!found.empty()) msg += found + L"\n\n";
+    msg += L"Install the latest driver for your graphics card (NVIDIA, AMD or Intel) and try again.";
+    MessageBoxW(nullptr, msg.c_str(), L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    hw_fatal(why);
+    ExitProcess(1);
+}
+
 static void init_vulkan() {
-    if (!hw_vk_load_global()) hw_fatal("vulkan-1.dll not found - a Vulkan capable GPU driver is required");
+    if (!hw_vk_load_global()) no_vulkan("vulkan-1.dll not found - a Vulkan capable GPU driver is required");
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "HWDER";
     app.apiVersion = VK_API_VERSION_1_3;
@@ -278,7 +289,10 @@ static void init_vulkan() {
                    "starting without validation", layer);
         }
     }
-    VKCHECK(vkCreateInstance(&ici, nullptr, &g_dev.instance));
+    if (VkResult r = vkCreateInstance(&ici, nullptr, &g_dev.instance); r != VK_SUCCESS) {
+        hw_log("vkCreateInstance failed: %d", (int)r);
+        no_vulkan("vkCreateInstance failed");
+    }
     hw_vk_load_instance(g_dev.instance);
     if (messenger && vkCreateDebugUtilsMessengerEXT) {
         VkDebugUtilsMessengerCreateInfoEXT mci{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
@@ -294,15 +308,25 @@ static void init_vulkan() {
     vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);
     std::vector<VkPhysicalDevice> pds(n);
     vkEnumeratePhysicalDevices(g_dev.instance, &n, pds.data());
+    std::wstring too_old;  // best device that only offers Vulkan 1.0/1.1, named in the error
     for (auto pd : pds) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd, &p);
+        if (p.apiVersion < VK_API_VERSION_1_2) {
+            hw_log("vulkan: skipping %s (api %u.%u, 1.2 needed)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                   VK_API_VERSION_MINOR(p.apiVersion));
+            wchar_t line[400];
+            swprintf(line, 400, L"Found: %hs, which only offers Vulkan %u.%u.", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                     VK_API_VERSION_MINOR(p.apiVersion));
+            too_old = line;
+            continue;
+        }
         if (!g_dev.phys || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
             g_dev.phys = pd;
             g_dev.props = p;
         }
     }
-    if (!g_dev.phys) hw_fatal("no Vulkan device");
+    if (!g_dev.phys) no_vulkan("no Vulkan 1.2 device", too_old);
     vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &g_dev.mem);
     hw_log("vulkan: %s (api %u.%u)", g_dev.props.deviceName, VK_API_VERSION_MAJOR(g_dev.props.apiVersion),
            VK_API_VERSION_MINOR(g_dev.props.apiVersion));
@@ -365,7 +389,12 @@ static void init_vulkan() {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = (u32)dev_ext.size();
     dci.ppEnabledExtensionNames = dev_ext.data();
-    VKCHECK(vkCreateDevice(g_dev.phys, &dci, nullptr, &g_dev.dev));
+    if (VkResult r = vkCreateDevice(g_dev.phys, &dci, nullptr, &g_dev.dev); r != VK_SUCCESS) {
+        hw_log("vkCreateDevice failed: %d", (int)r);
+        wchar_t line[400];
+        swprintf(line, 400, L"%hs did not accept the features HWDER needs (error %d).", g_dev.props.deviceName, (int)r);
+        no_vulkan("vkCreateDevice failed", line);
+    }
     hw_vk_load_device(g_dev.dev);
     vkGetDeviceQueue(g_dev.dev, g_dev.queue_family, 0, &g_dev.queue);
     vkGetDeviceQueue(g_dev.dev, g_dev.queue_family, qcount > 1 ? 1 : 0, &g_dev.present_queue);

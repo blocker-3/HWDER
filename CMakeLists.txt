@@ -153,7 +153,9 @@ set(RUNTIME_SOURCES
 foreach(sub hid fs audio gpu gpu/vk shader video game interp)
     include(${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/${sub}/sources.cmake)
 endforeach()
-add_executable(hwder ${RUNTIME_SOURCES})
+# Built without HW_ARCH_FLAGS: it must run (and refuse a CPU without AVX2) before any AVX2 code does.
+add_library(hwder_cpu_check OBJECT runtime/src/cpu_check.cpp)
+add_executable(hwder ${RUNTIME_SOURCES} $<TARGET_OBJECTS:hwder_cpu_check>)
 if(HWDER_PUBLIC_RUNTIME_LINK_ONLY)
     # Cannot satisfy first_run's hwder.exe lookup or its ready certificate.
     set_target_properties(hwder PROPERTIES OUTPUT_NAME "HWDER-public-link-NOT-A-GAME")

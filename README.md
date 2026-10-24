@@ -59,8 +59,8 @@ program, saves or private shader cache.
 
 Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AVX2 CPU, and
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
-There is no friendly error for the first two yet: without an AVX2 CPU or a working Vulkan driver the
-game closes at start, with the reason only in `hwder.log`.
+Without an AVX2 CPU or a Vulkan 1.2 driver the game shows a message saying which is missing and
+closes; Setup's Check and Prepare also refuse a CPU without AVX2.
 
 In game: **F1** opens the options overlay (internal resolution scale, unlocked resolution for
 ultrawide, vsync, borderless, anisotropic filtering, FPS counter, opt-in 60 Hz monitor switch, and
