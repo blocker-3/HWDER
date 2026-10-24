@@ -300,6 +300,7 @@ current values. Kinds:
 | `HWDER_AUTOPLAY_CAM` | presence | off | Autoplay: also turn the camera with the right stick (2 s right, 2 s left, 2 s still). |
 | `HWDER_AUTOPLAY_CIRCLE` | presence | off | Autoplay: run in a slow circle (one turn every 8 s) so the view covers every direction. |
 | `HWDER_AUTOPLAY_IDLE` | presence | off | Autoplay: no input once in battle (experiments). |
+| `HWDER_AUTOPLAY_PLUS` | presence | off | Test: tap + five times a second for the first 30 s (players who press + through the startup and title screens). |
 | `HWDER_AUTOPLAY_SKIP` | presence | off | Autoplay: the 6 s cutscene-skip cycle for a save that starts with the story cutscenes. |
 | `HWDER_CACHE_PROFILE` | presence | off | Pipeline cache / warmup save: log retrieval, snapshot, validation, serialization and disk timings (cache-save:). Read on every save. |
 | `HWDER_CACHE_SAVE_SYNC` | string | unset | Exactly "1": save the warmup records synchronously instead of on the background task. |

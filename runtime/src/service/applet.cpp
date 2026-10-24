@@ -149,6 +149,8 @@ public:
 };
 
 constexpr u32 kAppletController = 0x0C;  // AppletId LibraryAppletController (0x0B is the cabinet applet)
+constexpr u32 kAppletWeb = 0x13;         // LibraryAppletWeb
+constexpr u32 kAppletOfflineWeb = 0x17;  // LibraryAppletOfflineWeb: the electronic manual (+ on the title screen)
 
 // Library applets complete at once. The controller applet (nn::hid::ShowControllerSupport, opened when the
 // player picks 2P) answers with the players the host has: switchbrew "Controller Applet".
@@ -160,6 +162,7 @@ public:
         nop({10, 20, 25, 100, 103, 104, 105});                                       // Start, RequestExit, Push*
         reg(10, [this](Request&, Response&) {
             if (id_ == kAppletController) run_controller_applet();
+            else if (id_ == kAppletWeb || id_ == kAppletOfflineWeb) close_web_applet();
             else hw_log("am: library applet 0x%x started (auto-completes)", id_);
         });
         reg(100, [this](Request& rq, Response&) {  // PushInData(IStorage)
@@ -249,6 +252,15 @@ private:
         memcpy(out.data() + 8, &result, 4);
         out_data_.push_back(std::move(out));
         hw_log("am: controller applet: host slots 0x%x (%d present) -> %d player(s), result %u", slots, present, count, result);
+    }
+
+    // The web applets (+ on the title screen opens the manual) have no browser here: they close at once.
+    // The game pops a WebCommonReturnValue (0x1010 bytes: u32 exit reason, pad, char last_url[0x1000],
+    // u64 last_url_size) and aborts with svcBreak when there is none, so answer "End button pressed".
+    void close_web_applet() {
+        for (const std::vector<u8>& d : in_data_) hw_log("am: web applet 0x%x in data of %zu bytes", id_, d.size());
+        out_data_.push_back(std::vector<u8>(0x1010, 0));  // exit reason 0 (EndButtonPressed), empty URL
+        hw_log("am: web applet 0x%x closed at once (no browser)", id_);
     }
 
     u32 id_;

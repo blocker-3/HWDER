@@ -288,9 +288,12 @@ void update_thread() {
     // loaded, + (loading tips) followed by B (closes the pause menu if + opened one), then move and attack.
     // No cutscene-skip sequence: its Left press moved the pre-battle menu's cursor off "Start Battle".
     static const bool battle = autoplay && atoi(debug::str(debug::Autoplay)) == 2;
+    // HWDER_AUTOPLAY_PLUS=1: + five times a second for the first 30 s (+ on the title screen opens the manual).
+    static const bool plus_spam = debug::flag(debug::AutoplayPlus);
     const u64 t0 = GetTickCount64();
     for (;;) {
         hid::poll_host_input(in);
+        if (plus_spam && GetTickCount64() - t0 < 30000 && (GetTickCount64() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
         if (battle) {
             u64 t = GetTickCount64() - t0;
             // Every 3 s: B (leaves a sub-screen such as Battlefield Info; nothing on the pre-battle menu),
