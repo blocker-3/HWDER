@@ -61,7 +61,7 @@ class Managed(unittest.TestCase):
     def test_pins_have_official_hashes_bounds_and_explicit_versions(self):
         value = tools.manifest()
         pins = {item["id"]: item for item in value["artifacts"]}
-        self.assertEqual(len(pins), 8)
+        self.assertEqual(len(pins), 9)  # the five Python packages include zstandard (game update 1.0.1)
         self.assertEqual(pins["cmake"]["version"], "3.31.12")
         self.assertEqual(pins["ninja"]["version"], "1.13.2")
         self.assertEqual(pins["python"]["version"], "3.13.16")
