@@ -184,7 +184,8 @@ def main():
     with open(os.path.join(a.out, "module_info.c"), "w") as f:
         f.write('#include "hwder/module.h"\n\nconst HwModuleInfo hw_modules[] = {\n')
         for name, base, size, tlo, thi, build_id in mod_infos:
-            f.write(f'  {{ "{name}", {hx(base)}, {hx(size)}, {hx(tlo)}, {hx(thi)}, "{build_id}" }},\n')
+            f.write(f'  {{ "{name}", {hx(base)}, {hx(size)}, {hx(tlo)}, {hx(thi)}\n'
+                    f'#ifdef HW_MODULE_HAS_BUILD_ID\n    , "{build_id}"\n#endif\n  }},\n')
         f.write("};\nconst unsigned hw_module_count = sizeof(hw_modules) / sizeof(hw_modules[0]);\n")
     log(f"done: {len(all_starts)} functions in {len(files)} files")
 

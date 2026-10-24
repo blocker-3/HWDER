@@ -11,6 +11,9 @@ typedef struct HwModuleInfo {
     // generated dir from before this field). The loader refuses a different module: the code would not match.
     const char* build_id;
 } HwModuleInfo;
+// Generated module_info.c fills build_id only when this is defined, so a generated dir also builds with a
+// checkout whose HwModuleInfo predates the field (worktrees share ../HWDER/generated).
+#define HW_MODULE_HAS_BUILD_ID 1
 extern const HwModuleInfo hw_modules[];
 extern const unsigned hw_module_count;
 #ifdef __cplusplus
