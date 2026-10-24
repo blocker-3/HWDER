@@ -1,0 +1,72 @@
+name: Release setup zip
+
+# Builds the player setup zip (source + the code-free HWDER Setup.exe) on a clean runner.
+# No game files, keys or secrets: Prepare builds the game on the player's own PC.
+# A v* tag push attaches the zip to a DRAFT release; publishing it stays a manual step.
+# Run it by hand (Actions > Release setup zip > Run workflow) to get a test zip as a
+# workflow artifact without touching releases.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0        # git describe and the kit-baseline ancestry check need history and tags
+          submodules: true      # pinned SDL/imgui/headers source and their licence files ship in the kit
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11.9'
+      - name: Synthetic regression
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r tools/requirements-ci.txt
+          python tools/tests/run_synthetic.py --jobs 2
+      - name: Build setup zip
+        shell: pwsh
+        run: |
+          $extra = @()
+          if ('${{ github.ref_type }}' -ne 'tag') { $extra += '--allow-untagged' }
+          python tools/release_kit.py --work "$env:RUNNER_TEMP\release-kit" --out dist @extra
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hwder-setup
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hwder-setup
+          path: dist
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip dist/*.sha256
+          else
+            gh release create "$TAG" dist/*.zip dist/*.sha256 --draft --verify-tag \
+              --title "HWDER $TAG" --notes "Draft built by GitHub Actions. SHA-256: $(cat dist/*.sha256)"
+          fi
