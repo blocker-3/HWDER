@@ -204,24 +204,7 @@ extern "C" u64 hw_cntvct(void) {
     host::counter(&t);
     return (u64)((double)t.QuadPart * (19200000.0 / (double)freq.QuadPart));
 }
-// Guest spin-waits yield in a loop (YIELD instructions, SleepThread(0)). HWDER_YIELD_BACKOFF_US (experiment): once a
-// thread has yielded 64 times in a row with under 0.2 ms between yields, it sleeps that long instead of spinning,
-// which leaves a handheld's shared power budget to the threads doing the work.
-void guest_yield() {
-    static const int backoff_us = debug::value(debug::YieldBackoffUs, 0);
-    if (backoff_us <= 0) {
-        host::thread_yield();
-        return;
-    }
-    thread_local u32 streak = 0;
-    thread_local u64 last = 0;
-    const u64 now = host::monotonic_ns();
-    streak = now - last < 200000 ? streak + 1 : 0;
-    last = now;
-    if (streak >= 64) host::sleep_ns((s64)backoff_us * 1000);
-    else host::thread_yield();
-}
-extern "C" void hw_yield(void) { guest_yield(); }
+extern "C" void hw_yield(void) { host::thread_yield(); }
 extern "C" void hw_brk(Ctx* c, u64 pc, u32 imm) {
     hw_log("guest brk #0x%x at 0x%llx (x0=0x%llx)", imm, (unsigned long long)pc, (unsigned long long)c->x[0]);
     hw_fatal("guest abort");

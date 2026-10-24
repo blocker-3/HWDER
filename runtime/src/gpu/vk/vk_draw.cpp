@@ -1,6 +1,7 @@
 // Draw, clear, compute dispatch and 2D blit of the Vulkan renderer: the Maxwell state to pipeline key, vertex
 // and index staging, descriptor binding and command recording of every draw. Moved text-for-text from
 // vk_renderer.cpp.
+#include <optional>
 #include <cmath>
 #include "host/timing.h"
 #include "host/platform.h"
@@ -752,7 +753,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         VK_LOG_ONCE("vk: draw skipped (no usable program)");
         return;
     }
-    ProfScope* phase = new ProfScope(kProfFramebuffer);
+    std::optional<ProfScope> phase(std::in_place, kProfFramebuffer);
     // The render-target registers rarely change between draws: reuse the last resolved framebuffer
     // while they (and the texture cache's image set) are unchanged.
     u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
@@ -769,8 +770,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         fb_cache_valid_ = true;
     }
 
-    delete phase;
-    phase = new ProfScope(kProfKeyBuild);
+    phase.reset();
+    phase.emplace(kProfKeyBuild);
     DrawCtx d;
     build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
     PipelineKey& key = d.key;
@@ -781,16 +782,16 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     bool& indexed = d.indexed;
     u32& count = d.count;
 
-    delete phase;
-    phase = new ProfScope(kProfVertex);
+    phase.reset();
+    phase.emplace(kProfVertex);
     stage_vertex_input(regs, p, d);
 
-    delete phase;
-    phase = new ProfScope(kProfIndex);
+    phase.reset();
+    phase.emplace(kProfIndex);
     stage_indices(p, inline_idx, d);
 
-    delete phase;
-    phase = new ProfScope(kProfDescriptors);
+    phase.reset();
+    phase.emplace(kProfDescriptors);
     // ---- descriptor sets (may upload textures: before rendering begins)
     VkDescriptorSet sets[5] = {};
     std::vector<std::function<void()>> post;
@@ -829,11 +830,11 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post);
     }
 
-    delete phase;
-    phase = new ProfScope(kProfPipeline);
+    phase.reset();
+    phase.emplace(kProfPipeline);
     VkPipeline pipe = get_pipeline(prog, key);
-    delete phase;
-    phase = nullptr;
+    phase.reset();
+    phase.reset();
     if (!pipe) {
         skipped_++;
         st_.skipped++;

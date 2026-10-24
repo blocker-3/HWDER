@@ -1,5 +1,6 @@
 // Resource binding of the Vulkan renderer: dummy images, framebuffer resolution, dynamic rendering, descriptor
 // pools, TIC reads and filling a program's descriptor set. Moved text-for-text from vk_renderer.cpp.
+#include <optional>
 #include "vk_renderer.h"
 #include "debug_flags.h"
 
@@ -79,14 +80,14 @@ Framebuffer VkRenderer::resolve_framebuffer(const u32* regs, bool for_clear, u32
         }
         if (!info.width) continue;
         Subresource sub;
-        ProfScope* fps = new ProfScope(kProfFbGet);
+        std::optional<ProfScope> fps(std::in_place, kProfFbGet);
         Image* img = tc_.get((u64)p, info, &sub);
-        delete fps;
+        fps.reset();
         u32 layer = sub.layer + (info.type == ImageType::e3D ? 0 : rt[8]);
         fb.color[i] = img;
-        fps = new ProfScope(kProfFbView);
+        fps.emplace(kProfFbView);
         fb.color_view[i] = tc_.view(img, fi.vk, VK_IMAGE_VIEW_TYPE_2D, sub.level, 1, layer, 1);
-        delete fps;
+        fps.reset();
         fb.color_format[i] = img->info.fmt.vk == fi.vk || vk_format_bytes(img->info.fmt.vk) == vk_format_bytes(fi.vk)
                                  ? fi.vk
                                  : img->info.fmt.vk;
@@ -349,7 +350,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         w.pTexelBufferView = &dw.texels[first];
     }
     // sampled textures
-    ProfScope* texs = new ProfScope(kProfTextures);
+    std::optional<ProfScope> texs(std::in_place, kProfTextures);
     for (const auto& t : res.textures) {
         u32 n = std::max(1u, t.count);
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n);
@@ -391,7 +392,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                 ImageInfo info;
                 u64 a;
                 u32 bl, nl, blayer;
-                ProfScope* tps = new ProfScope(kProfTexGet);
+                std::optional<ProfScope> tps(std::in_place, kProfTexGet);
                 bool ok = tc_.info_from_tic(tic, info, a, bl, nl, blayer);
                 static int nlog = 0;
                 if (verbose_ && nlog < 60) {
@@ -435,8 +436,8 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         swz = {fix(swz.r), fix(swz.g), fix(swz.b), fix(swz.a)};
                     }
                     u32 layers = info.layers;
-                    delete tps;
-                    tps = new ProfScope(kProfTexView);
+                    tps.reset();
+                    tps.emplace(kProfTexView);
                     VkImageView v = tc_.view(img, info.fmt.vk, vt, sub.level + bl, nl, sub.layer + blayer, layers, swz,
                                              aspect);
                     if (v) ii.imageView = v;
@@ -480,7 +481,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         }
                     }
                 }
-                delete tps;
+                tps.reset();
                 }
             }
             {
@@ -491,7 +492,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         }
         w.pImageInfo = &dw.images[first];
     }
-    delete texs;
+    texs.reset();
     // storage images
     for (const auto& im : res.images) {
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1);

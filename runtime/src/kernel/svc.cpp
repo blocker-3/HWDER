@@ -14,8 +14,6 @@
 #include "sync.h"
 #include "perf_stats.h"
 
-void guest_yield();  // core.cpp: yield, with the optional spin-wait backoff
-
 namespace kern {
 
 static u64 now_ticks() { return hw_cntvct(); }
@@ -169,7 +167,7 @@ void svc_dispatch(Ctx* c, u32 imm) {
         exit_current_thread();
     case 0x0B: {  // SleepThread(ns)
         s64 ns = (s64)c->x[0];
-        if (ns <= 0) guest_yield();
+        if (ns <= 0) host::thread_yield();
         else if (perf::enabled()) {
             const u64 start = host::monotonic_ns();
             hw_sleep_ns(ns);

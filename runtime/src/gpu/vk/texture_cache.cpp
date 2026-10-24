@@ -2,6 +2,7 @@
 #include "host/platform.h"
 // Texture cache: guest surfaces (block-linear / pitch) <-> VkImages keyed by guest address.
 #include "gpu/settings.h"
+#include <optional>
 #include <algorithm>
 #include <map>
 #include <filesystem>
@@ -286,13 +287,13 @@ bool TextureCache::match_subresource(Image* img, u64 addr, const ImageInfo& info
 Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
     SlowTimer timer("texture get", 30.0);
     *sub = {};
-    ProfScope* ps = new ProfScope(kProfGetLayout);
+    std::optional<ProfScope> ps(std::in_place, kProfGetLayout);
     u64 size = compute_layout(info, nullptr, nullptr);
-    delete ps;
-    ps = new ProfScope(kProfGetOverlaps);
+    ps.reset();
+    ps.emplace(kProfGetOverlaps);
     std::vector<Image*> overlaps;
     collect_overlaps(addr, size, overlaps);
-    delete ps;
+    ps.reset();
     if (info.render_target) {  // the game renders into it again: recreate it at the current scale (apply_scale)
         for (size_t i = 0; i < overlaps.size();) {
             Image* o = overlaps[i];
@@ -304,7 +305,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             }
         }
     }
-    ps = new ProfScope(kProfGetMatch);
+    ps.emplace(kProfGetMatch);
     Image* hit = nullptr;
     for (Image* img : overlaps) {
         if (img->addr == addr && img->info.type == info.type && img->info.width == info.width &&
@@ -324,7 +325,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             }
         }
     }
-    delete ps;
+    ps.reset();
     if (hit) {
         ProfScope vs(kProfGetValidate);
         hit->last_used = rec().serial();
@@ -510,7 +511,7 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
 
 void TextureCache::alloc_image(Image* img) {
     const ImageInfo& info = img->info;
-    ProfScope* ps = new ProfScope(kProfCreateImage);
+    std::optional<ProfScope> ps(std::in_place, kProfCreateImage);
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = info.type == ImageType::e1D ? VK_IMAGE_TYPE_1D
                    : info.type == ImageType::e3D ? VK_IMAGE_TYPE_3D
@@ -545,14 +546,14 @@ void TextureCache::alloc_image(Image* img) {
                info.width, info.height, info.depth, info.layers, info.levels);
         hw_fatal("vk: image creation");
     }
-    delete ps;
-    ps = new ProfScope(kProfAllocBind);
+    ps.reset();
+    ps.emplace(kProfAllocBind);
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(dev(), img->image, &req);
     Alloc a = allocate(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     VK_CHECK(vkBindImageMemory(dev(), img->image, a.mem, a.offset));
     g_allocs[(u64)img->image] = a;
-    delete ps;
+    ps.reset();
     // initial layout transition to GENERAL
     VkCommandBuffer cb = rec().cmd();
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};

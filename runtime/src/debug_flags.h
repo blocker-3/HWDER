@@ -93,7 +93,6 @@ enum Id {
     VkVerbose,  // HWDER_VK_VERBOSE
     VkWhiteTex,  // HWDER_VK_WHITE_TEX
     WaitTrace,  // HWDER_WAIT_TRACE
-    YieldBackoffUs,  // HWDER_YIELD_BACKOFF_US
     kCount
 };
 

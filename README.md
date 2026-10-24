@@ -380,7 +380,6 @@ current values. Kinds:
 | `HWDER_VK_VERBOSE` | presence | off | Verbose renderer logging: the first draws, texture handles and clears. |
 | `HWDER_VK_WHITE_TEX` | presence | off | Bind the white dummy texture instead of every sampled texture. |
 | `HWDER_WAIT_TRACE` | presence | off | Kernel: log slow WaitSynchronization calls. |
-| `HWDER_YIELD_BACKOFF_US` | integer | unset | Experiment: a guest thread that keeps yielding (a spin-wait) sleeps that many microseconds once a streak of yields passes 64. |
 <!-- debug-flags:end -->
 
 Successful graphics pipelines are recorded with their shader code and binding metadata in

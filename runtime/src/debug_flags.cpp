@@ -89,7 +89,6 @@ static const Flag kTable[] = {
     {VkVerbose, "HWDER_VK_VERBOSE", "Verbose renderer logging: the first draws, texture handles and clears.", kPresence},
     {VkWhiteTex, "HWDER_VK_WHITE_TEX", "Bind the white dummy texture instead of every sampled texture.", kPresence},
     {WaitTrace, "HWDER_WAIT_TRACE", "Kernel: log slow WaitSynchronization calls.", kPresence},
-    {YieldBackoffUs, "HWDER_YIELD_BACKOFF_US", "Experiment: a guest thread that keeps yielding (a spin-wait) sleeps that many microseconds once a streak of yields passes 64.", kInt},
 };
 static_assert(sizeof(kTable) / sizeof(kTable[0]) == kCount, "table and Id enum out of step");
 
