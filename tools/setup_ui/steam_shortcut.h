@@ -87,36 +87,84 @@ inline void num(std::string& o, const char* k, uint32_t v) {
     for (int i = 0; i < 4; ++i) o += (char)((v >> (8 * i)) & 0xFF);
 }
 
+inline void write(std::string& o, const Node& n) {
+    o += (char)n.type;
+    o += n.key;
+    o += '\0';
+    if (n.type == 0x00) {
+        for (const auto& kid : n.kids) write(o, kid);
+        o += '\x08';
+    } else if (n.type == 0x01) {
+        o += n.value;
+        o += '\0';
+    } else {
+        o += n.value;
+    }
+}
+inline std::string le32(uint32_t v) {
+    std::string s;
+    for (int i = 0; i < 4; ++i) s += (char)((v >> (8 * i)) & 0xFF);
+    return s;
+}
+
 }  // namespace detail
 
-enum class Added { Yes, AlreadyThere, Unreadable };
+// Updated: an entry for the same exe existed and its name, id or icon were brought up to date.
+enum class Added { Yes, Updated, AlreadyThere, Unreadable };
 
-// `existing` is the current file ("" when there is none); on Yes, `out` is the new file.
-inline Added add(const std::string& existing, const Shortcut& s, std::string& out) {
+// `existing` is the current file ("" when there is none); on Yes or Updated, `out` is the new file. `id` (optional)
+// receives the entry's Steam id, which names its artwork in config/grid.
+inline Added add(const std::string& existing, const Shortcut& s, std::string& out, uint32_t* id = nullptr) {
     static const std::string head("\0shortcuts\0", 11);
     const std::string base = existing.empty() ? head + "\x08\x08" : existing;
     if (base.compare(0, head.size(), head) != 0) return Added::Unreadable;
     size_t at = head.size();
     detail::Node list;
     if (!detail::parse_map(base, at, list, 0) || at + 1 != base.size() || base[at] != '\x08') return Added::Unreadable;
+    const std::string quoted = "\"" + s.exe + "\"";
     unsigned next = 0;
-    for (const auto& kid : list.kids) {
+    for (auto& kid : list.kids) {
         if (kid.type != 0x00) continue;
         unsigned index = 0;
         bool digits = !kid.key.empty();
         for (char c : kid.key) digits = digits && c >= '0' && c <= '9', index = index * 10 + (c - '0');
         if (digits && index + 1 > next) next = index + 1;
+        const detail::Node* exe = nullptr;
         for (const auto& field : kid.kids)
             if (field.type == 0x01 && detail::lower(field.key) == "exe" &&
                 detail::lower(detail::unquoted(field.value)) == detail::lower(s.exe))
-                return Added::AlreadyThere;
+                exe = &field;
+        if (!exe) continue;
+        // Steam derives the id from the Exe value exactly as stored.
+        const uint32_t appid = shortcut_appid(exe->value, s.name);
+        if (id) *id = appid;
+        // Bring an earlier HWDER entry up to date (name, the id its artwork files are named by, icon);
+        // every other field and every other entry is written back unchanged.
+        bool changed = false;
+        auto set = [&](const char* key, unsigned char type, const std::string& value) {
+            for (auto& field : kid.kids)
+                if (field.type == type && detail::lower(field.key) == detail::lower(key)) {
+                    changed = changed || field.value != value;
+                    field.value = value;
+                    return;
+                }
+        };
+        set("AppName", 0x01, s.name);
+        set("appid", 0x02, detail::le32(appid));
+        if (!s.icon.empty()) set("icon", 0x01, s.icon);
+        if (!changed) return Added::AlreadyThere;
+        out = head;
+        for (const auto& entry : list.kids) detail::write(out, entry);
+        out += "\x08\x08";
+        return Added::Updated;
     }
-    const std::string quoted = "\"" + s.exe + "\"";
+    const uint32_t appid = shortcut_appid(quoted, s.name);
+    if (id) *id = appid;
     std::string e;
     e += '\0';
     e += std::to_string(next);
     e += '\0';
-    detail::num(e, "appid", shortcut_appid(quoted, s.name));
+    detail::num(e, "appid", appid);
     detail::str(e, "AppName", s.name);
     detail::str(e, "Exe", quoted);
     detail::str(e, "StartDir", "\"" + s.start_dir + "\"");

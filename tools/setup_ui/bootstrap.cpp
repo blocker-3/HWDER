@@ -11,6 +11,7 @@
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <winhttp.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -21,15 +22,17 @@
 #include <algorithm>
 #include <memory>
 #include <cstring>
+#include <cctype>
+#include <cwctype>
 #include "steam_shortcut.h"
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace fs=std::filesystem;
 constexpr UINT Event=WM_APP+1;
-enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced,Steam };
+enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced,Steam,SteamGrid };
 enum class Step { Inputs,Install,Prepare,Retry,Play };
 constexpr int Width=866;
-HWND window,gameBox,keyBox,dataBox,statusBox,progress,progressBox,detailBox,primaryButton,shortcutButton,steamButton,cancelButton,locationBox,titleBox,advancedButton;
+HWND window,gameBox,keyBox,dataBox,statusBox,progress,progressBox,detailBox,primaryButton,shortcutButton,steamButton,cancelButton,locationBox,titleBox,advancedButton,steamGridBox;
 std::vector<HWND> advancedControls;
 HFONT font,titleFont;fs::path source,application;bool demo=false,busy=false,publishing=false,closeDeferred=false,ready=false,pendingReady=false,launching=false,committed=false,hadPublishPermission=false;
 bool advanced=false,detailsShown=false,toolsMissingHint=false,retryHint=false;
@@ -244,6 +247,76 @@ bool closeSteam(const fs::path& root){
     }
     return !processRunning(L"steam.exe");
 }
+const char* const steamName="Hyrule Warriors: Definitive Edition";
+// Optional box art from SteamGridDB, which needs the player's own free API key (steamgriddb.com, Preferences, API).
+// The key typed under Advanced is kept in <data folder>\steamgriddb-key.txt for later runs. No artwork ships with HWDER.
+std::wstring steamGridKey(){
+    std::error_code e;const fs::path file=fs::path(text(dataBox))/L"steamgriddb-key.txt";
+    std::wstring typed=text(steamGridBox);typed.erase(std::remove_if(typed.begin(),typed.end(),iswspace),typed.end());
+    if(!typed.empty()){if(fs::is_directory(file.parent_path(),e)){std::ofstream o(file,std::ios::binary|std::ios::trunc);o<<utf8(typed);}return typed;}
+    std::ifstream in(file,std::ios::binary);std::string saved((std::istreambuf_iterator<char>(in)),{});
+    saved.erase(std::remove_if(saved.begin(),saved.end(),[](unsigned char c){return std::isspace(c);}),saved.end());
+    return wide(saved);
+}
+// HTTPS GET; returns the body, or "" with status 0 on a network error.
+std::string httpsGet(const std::wstring& url,const std::wstring& bearer,DWORD& status){
+    status=0;URL_COMPONENTS parts{sizeof parts};wchar_t host[256]{},path[2048]{};
+    parts.lpszHostName=host;parts.dwHostNameLength=256;parts.lpszUrlPath=path;parts.dwUrlPathLength=2048;parts.dwExtraInfoLength=(DWORD)-1;
+    if(!WinHttpCrackUrl(url.c_str(),0,0,&parts)||parts.nScheme!=INTERNET_SCHEME_HTTPS)return{};
+    std::wstring object=path;if(parts.lpszExtraInfo)object.append(parts.lpszExtraInfo,parts.dwExtraInfoLength);
+    std::string body;
+    HINTERNET session=WinHttpOpen(L"HWDER-Setup",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
+    HINTERNET connection=session?WinHttpConnect(session,host,parts.nPort,0):nullptr;
+    HINTERNET request=connection?WinHttpOpenRequest(connection,L"GET",object.c_str(),nullptr,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE):nullptr;
+    if(request){
+        WinHttpSetTimeouts(request,10000,10000,10000,20000);
+        const std::wstring header=bearer.empty()?std::wstring():L"Authorization: Bearer "+bearer;
+        DWORD size=sizeof status;
+        if(WinHttpSendRequest(request,header.empty()?WINHTTP_NO_ADDITIONAL_HEADERS:header.c_str(),(DWORD)-1L,WINHTTP_NO_REQUEST_DATA,0,0,0)&&WinHttpReceiveResponse(request,nullptr)&&
+           WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&size,WINHTTP_NO_HEADER_INDEX)){
+            for(DWORD n=0;WinHttpQueryDataAvailable(request,&n)&&n&&body.size()<(32u<<20);){std::string chunk(n,'\0');DWORD got=0;if(!WinHttpReadData(request,chunk.data(),n,&got)||!got)break;body.append(chunk,0,got);}
+        }else status=0;
+    }
+    if(request)WinHttpCloseHandle(request);if(connection)WinHttpCloseHandle(connection);if(session)WinHttpCloseHandle(session);
+    return body;
+}
+// The first "name":value in a SteamGridDB reply (enough for its flat {"success":true,"data":[{...}]} answers).
+std::string jsonField(const std::string& json,const std::string& name){
+    const auto at=json.find("\""+name+"\":");if(at==json.npos)return{};
+    size_t i=at+name.size()+3;std::string v;
+    if(i<json.size()&&json[i]=='"'){for(++i;i<json.size()&&json[i]!='"';++i){if(json[i]=='\\'&&i+1<json.size())++i;v+=json[i];}}
+    else while(i<json.size()&&std::isdigit((unsigned char)json[i]))v+=json[i++];
+    return v;
+}
+// Saves grid art as config/grid/<id>p, <id>, <id>_hero, <id>_logo and <id>_icon (Steam's names for a shortcut),
+// keeping any picture the player already set. Returns a sentence for the status line; `icon` gets the icon path.
+std::wstring steamGridArtwork(const std::wstring& key,const fs::path& grid,uint32_t id,fs::path& icon){
+    const std::wstring api=L"https://www.steamgriddb.com/api/v2/";DWORD status=0;
+    const auto found=httpsGet(api+L"search/autocomplete/Hyrule%20Warriors%3A%20Definitive%20Edition",key,status);
+    if(status==401||status==403)return L" SteamGridDB did not accept the API key, so no artwork was added.";
+    const auto game=jsonField(found,"id");
+    if(status!=200||game.empty())return L" Artwork could not be downloaded from SteamGridDB (no connection or no match).";
+    std::error_code e;fs::create_directories(grid,e);
+    struct Art{const wchar_t* query;std::wstring stem;};
+    const std::wstring base=std::to_wstring(id),g=wide(game);
+    const Art arts[]={{L"grids/game/",base+L"p"},{L"grids/game/",base},{L"heroes/game/",base+L"_hero"},{L"logos/game/",base+L"_logo"},{L"icons/game/",base+L"_icon"}};
+    const wchar_t* filters[]={L"?dimensions=600x900&types=static&mimes=image/png,image/jpeg",L"?dimensions=920x430,460x215&types=static&mimes=image/png,image/jpeg",
+                              L"?types=static&mimes=image/png,image/jpeg",L"?types=static&mimes=image/png",L"?types=static&mimes=image/png"};
+    int saved=0,kept=0;
+    for(int k=0;k<5;++k){
+        bool present=false;for(const wchar_t* ext:{L".png",L".jpg"})if(fs::exists(grid/(arts[k].stem+ext),e)){present=true;if(k==4)icon=grid/(arts[k].stem+ext);}
+        if(present){++kept;continue;}
+        const auto list=httpsGet(api+arts[k].query+g+filters[k],key,status);const auto url=jsonField(list,"url");
+        if(status!=200||url.empty())continue;
+        const auto picture=httpsGet(wide(url),L"",status);if(status!=200||picture.size()<64)continue;
+        const bool png=picture.compare(0,4,"\x89PNG")==0,jpg=picture.compare(0,3,"\xFF\xD8\xFF")==0;if(!png&&!jpg)continue;
+        const auto target=grid/(arts[k].stem+(png?L".png":L".jpg"));
+        std::ofstream o(target,std::ios::binary|std::ios::trunc);o.write(picture.data(),(std::streamsize)picture.size());
+        if(o){++saved;if(k==4)icon=target;}
+    }
+    if(!saved&&!kept)return L" SteamGridDB had no artwork for it.";
+    return L" Artwork from SteamGridDB: "+std::to_wstring(saved)+L" new, "+std::to_wstring(kept)+L" kept.";
+}
 // The Steam account to add to: the most recent login in config/loginusers.vdf, else the only userdata account.
 std::wstring steamAccount(const fs::path& root){
     std::ifstream in(root/L"config"/L"loginusers.vdf",std::ios::binary);std::string text((std::istreambuf_iterator<char>(in)),{});
@@ -268,7 +341,7 @@ void addToSteam(){
         if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam",L"SteamPath",RRF_RT_REG_SZ,nullptr,found,&bytes)!=ERROR_SUCCESS||!fs::is_directory(fs::path(found),e)){state(L"Steam was not found on this PC. Install Steam and sign in once, then try again.");return;}
         root=fs::path(found).make_preferred();
         if(processRunning(L"steam.exe")){
-            state(L"Closing Steam so it does not overwrite the new entry…");EnableWindow(steamButton,FALSE);
+            state(L"Closing Steam so it does not overwrite the new entry\u2026");EnableWindow(steamButton,FALSE);
             const bool closed=closeSteam(root);EnableWindow(steamButton,TRUE);
             if(!closed){state(L"Steam did not close. Exit it from its tray icon (right-click, Exit), then choose Add to Steam again.");return;}
             restart=true;
@@ -281,16 +354,21 @@ void addToSteamIn(const fs::path& root){
     auto account=steamAccount(root);if(account.empty()){state(L"Could not tell which Steam account to use. Sign in to Steam once, close it, then try again.");return;}
     auto file=root/L"userdata"/account/L"config"/L"shortcuts.vdf";std::error_code e;
     std::string existing;if(fs::exists(file,e)){std::ifstream in(file,std::ios::binary);if(!in){state(L"Steam's game list could not be read, so it was left unchanged.");return;}existing.assign(std::istreambuf_iterator<char>(in),{});}
-    std::string out;switch(steam::add(existing,{"HWDER",utf8(installedExe.wstring()),utf8(installedExe.parent_path().wstring()),utf8(installedExe.wstring())},out)){
-    case steam::Added::AlreadyThere:state(L"HWDER is already in your Steam library.");return;
-    case steam::Added::Unreadable:state(L"Steam's game list is in a format Setup does not know, so it was left unchanged.");return;
-    default:break;}
+    steam::Shortcut entry{steamName,utf8(installedExe.wstring()),utf8(installedExe.parent_path().wstring()),utf8(installedExe.wstring())};
+    std::string out;uint32_t id=0;auto added=steam::add(existing,entry,out,&id);
+    if(added==steam::Added::Unreadable){state(L"Steam's game list is in a format Setup does not know, so it was left unchanged.");return;}
+    std::wstring artNote;fs::path icon;
+    const auto key=steamGridKey();
+    if(key.empty())artNote=L" For box art, enter a free SteamGridDB API key under Advanced and choose Add to Steam again.";
+    else{state(L"Downloading artwork from SteamGridDB…");UpdateWindow(window);artNote=steamGridArtwork(key,root/L"userdata"/account/L"config"/L"grid",id,icon);}
+    if(!icon.empty()){entry.icon=utf8(icon.wstring());added=steam::add(existing,entry,out,&id);}
+    if(added==steam::Added::AlreadyThere){state(L"HWDER is already in your Steam library."+artNote);return;}
     fs::create_directories(file.parent_path(),e);
     if(!existing.empty()){fs::copy_file(file,fs::path(file)+=L".hwder-backup",fs::copy_options::overwrite_existing,e);if(e){state(L"Could not back up Steam's game list, so it was left unchanged.");return;}}
     auto temp=fs::path(file)+=L".hwder-new";
     {std::ofstream o(temp,std::ios::binary|std::ios::trunc);o.write(out.data(),(std::streamsize)out.size());if(!o){state(L"Could not write Steam's game list; it was left unchanged.");return;}}
     if(!MoveFileExW(temp.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){fs::remove(temp,e);state(L"Could not write Steam's game list; it was left unchanged.");return;}
-    state(L"Added to Steam as a non-Steam game. Start Steam and HWDER is in your library.");
+    state((added==steam::Added::Updated?std::wstring(L"Your Steam entry is up to date."):std::wstring(L"Added to Steam as a non-Steam game."))+artNote);
 }
 HWND control(const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int w,int h,int id=0,bool hidden=false){HWND c=CreateWindowExW(cls==std::wstring(L"EDIT")?WS_EX_CLIENTEDGE:0,cls,label,WS_CHILD|WS_VISIBLE|style,x,y,w,h,window,(HMENU)(INT_PTR)id,GetModuleHandleW(nullptr),nullptr);SendMessageW(c,WM_SETFONT,(WPARAM)font,TRUE);if(hidden)advancedControls.push_back(c);return c;}
 void primary(){
@@ -316,7 +394,7 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         control(L"STATIC",L"Data folder",0,28,360,180,24,0,true);dataBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,356,505,28,Data,true);control(L"BUTTON",L"Choose\u2026",BS_PUSHBUTTON,727,356,95,28,BrowseData,true);
         locationBox=control(L"STATIC",L"",0,28,392,790,42,0,true);
         control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,438,170,36,Check,true);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,210,438,190,36,Components,true);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,412,438,150,36,OpenGame,true);
-        control(L"BUTTON",L"Open data folder",BS_PUSHBUTTON,28,482,150,36,ToolsSite,true);control(L"BUTTON",L"About tools",BS_PUSHBUTTON,190,482,120,36,PythonSite,true);control(L"BUTTON",L"Details",BS_AUTOCHECKBOX,322,486,90,30,Details,true);
+        control(L"BUTTON",L"Open data folder",BS_PUSHBUTTON,28,482,150,36,ToolsSite,true);control(L"BUTTON",L"About tools",BS_PUSHBUTTON,190,482,120,36,PythonSite,true);control(L"BUTTON",L"Details",BS_AUTOCHECKBOX,322,486,90,30,Details,true);control(L"STATIC",L"SteamGridDB key",0,424,490,130,24,0,true);steamGridBox=control(L"EDIT",L"",ES_AUTOHSCROLL|ES_PASSWORD,556,486,266,28,SteamGrid,true);
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,522,790,185);
         statusBox=control(L"STATIC",L"",0,28,186,790,54); // created last: the tests read the final STATIC as the status line
         layout();refresh();return 0;}

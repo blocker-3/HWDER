@@ -29,6 +29,17 @@ int main() {
         require(second.find(std::string("\0" "1" "\0", 3)) != std::string::npos, "second entry is named 1");
         require(second.compare(0, first.size() - 2, first, 0, first.size() - 2) == 0, "existing entries kept byte for byte");
         require(steam::add(second, game, again) == steam::Added::AlreadyThere, "first still found after the second");
+        steam::Shortcut renamed = game;
+        renamed.name = "Hyrule Warriors: Definitive Edition";
+        renamed.icon = "C:\\Steam\\userdata\\1\\config\\grid\\1_icon.png";
+        std::string updated, unchanged;
+        require(steam::add(second, renamed, updated) == steam::Added::Updated, "earlier entry renamed");
+        require(updated.find("Hyrule Warriors: Definitive Edition") != std::string::npos && updated.find(std::string("\0HWDER\0", 7)) == std::string::npos, "new name replaces the old");
+        require(updated.find(renamed.icon) != std::string::npos, "icon updated");
+        const uint32_t id = steam::shortcut_appid("\"" + game.exe + "\"", renamed.name);
+        require(updated.find(std::string("\x02" "appid\0", 7) + steam::detail::le32(id)) != std::string::npos, "appid follows the new name");
+        require(updated.find("D:\\Other\\other.exe") != std::string::npos && updated.size() == second.size() + renamed.name.size() - game.name.size() + renamed.icon.size() - game.icon.size(), "other entry and fields kept");
+        require(steam::add(updated, renamed, unchanged) == steam::Added::AlreadyThere, "up-to-date entry left alone");
         require(steam::add("not a vdf", game, again) == steam::Added::Unreadable, "foreign bytes refused");
         require(steam::add(first.substr(0, first.size() - 5), game, again) == steam::Added::Unreadable, "truncated file refused");
         // Known value: CRC-32 of "\"C:\\a.exe\"" + "A" with the top bit set, computed independently (zlib.crc32).
