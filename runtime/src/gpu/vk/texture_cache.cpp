@@ -485,6 +485,7 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
         }
         if (whole) queried = serial;
         for (size_t i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+        if (n) watch_written_[b] = epoch_;
     }
     if (epoch_ - watch_pruned_ >= 512) {  // forget old reports; images last checked before then re-hash once
         watch_pruned_ = epoch_ - 256;
@@ -494,6 +495,14 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     u64 since = watch_epoch;
     watch_epoch = epoch_;
     if (since < watch_pruned_) return 1;
+    // Most images' blocks had no report since their last check: skip walking the page map (a large texture
+    // spans hundreds of recorded pages, and the walk cost ~5% of the GPU thread in a busy battle).
+    bool recent = false;
+    for (u64 b = start & ~(kWatchBlock - 1); b < end && !recent; b += kWatchBlock) {
+        auto w = watch_written_.find(b);
+        recent = w != watch_written_.end() && w->second >= since;
+    }
+    if (!recent) return 0;
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;
     return 0;

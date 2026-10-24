@@ -353,6 +353,7 @@ current values. Kinds:
 | `HWDER_RES_SCALE` | number | unset | Internal resolution scale override (0.5 to 4). |
 | `HWDER_RES_SCALE_X` | number | unset | Per-axis resolution scale override, X (test aid: emulate another window aspect). |
 | `HWDER_RES_SCALE_Y` | number | unset | Per-axis resolution scale override, Y. |
+| `HWDER_SAMPLE_US` | integer | unset | Linux: sample the GPU command thread every that many microseconds of its CPU time; counts per function and address go to <log>.samples.txt every 10 s. |
 | `HWDER_SHADER_FALLBACK` | string | unset | "all": replace every stage, "frag": only fragment shaders, with the solid-magenta fallback. |
 | `HWDER_SHADER_NO_KIL` | presence | off | Shader translation: turn every (conditional) KIL into a no-op (alpha-test diagnosis). |
 | `HWDER_SHOW` | presence | off | Show the window normally even in an automated (HWDER_LOG) run. |
@@ -379,6 +380,7 @@ current values. Kinds:
 | `HWDER_VK_VERBOSE` | presence | off | Verbose renderer logging: the first draws, texture handles and clears. |
 | `HWDER_VK_WHITE_TEX` | presence | off | Bind the white dummy texture instead of every sampled texture. |
 | `HWDER_WAIT_TRACE` | presence | off | Kernel: log slow WaitSynchronization calls. |
+| `HWDER_YIELD_BACKOFF_US` | integer | unset | Experiment: a guest thread that keeps yielding (a spin-wait) sleeps that many microseconds once a streak of yields passes 64. |
 <!-- debug-flags:end -->
 
 Successful graphics pipelines are recorded with their shader code and binding metadata in

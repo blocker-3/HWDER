@@ -66,6 +66,7 @@ enum Id {
     ResScale,  // HWDER_RES_SCALE
     ResScaleX,  // HWDER_RES_SCALE_X
     ResScaleY,  // HWDER_RES_SCALE_Y
+    SampleUs,  // HWDER_SAMPLE_US
     ShaderFallback,  // HWDER_SHADER_FALLBACK
     ShaderNoKil,  // HWDER_SHADER_NO_KIL
     Show,  // HWDER_SHOW
@@ -92,6 +93,7 @@ enum Id {
     VkVerbose,  // HWDER_VK_VERBOSE
     VkWhiteTex,  // HWDER_VK_WHITE_TEX
     WaitTrace,  // HWDER_WAIT_TRACE
+    YieldBackoffUs,  // HWDER_YIELD_BACKOFF_US
     kCount
 };
 

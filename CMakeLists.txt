@@ -136,6 +136,7 @@ set(RUNTIME_SOURCES
     runtime/src/host/thread.cpp
     runtime/src/host/timing.cpp
     runtime/src/host/file.cpp
+    runtime/src/host/sampler.cpp
     runtime/src/core.cpp
     runtime/src/debug_flags.cpp
     runtime/src/threads.cpp

@@ -8,6 +8,7 @@
 #include <malloc.h>
 #else
 #include <cerrno>
+#include <atomic>
 #include <fcntl.h>
 #include <map>
 #include <mutex>
@@ -46,6 +47,7 @@ bool memory_commit(void* address, std::size_t size) {
 bool memory_decommit(void* address, std::size_t size) { return VirtualFree(address, size, MEM_DECOMMIT) != 0; }
 bool memory_release(void* address, std::size_t) { return VirtualFree(address, 0, MEM_RELEASE) != 0; }
 unsigned long memory_error() { return GetLastError(); }
+void write_watch_totals(std::uint64_t* calls, std::uint64_t* ns) { *calls = *ns = 0; }
 bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count) {
     ULONG_PTR n = *count;
     ULONG granularity = 0;
@@ -176,10 +178,24 @@ bool memory_release(void* address, std::size_t size) {
     return true;
 }
 unsigned long memory_error() { return static_cast<unsigned long>(errno); }
+namespace {
+std::atomic<std::uint64_t> g_watch_calls{0}, g_watch_ns{0};
+}
+void write_watch_totals(std::uint64_t* calls, std::uint64_t* ns) {
+    *calls = g_watch_calls.load();
+    *ns = g_watch_ns.load();
+}
 bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count) {
     const std::size_t capacity = *count;
     *count = 0;
 #ifdef HWDER_WRITE_WATCH
+    struct Tally {
+        std::uint64_t t0 = monotonic_ns();
+        ~Tally() {
+            g_watch_calls.fetch_add(1, std::memory_order_relaxed);
+            g_watch_ns.fetch_add(monotonic_ns() - t0, std::memory_order_relaxed);
+        }
+    } tally;
     const auto start = reinterpret_cast<std::uintptr_t>(address);
     {
         std::lock_guard<std::mutex> guard(mappings_lock);

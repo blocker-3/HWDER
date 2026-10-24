@@ -2,6 +2,9 @@
 // halfway between the previous real frame's copy of the same draw and the game-drawn in-between frame, with the
 // HWDER_GI_OBJ_TRACE diagnostics. Moved text-for-text from vk_renderer.cpp.
 #include <cmath>
+#if defined(__AVX__)
+#include <immintrin.h>
+#endif
 #include "host/timing.h"
 #include "host/platform.h"
 
@@ -49,6 +52,35 @@ static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
             return true;
         }
     return false;
+}
+
+// Sum of |x[i] - y[i]| over n floats. Stops early, with a partial sum >= limit, once the sum reaches `limit`
+// (checked every 64 floats). Pairing compares whole bone palettes (up to 1024 floats) against dozens of candidates,
+// the largest single cost of the 120 fps mode's in-between frames.
+static float abs_diff_sum(const float* x, const float* y, u64 n, float limit) {
+    float s = 0.0f;
+    u64 i = 0;
+#if defined(__AVX__)
+    const __m256 sign = _mm256_set1_ps(-0.0f);
+    for (; i + 64 <= n; i += 64) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        for (u64 j = i; j < i + 64; j += 16) {
+            a0 = _mm256_add_ps(a0, _mm256_andnot_ps(sign, _mm256_sub_ps(_mm256_loadu_ps(x + j), _mm256_loadu_ps(y + j))));
+            a1 = _mm256_add_ps(a1, _mm256_andnot_ps(sign, _mm256_sub_ps(_mm256_loadu_ps(x + j + 8), _mm256_loadu_ps(y + j + 8))));
+        }
+        const __m256 a = _mm256_add_ps(a0, a1);
+        __m128 h = _mm_add_ps(_mm256_castps256_ps128(a), _mm256_extractf128_ps(a, 1));
+        h = _mm_add_ps(h, _mm_movehl_ps(h, h));
+        h = _mm_add_ss(h, _mm_shuffle_ps(h, h, 1));
+        s += _mm_cvtss_f32(h);
+        if (s >= limit) return s;
+    }
+#endif
+    for (; i < n; i++) {
+        s += std::fabs(x[i] - y[i]);
+        if ((i & 3) == 3 && s >= limit) return s;
+    }
+    return s;
 }
 
 static const char* const kObjOutcomes[] = {"no previous frame", "no transform",   "key not in previous frame",
@@ -267,24 +299,40 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     // different block is nearly as close.
     size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
     if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+    // At most 96 candidates (the whole list when it is that short, else occ-32..occ+32).
+    u32 cand[96];
+    float cand_d[96];
+    u32 ncand = 0;
     float cd = INFINITY;
     for (size_t k = lo; k < hi; k++)
-        if (!used[k] && prevs[k].size == bytes) cd = std::min(cd, dist(k));
+        if (!used[k] && prevs[k].size == bytes) {
+            const float d = dist(k);
+            cd = std::min(cd, d);
+            cand[ncand] = (u32)k, cand_d[ncand++] = d;
+        }
     if (cd > kObjMaxMove * kObjMaxMove) return;
     const float* bb = (const float*)data;
     const float lim2 = std::max(4.0f * cd, 16.0f);
+    // Nearest first: the best two pairs are almost always among the nearest, and once two are known the content
+    // sums of the others stop early (a crowd of one model puts dozens of whole bone palettes here). Equal
+    // distances keep the draw order, so identical blocks still pair as before.
+    u32 nshort = 0;
+    for (u32 i = 0; i < ncand; i++) {
+        const u32 ki = cand[i];
+        const float di = cand_d[i];
+        if (di > lim2) continue;
+        u32 j = nshort++;  // insertion sort in place: j <= i, and cand[i] is saved above
+        for (; j > 0 && cand_d[j - 1] > di; j--) cand[j] = cand[j - 1], cand_d[j] = cand_d[j - 1];
+        cand[j] = ki, cand_d[j] = di;
+    }
     int c1 = -1, c2 = -1;
     float l1 = INFINITY, l2 = INFINITY;
-    for (size_t k = lo; k < hi; k++) {
-        if (used[k] || prevs[k].size != bytes || dist(k) > lim2) continue;
+    for (u32 ci = 0; ci < nshort; ci++) {
+        const size_t k = cand[ci];
         const float* x = (const float*)(obj_prev_.arena.data() + prevs[k].off);
         // The sum only grows: once it reaches the second-best so far this block cannot change the outcome (crowds of one
         // model put dozens of candidates here, each a whole bone palette).
-        float s = 0.0f;
-        for (u64 i = 0; i < nf && s < l2; i += 4) {
-            const u64 e = std::min<u64>(i + 4, nf);
-            for (u64 j = i; j < e; j++) s += std::fabs(x[j] - bb[j]);
-        }
+        const float s = abs_diff_sum(x, bb, nf, l2);
         if (s >= l2) continue;
         if (s < l1) l2 = l1, c2 = c1, l1 = s, c1 = (int)k;
         else if (s < l2) l2 = s, c2 = (int)k;

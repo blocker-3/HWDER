@@ -62,6 +62,7 @@ static const Flag kTable[] = {
     {ResScale, "HWDER_RES_SCALE", "Internal resolution scale override (0.5 to 4).", kFloat},
     {ResScaleX, "HWDER_RES_SCALE_X", "Per-axis resolution scale override, X (test aid: emulate another window aspect).", kFloat},
     {ResScaleY, "HWDER_RES_SCALE_Y", "Per-axis resolution scale override, Y.", kFloat},
+    {SampleUs, "HWDER_SAMPLE_US", "Linux: sample the GPU command thread every that many microseconds of its CPU time; counts per function and address go to <log>.samples.txt every 10 s.", kInt},
     {ShaderFallback, "HWDER_SHADER_FALLBACK", "\"all\": replace every stage, \"frag\": only fragment shaders, with the solid-magenta fallback.", kString},
     {ShaderNoKil, "HWDER_SHADER_NO_KIL", "Shader translation: turn every (conditional) KIL into a no-op (alpha-test diagnosis).", kPresence},
     {Show, "HWDER_SHOW", "Show the window normally even in an automated (HWDER_LOG) run.", kPresence},
@@ -88,6 +89,7 @@ static const Flag kTable[] = {
     {VkVerbose, "HWDER_VK_VERBOSE", "Verbose renderer logging: the first draws, texture handles and clears.", kPresence},
     {VkWhiteTex, "HWDER_VK_WHITE_TEX", "Bind the white dummy texture instead of every sampled texture.", kPresence},
     {WaitTrace, "HWDER_WAIT_TRACE", "Kernel: log slow WaitSynchronization calls.", kPresence},
+    {YieldBackoffUs, "HWDER_YIELD_BACKOFF_US", "Experiment: a guest thread that keeps yielding (a spin-wait) sleeps that many microseconds once a streak of yields passes 64.", kInt},
 };
 static_assert(sizeof(kTable) / sizeof(kTable[0]) == kCount, "table and Id enum out of step");
 

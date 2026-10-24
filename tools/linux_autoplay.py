@@ -53,7 +53,8 @@ def prepare(args, run):
     if sha256(fixture / "zmha.bin") != FIXTURES[args.fixture]:
         raise SystemExit(f"fixture {args.fixture} changed; refusing")
     run.mkdir(parents=True)
-    os.link(PLAY / "hwder", run / "hwder")  # exe_dir() is the run folder: settings, saves and caches stay here
+    exe = owned(Path(args.exe)) if args.exe else PLAY / "hwder"
+    os.link(exe, run / "hwder")  # exe_dir() is the run folder: settings, saves and caches stay here
     for name in ("pipeline_cache.bin", "pipeline_warmup.bin"):
         if (PLAY / name).exists():
             shutil.copy2(PLAY / name, run / name)
@@ -123,7 +124,7 @@ def summarize(run, args, flags, outcome):
     perf = [l for l in log.splitlines() if "perf:" in l]
     avgs = [float(m.group(1)) for l in frames if (m := re.search(r"avg ([\d.]+) ms", l))]
     worst = [float(m.group(1)) for l in frames if (m := re.search(r"worst ([\d.]+) ms", l))]
-    lines = [f"run {run.name}: fixture {args.fixture}, mode {args.mode}, {args.seconds} s, {outcome}",
+    lines = [f"run {run.name}: fixture {args.fixture}, mode {args.mode}, {args.seconds} s, {outcome}, exe {args.exe or 'play build'}",
              f"flags: {' '.join(f'{k}={v}' for k, v in flags.items() if k not in ('HWDER_NSP', 'HWDER_KEYS'))}"]
     if avgs:
         # Battle windows: in 120 mode from the first 120 Hz window on (menus run at 60); the first two include loading.
@@ -181,6 +182,7 @@ def main():
     ap.add_argument("--visible", action="store_true", help="use the current display instead of a headless gamescope")
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--env", action="append", default=[], help="extra NAME=VALUE for the game")
+    ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
     args = ap.parse_args()
     if running_games():
         raise SystemExit("hwder is already running; not starting a test")

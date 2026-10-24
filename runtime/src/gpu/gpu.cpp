@@ -3,6 +3,7 @@
 #include "gpu/diag.h"
 
 #include "host/timing.h"
+#include "host/sampler.h"
 
 #include <condition_variable>
 #include <deque>
@@ -929,6 +930,10 @@ static void execute_inner(Channel* ch, Submission& s) {
 
 static void gpu_thread() {
     host::name_thread(L"HWDER GPU");
+    if (int us = debug::value(debug::SampleUs, 0); us > 0) {
+        const char* log = debug::str(debug::Log);
+        host::sample_current_thread(us, std::string(log && *log ? log : "hwder.log") + ".samples.txt");
+    }
     for (;;) {
         std::pair<Channel*, Submission> item;
         {

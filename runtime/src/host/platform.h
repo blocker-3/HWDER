@@ -19,6 +19,8 @@ unsigned long memory_error();
 // `count` holds the capacity of `pages` and receives the number reported. False when the range is not inside
 // one write-watched reservation or the host cannot track writes: callers then re-hash instead.
 bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count);
+// Calls of write_watch_reset so far and the nanoseconds they took (Linux; diagnostics).
+void write_watch_totals(std::uint64_t* calls, std::uint64_t* ns);
 std::size_t memory_readable(void* address, std::size_t size);
 
 // Auto-reset events retain one pending wake (including a wake before a wait).
