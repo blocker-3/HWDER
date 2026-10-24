@@ -1,6 +1,6 @@
 // Adds the installed game to Steam as a non-Steam shortcut (userdata/<account>/config/shortcuts.vdf).
 // Pure byte functions here (tested by tools/tests/steam_shortcut_test.cpp); bootstrap.cpp finds the file,
-// refuses while Steam runs (Steam rewrites the file from memory when it closes) and keeps a backup.
+// closes a running Steam first (Steam rewrites the file from memory when it closes) and keeps a backup.
 //
 // shortcuts.vdf is Valve's binary KeyValues: 0x00 name\0 {children} 0x08 is a map, 0x01 name\0 value\0 a
 // string, 0x02 name\0 <int32 LE> an integer (0x07: a 64-bit one). The file is one map "shortcuts" whose

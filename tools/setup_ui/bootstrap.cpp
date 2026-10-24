@@ -234,6 +234,16 @@ bool processRunning(const wchar_t* name){
     PROCESSENTRY32W entry{sizeof entry};bool found=false;for(BOOL more=Process32FirstW(snap,&entry);more&&!found;more=Process32NextW(snap,&entry))found=CompareStringOrdinal(entry.szExeFile,-1,name,-1,TRUE)==CSTR_EQUAL;
     CloseHandle(snap);return found;
 }
+// Asks Steam to exit (steam.exe -shutdown) and waits up to 30 s, keeping the window responsive.
+bool closeSteam(const fs::path& root){
+    if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",(root/L"steam.exe").c_str(),L"-shutdown",nullptr,SW_HIDE))<=32)return false;
+    for(int tick=0;tick<300;++tick){
+        if(!processRunning(L"steam.exe"))return true;
+        MSG m;while(PeekMessageW(&m,nullptr,0,0,PM_REMOVE)){TranslateMessage(&m);DispatchMessageW(&m);}
+        Sleep(100);
+    }
+    return !processRunning(L"steam.exe");
+}
 // The Steam account to add to: the most recent login in config/loginusers.vdf, else the only userdata account.
 std::wstring steamAccount(const fs::path& root){
     std::ifstream in(root/L"config"/L"loginusers.vdf",std::ios::binary);std::string text((std::istreambuf_iterator<char>(in)),{});
@@ -247,16 +257,27 @@ std::wstring steamAccount(const fs::path& root){
     return accounts.size()==1?accounts[0]:std::wstring();
 }
 // Adds the installed game to Steam's non-Steam shortcuts (steam_shortcut.h). Steam keeps the list in memory and
-// writes it back when it closes, so this refuses while Steam runs. The previous list is kept as shortcuts.vdf.hwder-backup.
+// writes it back when it closes, so a running Steam (often only in the tray) is closed first and started again
+// afterwards. The previous list is kept as shortcuts.vdf.hwder-backup.
+void addToSteamIn(const fs::path& root);
 void addToSteam(){
     if(!ready||!pathsReady||certifiedData!=text(dataBox)||installedExe.empty())return;
-    fs::path root=steamDirectory;
+    fs::path root=steamDirectory;bool restart=false;
     if(root.empty()){
         wchar_t found[32768];DWORD bytes=sizeof found;std::error_code e;
         if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Valve\\Steam",L"SteamPath",RRF_RT_REG_SZ,nullptr,found,&bytes)!=ERROR_SUCCESS||!fs::is_directory(fs::path(found),e)){state(L"Steam was not found on this PC. Install Steam and sign in once, then try again.");return;}
         root=fs::path(found).make_preferred();
-        if(processRunning(L"steam.exe")){state(L"Close Steam first (Steam menu, Exit), then choose Add to Steam again. Steam rewrites its game list when it closes.");return;}
+        if(processRunning(L"steam.exe")){
+            state(L"Closing Steam so it does not overwrite the new entry…");EnableWindow(steamButton,FALSE);
+            const bool closed=closeSteam(root);EnableWindow(steamButton,TRUE);
+            if(!closed){state(L"Steam did not close. Exit it from its tray icon (right-click, Exit), then choose Add to Steam again.");return;}
+            restart=true;
+        }
     }
+    addToSteamIn(root);
+    if(restart)ShellExecuteW(nullptr,L"open",(root/L"steam.exe").c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+}
+void addToSteamIn(const fs::path& root){
     auto account=steamAccount(root);if(account.empty()){state(L"Could not tell which Steam account to use. Sign in to Steam once, close it, then try again.");return;}
     auto file=root/L"userdata"/account/L"config"/L"shortcuts.vdf";std::error_code e;
     std::string existing;if(fs::exists(file,e)){std::ifstream in(file,std::ios::binary);if(!in){state(L"Steam's game list could not be read, so it was left unchanged.");return;}existing.assign(std::istreambuf_iterator<char>(in),{});}
