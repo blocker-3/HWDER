@@ -550,6 +550,34 @@ static void load_npdm(const std::string& exefs) {
 // ------------------------------------------------------------------ boot
 void hw_config_load(const std::string& dir);
 
+// Hybrid CPUs (Intel P/E cores): keep the game's threads on the performance cores. In a big battle the GPU command
+// thread, the presenter and their helpers landing on efficiency cores cost about 10% of the 120 fps mode's frame rate
+// (stage-4 replay: 9.0 -> 7.6 ms per frame on the GPU thread). HWDER_ALL_CORES=1 keeps every core.
+static void prefer_performance_cores() {
+    if (debug::flag(debug::AllCores)) return;
+    ULONG len = 0;
+    GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
+    if (!len) return;
+    std::vector<char> buf(len);
+    if (!GetSystemCpuSetInformation((PSYSTEM_CPU_SET_INFORMATION)buf.data(), len, &len, GetCurrentProcess(), 0)) return;
+    BYTE lo = 255, hi = 0;
+    for (ULONG o = 0; o < len;) {
+        auto* s = (PSYSTEM_CPU_SET_INFORMATION)(buf.data() + o);
+        if (s->Type == CpuSetInformation) lo = std::min(lo, s->CpuSet.EfficiencyClass), hi = std::max(hi, s->CpuSet.EfficiencyClass);
+        o += s->Size;
+    }
+    if (lo >= hi) return;  // not a hybrid CPU
+    std::vector<ULONG> ids;
+    for (ULONG o = 0; o < len;) {
+        auto* s = (PSYSTEM_CPU_SET_INFORMATION)(buf.data() + o);
+        if (s->Type == CpuSetInformation && s->CpuSet.EfficiencyClass == hi) ids.push_back(s->CpuSet.Id);
+        o += s->Size;
+    }
+    if (ids.size() < 4) return;  // too few performance cores to give up the others
+    if (SetProcessDefaultCpuSets(GetCurrentProcess(), ids.data(), (ULONG)ids.size()))
+        hw_log("cpu: hybrid CPU, preferring its %zu performance logical processors (HWDER_ALL_CORES=1 to use all)", ids.size());
+}
+
 int main(int argc, char** argv) {
     std::string dir = exe_dir();
     SetCurrentDirectoryW(to_w(dir).c_str());  // caches, settings and saves live beside the exe
@@ -557,6 +585,7 @@ int main(int argc, char** argv) {
     if (log_path.empty()) log_path = dir + "\\hwder.log";
     g_log = fopen_u8(log_path, "w");
     hw_log("HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
+    prefer_performance_cores();
     std::string no_dump = env_u8("HWDER_NO_DUMP");
     if (no_dump.empty() || no_dump == "0") {
         wchar_t* file = nullptr;

@@ -245,12 +245,14 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         const bool obj = bound && obj_candidate(c.index, bytes);
         alignas(16) static thread_local u8 obj_buf[4096];
         if (obj) {
+            ProfScope ops(kProfObj);
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, obj_buf, n);
             if (n < bytes) memset(obj_buf + n, 0, bytes - n);
             obj_transforms(c.index, obj_buf, bytes);
             memcpy(s.ptr, obj_buf, bytes);
         } else if (bound) {
+            ProfScope cps(kProfCbufCopy);
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, s.ptr, n);
             if (n < bytes) memset(s.ptr + n, 0, bytes - n);

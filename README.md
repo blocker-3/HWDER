@@ -293,6 +293,7 @@ current values. Kinds:
 
 | Variable | Kind | Default | Meaning |
 |---|---|---|---|
+| `HWDER_ALL_CORES` | presence | off | Hybrid CPUs: let the game run on efficiency cores too (by default it prefers the performance cores). |
 | `HWDER_ASYNC_RT_PIPELINES` | presence | off | Renderer: also compile pipelines asynchronously for draws that sample a render target (comparison; they default to synchronous). |
 | `HWDER_AS_TRACE` | presence | off | nvdrv: log GPU address-space reservations, mappings and InitializeEx (as-gpu:). Read on every call. |
 | `HWDER_AUTOPLAY` | integer | unset | Unattended runs: 1 taps A through the menus; 2 drives into a battle and keeps fighting. |

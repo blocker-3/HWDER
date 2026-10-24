@@ -6,6 +6,7 @@
 namespace debug {
 
 static const Flag kTable[] = {
+    {AllCores, "HWDER_ALL_CORES", "Hybrid CPUs: let the game run on efficiency cores too (by default it prefers the performance cores).", kPresence},
     {AsyncRtPipelines, "HWDER_ASYNC_RT_PIPELINES", "Renderer: also compile pipelines asynchronously for draws that sample a render target (comparison; they default to synchronous).", kPresence},
     {AsTrace, "HWDER_AS_TRACE", "nvdrv: log GPU address-space reservations, mappings and InitializeEx (as-gpu:). Read on every call.", kPresence},
     {Autoplay, "HWDER_AUTOPLAY", "Unattended runs: 1 taps A through the menus; 2 drives into a battle and keeps fighting.", kInt},

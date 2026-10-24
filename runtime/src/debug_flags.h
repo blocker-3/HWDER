@@ -10,6 +10,7 @@ namespace debug {
 enum Kind { kPresence, kOnUnlessZero, kNonzero, kInt, kFloat, kString };
 
 enum Id {
+    AllCores,  // HWDER_ALL_CORES
     AsyncRtPipelines,  // HWDER_ASYNC_RT_PIPELINES
     AsTrace,  // HWDER_AS_TRACE
     Autoplay,  // HWDER_AUTOPLAY
