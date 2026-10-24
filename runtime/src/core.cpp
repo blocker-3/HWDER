@@ -193,10 +193,34 @@ extern "C" void hw_sleep_ns(s64 ns) {
     }
     static thread_local HANDLE timer =
         CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    LARGE_INTEGER due;
-    due.QuadPart = -(ns / 100);
-    if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
-    else Sleep((DWORD)((ns + 999999) / 1000000));
+    // Sleeps of a millisecond or more end on time: the game's frame limiter sleeps ~15 ms on a job worker every
+    // frame, and the high-resolution timer woke it ~0.3 ms late, so a busy battle ran at 17.0 ms instead of 16.7.
+    // The timer covers all but the last millisecond, the rest is a yielding spin to the deadline.
+    constexpr s64 kSpinNs = 1000000;
+    static const LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    const bool precise = ns >= kSpinNs;
+    const s64 timer_ns = precise ? ns - kSpinNs : ns;
+    if (timer_ns > 0) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(timer_ns / 100);
+        if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
+        else Sleep((DWORD)((timer_ns + 999999) / 1000000));
+    }
+    if (precise) {
+        const s64 end = start.QuadPart + ns * freq.QuadPart / 1000000000;
+        LARGE_INTEGER now;
+        for (;;) {
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart >= end) break;
+            SwitchToThread();
+        }
+    }
 }
 
 // ------------------------------------------------------------------ logging / crashes

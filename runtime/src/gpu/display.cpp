@@ -440,12 +440,14 @@ static void frame_limit(u32 interval, u32 release_hz) {
     QueryPerformanceCounter(&now);
     s64 period = (s64)(freq.QuadPart / fps);
     // `next` is the virtual vblank grid. In steady state we arrive here a little after the grid point
-    // (the game produced its frame right after we released the previous buffer). After a real stall
-    // (debt beyond a quarter period) re-anchor the grid to now instead of letting several presents
-    // burst through at zero wait: a display never shows frames faster than its refresh, and the frame
-    // after a hitch should again stay up for a full period.
+    // (the game produced its frame right after we released the previous buffer). A frame up to one period
+    // late keeps the grid: it is shown at once and the next one at the following grid point, so the time
+    // is caught up. The game is frame-locked, and re-anchoring on every frame more than a quarter period
+    // late made a busy battle run at 17.0 ms instead of 16.7 (and the 120 fps mode at 8.57 instead of 8.33).
+    // Only a real stall (more than a period behind) re-anchors the grid to now instead of letting several
+    // presents burst through at zero wait.
     g_trace_overshoot_ms = 0;
-    if (!next.QuadPart || now.QuadPart - next.QuadPart > period / 4) {
+    if (!next.QuadPart || now.QuadPart - next.QuadPart > period) {
         // Late frame: show it immediately (never add a full period of latency to a frame that is
         // already late - when the game runs slower than the grid that would cost 16 ms on EVERY
         // frame) but anchor the grid so the following frame still stays up for a whole period.

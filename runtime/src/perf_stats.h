@@ -17,6 +17,8 @@ void add_wait(WaitKind k, int64_t qpc_ticks);
 void sample_core();
 // Counts a QueueBuffer (one presented guest frame) and remembers the calling thread as the presenter.
 void note_present();
+// A guest SleepThread: requested and actual duration.
+void note_sleep(int64_t req_ns, int64_t actual_ns);
 
 // RAII wait timer; does nothing when disabled.
 struct WaitScope {

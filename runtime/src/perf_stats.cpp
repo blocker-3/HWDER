@@ -25,6 +25,7 @@ struct ThreadRec {
     DWORD tid = 0;
     std::atomic<int64_t> wait[kWaitCount]{};
     std::atomic<uint64_t> samples{0}, ecore{0};
+    std::atomic<int64_t> sleeps{0}, sleep_req{0}, sleep_over{0};
 };
 
 std::mutex g_m;
@@ -75,6 +76,7 @@ double ft_ms(const FILETIME& f) { return (((uint64_t)f.dwHighDateTime << 32) | f
 struct Row {
     std::string name;
     double cpu_pct, wait_ms[kWaitCount], ecore_pct;
+    int64_t sleeps, sleep_req, sleep_over;
     DWORD tid;
 };
 
@@ -83,6 +85,7 @@ void reporter(int period_ms) {
     std::map<DWORD, double> prev_cpu;
     std::map<DWORD, int64_t> prev_wait[kWaitCount];
     std::map<DWORD, std::pair<uint64_t, uint64_t>> prev_core;
+    std::map<DWORD, int64_t> prev_sl[3];
     LARGE_INTEGER freq, last, now;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&last);
@@ -148,6 +151,9 @@ void reporter(int period_ms) {
                     r.wait_ms[i] = (v - prev_wait[i][r.tid]) * 1000.0 / freq.QuadPart;
                     prev_wait[i][r.tid] = v;
                 }
+                const int64_t sl[3] = {t->sleeps.load(), t->sleep_req.load(), t->sleep_over.load()};
+                r.sleeps = sl[0] - prev_sl[0][r.tid], r.sleep_req = sl[1] - prev_sl[1][r.tid], r.sleep_over = sl[2] - prev_sl[2][r.tid];
+                for (int i = 0; i < 3; i++) prev_sl[i][r.tid] = sl[i];
                 uint64_t s = t->samples.load(), ec = t->ecore.load();
                 auto& pcore = prev_core[r.tid];
                 r.ecore_pct = s > pcore.first ? (ec - pcore.second) * 100.0 / (s - pcore.first) : -1;
@@ -168,8 +174,12 @@ void reporter(int period_ms) {
             for (double w : r.wait_ms) waits += w;
             if (r.cpu_pct < 1.0 && waits < 1.0) continue;
             if (shown++ >= 16) break;
-            char ec[32] = "";
-            if (g_hybrid && r.ecore_pct >= 0) snprintf(ec, sizeof(ec), " ecore %.0f%%", r.ecore_pct);
+            char ec[96] = "";
+            int eo = 0;
+            if (g_hybrid && r.ecore_pct >= 0) eo = snprintf(ec, sizeof(ec), " ecore %.0f%%", r.ecore_pct);
+            if (r.sleeps > 0)
+                snprintf(ec + eo, sizeof(ec) - eo, " sleeps %lld (mean %.3f ms, overshoot %.3f ms)", (long long)r.sleeps,
+                         r.sleep_req / 1e6 / r.sleeps, r.sleep_over / 1e6 / r.sleeps);
             // Per-frame figures for the presenting thread and anything waiting.
             const double per = frames > 0 ? 1.0 / frames : 0;
             hw_log("perf:   %5u %5.1f%% cpu (%.2f ms/frame) wait/frame kernel %.2f syncpt %.2f dequeue %.2f gpuq %.2f%s | %s", (unsigned)r.tid,
@@ -208,6 +218,14 @@ void sample_core() {
     DWORD cpu = GetCurrentProcessorNumber();
     r->samples.fetch_add(1, std::memory_order_relaxed);
     if (cpu < 256 && g_ecore[cpu]) r->ecore.fetch_add(1, std::memory_order_relaxed);
+}
+
+void note_sleep(int64_t req_ns, int64_t actual_ns) {
+    if (!enabled()) return;
+    ThreadRec* r = rec();
+    r->sleeps.fetch_add(1, std::memory_order_relaxed);
+    r->sleep_req.fetch_add(req_ns, std::memory_order_relaxed);
+    r->sleep_over.fetch_add(actual_ns - req_ns, std::memory_order_relaxed);
 }
 
 void note_present() {
