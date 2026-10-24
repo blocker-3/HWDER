@@ -25,7 +25,7 @@ class Package(unittest.TestCase):
             self.files["third_party/"+sub+"/LICENSE"]=b"retained upstream license fixture"
         self.kit=self.root/"base.zip"
         self.write_kit()
-        self.sources=["CMakeLists.txt","tools/build.py","tools/setup_ui/bootstrap.cpp"]
+        self.sources=["CMakeLists.txt","tools/build.py","tools/setup_ui/bootstrap.cpp","tools/setup_ui/steam_shortcut.h"]
         for n in self.sources:
             p=self.root/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text("public bootstrap source")
         self.exe=self.root/"bootstrap.exe";self.exe.write_bytes(b"MZsynthetic code-free fixture; never execute")

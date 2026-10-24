@@ -99,7 +99,7 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     data = bootstrap.read_bytes()
     if cert.get("kind") != "HWDER-codefree-setup-v1" or cert.get("exe_sha256") != digest(data) or not data.startswith(b"MZ"):
         raise ValueError("Only the reviewed code-free bootstrap certificate is accepted")
-    expected = {"CMakeLists.txt", "tools/build.py", "tools/setup_ui/bootstrap.cpp"}
+    expected = {"CMakeLists.txt", "tools/build.py", "tools/setup_ui/bootstrap.cpp", "tools/setup_ui/steam_shortcut.h"}
     if set(cert.get("source_sha256", {})) != expected:
         raise ValueError("Incomplete bootstrap source certification")
     for name, sha in cert["source_sha256"].items():
@@ -148,7 +148,7 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
         "  Install  downloads pinned build tools (checked by SHA-256) into your Data folder after you confirm.\n"
         "           No administrator rights or system installation.\n"
         "  Prepare  checks your dump and builds the game on this PC. Several minutes and several GB of disk.\n"
-        "  Play     starts the game. Advanced > Create Desktop shortcut lets you start it without Setup.\n\n"
+        "  Play     starts the game. Create desktop shortcut and Add to Steam start it later without Setup.\n\n"
         "No game, generated C, key file, Python package or compiler is bundled. Your Data folder keeps\n"
         "saves and settings separately from this kit. Keep your .nsp and prod.keys where you picked them.\n"
     ).encode()

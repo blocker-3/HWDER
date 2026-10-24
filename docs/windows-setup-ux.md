@@ -20,12 +20,13 @@ Status sentence (what is happening, or what to do next)
 Step 4 of 6 · Building the game · 312 of 1480 files · about 6 min left
 [###########################                         ]
 
-[ Primary ]  [Cancel]                                   [Advanced ▾]
+[ Primary ]  [Cancel]  [Create desktop shortcut] [Add to Steam]  [Advanced ▾]
+             (the two shortcut buttons appear once the game is ready to play)
 --------------------------------------------------- (Advanced, collapsed)
 Data folder           [ path                                   ] [Choose…]
 Installed game: <Data>\play\hwder.exe
 [Check requirements] [Install private tools] [Open game folder]
-[Create Desktop shortcut] [Open data folder] [About tools] [x] Details
+[Open data folder] [About tools] [x] Details
 [ details log                                                      ]
 ```
 
