@@ -9,7 +9,7 @@ update is optional: Setup's **Game update** field takes it as `.nsp` or `.nsz`, 
   hundred bytes), 7 functions changed (10652 bytes). `rtld`, `sdk`, `subsdk0`, `subsdk1` are unchanged.
 - The RomFS patch replaces 5 files, `data/voice/EXCL_025.bin` to `EXCL_029.bin`.
 
-Full analysis: `docs/update-1.0.1-analysis.md` in the hywar workspace.
+The function-level analysis behind this port is kept outside the repository.
 
 ## How it is built
 

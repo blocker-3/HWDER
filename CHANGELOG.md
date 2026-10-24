@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.2
+
+- **Fix: Setup's Prepare builds the game again.** The new AVX2 startup check in v0.2.1 did not compile with the compiler Setup installs, so Prepare stopped with an error. Everything else is the same as v0.2.1.
+
 ## v0.2.1
 
 - **Steady 120 fps in big battles.** On busy stages the GPU command thread was the limit: 120 fps mode fell to about 73 fps on a ~1500-draw battle. It now holds 120 there, and native mode holds an exact 60.
