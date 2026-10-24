@@ -47,4 +47,31 @@ inline SaveFolderSelection inspect_save_folder(std::filesystem::path selected) {
     return {selected};  // Existing root or a new empty root: preserve standard title/user routing.
 }
 
+// The save picker asks for the save file itself (zmha.bin), so there is no folder level to get wrong.
+// In an HWDER/console layout (<root>/0100AE00096EA000/<user>/zmha.bin + zmhasd.bin) the game switches to that
+// root and uses the save where it is. Anywhere else (a save exported from an emulator or a backup) the pair
+// is imported: copied into the current save folder, which keeps its layout and gets no new folders.
+struct SaveFileSelection {
+    std::filesystem::path root;         // use this save root (console layout)
+    std::filesystem::path import_from;  // or import zmha.bin + zmhasd.bin from this folder
+    const char* error = nullptr;
+};
+
+inline SaveFileSelection inspect_save_file(std::filesystem::path file) {
+    namespace fs = std::filesystem;
+    file = file.lexically_normal();
+    auto name = file.filename().u8string();
+    for (auto& c : name)
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (name != u8"zmha.bin") return {{}, {}, "Choose the save file zmha.bin."};
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) return {{}, {}, "That save file does not exist."};
+    const fs::path folder = file.parent_path();
+    if (!fs::is_regular_file(folder / "zmhasd.bin", ec))
+        return {{}, {}, "zmhasd.bin is missing next to that zmha.bin. A save needs both files."};
+    const SaveFolderSelection leaf = inspect_save_folder(folder);
+    if (!leaf.error && leaf.account_leaf) return {leaf.root, {}, nullptr};
+    return {{}, folder, nullptr};
+}
+
 }  // namespace hwfs

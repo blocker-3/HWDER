@@ -59,6 +59,15 @@ int main(int argc, char** argv) {
         const auto lowercase = base / "lower" / "0100ae00096ea000" / "48574445525f55530000000000000001";
         files(lowercase);
         require(hwfs::inspect_save_folder(lowercase).root == base / "lower", "Windows hex folder case accepted");
+        // The file picker: a console-layout zmha.bin switches to its root, anything else is an import source.
+        auto f = hwfs::inspect_save_file(leaf / "zmha.bin");
+        require(!f.error && f.root == root && f.import_from.empty(), "console-layout save file gives its root");
+        require(!hwfs::inspect_save_file(lowercase / "ZMHA.BIN").error, "save file name case accepted");
+        f = hwfs::inspect_save_file(flat / "zmha.bin");
+        require(!f.error && f.root.empty() && f.import_from == flat, "flat save file is imported, not used as a root");
+        require(hwfs::inspect_save_file(leaf / "zmhasd.bin").error, "side file is not the save file");
+        require(hwfs::inspect_save_file(partial / "zmha.bin").error, "save file without zmhasd.bin refused");
+        require(hwfs::inspect_save_file(base / "missing" / "zmha.bin").error, "missing save file refused");
         require(fs::file_size(leaf / "zmha.bin") == 14 && fs::file_size(leaf / "zmhasd.bin") == 14,
                 "source synthetic files unchanged");
         std::cout << "save folder selection: " << checks << " checks PASS; synthetic metadata only\n";
