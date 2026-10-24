@@ -1,6 +1,6 @@
 // Per-thread CPU and wait statistics (HWDER_THREAD_STATS=<ms>): which host threads (guest threads are host
 // threads) burn CPU, how long each one blocks and on what, and how often it runs on an efficiency core.
-// Experiment branch perf-threads; off unless the variable is set.
+// Off unless the variable is set; it also turns on the draw-path profiler (gpu/diag.h), which costs ~10% of the GPU thread.
 #pragma once
 #include <cstdint>
 

@@ -67,7 +67,7 @@ static const Flag kTable[] = {
     {SyncPipelines, "HWDER_SYNC_PIPELINES", "Compile every pipeline synchronously (the F1 async-shaders option off sets this too).", kPresence},
     {SyncTrace, "HWDER_SYNC_TRACE", "nvdrv syncpoint wait / signal trace.", kPresence},
     {ThreadDump, "HWDER_THREAD_DUMP", "Dump all guest threads to the log every n seconds.", kInt},
-    {ThreadStats, "HWDER_THREAD_STATS", "Log per-thread CPU, waits and efficiency-core share every n ms (perf-threads experiment).", kInt},
+    {ThreadStats, "HWDER_THREAD_STATS", "Log per-thread CPU, waits and efficiency-core share every n ms, guest sleeps and the per-frame GPU thread profile (turns the draw profiler on).", kInt},
     {Validation, "HWDER_VALIDATION", "Enable the Vulkan validation layer (needs the Vulkan SDK).", kPresence},
     {ViTrace, "HWDER_VI_TRACE", "Display service (vi) parcel trace.", kPresence},
     {VkDumpCbuf, "HWDER_VK_DUMP_CBUF", "Frame dump: full cbuf contents of the fragment shader whose key starts with this hex prefix.", kString},
