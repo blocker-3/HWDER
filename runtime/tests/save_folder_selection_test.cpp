@@ -62,7 +62,9 @@ int main(int argc, char** argv) {
         // The file picker: a console-layout zmha.bin switches to its root, anything else is an import source.
         auto f = hwfs::inspect_save_file(leaf / "zmha.bin");
         require(!f.error && f.root == root && f.import_from.empty(), "console-layout save file gives its root");
+#ifdef _WIN32  // Linux file names are case-sensitive: ZMHA.BIN is a different (missing) file there
         require(!hwfs::inspect_save_file(lowercase / "ZMHA.BIN").error, "save file name case accepted");
+#endif
         f = hwfs::inspect_save_file(flat / "zmha.bin");
         require(!f.error && f.root.empty() && f.import_from == flat, "flat save file is imported, not used as a root");
         require(hwfs::inspect_save_file(leaf / "zmhasd.bin").error, "side file is not the save file");

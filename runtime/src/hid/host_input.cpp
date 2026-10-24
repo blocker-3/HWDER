@@ -190,7 +190,7 @@ void poll_xinput(RawPad raws[kPlayerSlots]) {
 }
 
 #else
-void poll_xinput(RawPad&) {}
+void poll_xinput(RawPad raws[kPlayerSlots]) { (void)raws; }
 std::atomic<bool> g_keys[SDL_SCANCODE_COUNT]{};
 std::mutex g_hotplug_mutex;
 std::vector<std::pair<u32, u32>> g_hotplug;

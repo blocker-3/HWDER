@@ -2,6 +2,8 @@
 // programs, the pipeline cache and its worker thread, the prewarm/warmup records and the pipeline catalog, with
 // the start_pipeline_prewarm / prepare_pipeline_catalog entry points. Moved text-for-text from vk_renderer.cpp.
 #include "gpu/vk/catalog_game_sources.h"
+#include "host/timing.h"
+#include "host/platform.h"
 #include "gpu/prelaunch.h"
 #include "fs/nsp.h"
 #include "hwder_version.h"
@@ -329,7 +331,7 @@ void VkRenderer::start_pipeline_worker() {
 }
 
 void VkRenderer::start_prewarm(warmup::Cache&& cache, u64 load_ms) {
-    const u64 begin = GetTickCount64();
+    const u64 begin = host::ticks_ms();
     warmup_start_ms_ = begin;
     warmup_records_ = std::move(cache);
     warmup_records_loaded_ = true;
@@ -419,7 +421,7 @@ void VkRenderer::start_prewarm(warmup::Cache&& cache, u64 load_ms) {
                 WarmPipeline* entry = pipeline.get();
                 warm_pipelines_.push_back(std::move(pipeline));
                 warm_lookup_.emplace(hash, entry);
-                pipe_jobs_.push_back({hash, &program->gfx, record.key, GetTickCount64(), entry});
+                pipe_jobs_.push_back({hash, &program->gfx, record.key, host::ticks_ms(), entry});
                 ++warmup_queued_;
             }
         }
@@ -455,7 +457,7 @@ void VkRenderer::start_prewarm(warmup::Cache&& cache, u64 load_ms) {
         return;
     }
     hw_log("vk: prewarm startup: load %llu ms, hydrate/queue %llu ms, %zu programs, %llu recipes queued, one worker",
-           (unsigned long long)load_ms, (unsigned long long)(GetTickCount64() - begin), warm_programs_.size(),
+           (unsigned long long)load_ms, (unsigned long long)(host::ticks_ms() - begin), warm_programs_.size(),
            (unsigned long long)warmup_queued_);
     log_warmup("startup_queued");
 }
@@ -591,7 +593,7 @@ void VkRenderer::save_catalog_records() {
 }
 
 void VkRenderer::wait_catalog() {
-    const u64 start = GetTickCount64();
+    const u64 start = host::ticks_ms();
     for (;;) {
         u64 done, total, success;
         {
@@ -606,11 +608,11 @@ void VkRenderer::wait_catalog() {
                    (unsigned long long)success, (unsigned long long)total);
             break;
         }
-        if (GetTickCount64() - start > 120000) {
+        if (host::ticks_ms() - start > 120000) {
             hw_log("catalog: preparation wait expired; remaining work uses normal demand fallback");
             break;
         }
-        Sleep(15);
+        host::sleep_ms(15);
     }
 }
 
@@ -672,7 +674,7 @@ void VkRenderer::log_warmup(const char* phase) {
            (unsigned long long)warmup_recorded_, (unsigned long long)warmup_observed_,
            (unsigned long long)warmup_pending_max_ms_,
            (unsigned long long)g_s.present_count, (unsigned long long)st_.draws,
-           (unsigned long long)(warmup_start_ms_ ? GetTickCount64() - warmup_start_ms_ : 0));
+           (unsigned long long)(warmup_start_ms_ ? host::ticks_ms() - warmup_start_ms_ : 0));
 }
 
 void VkRenderer::adopt_pipeline_results() {
@@ -715,7 +717,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
                 warm->state == WarmState::Canceled || warm->state == WarmState::Adopted) continue;
             if (!warm->demanded) {
                 warm->demanded = true;
-                warm->demanded_ms = GetTickCount64();
+                warm->demanded_ms = host::ticks_ms();
                 ++warmup_demand_hits_;
             }
             auto queued = std::find_if(pipe_jobs_.begin(), pipe_jobs_.end(),
@@ -780,7 +782,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
         // Real draws take priority over speculative startup recipes.
         auto speculative = std::find_if(pipe_jobs_.begin(), pipe_jobs_.end(),
                                        [](const PipeJob& job) { return job.warm && !job.warm->demanded; });
-        pipe_jobs_.insert(speculative, {h, prog, key, GetTickCount64()});
+        pipe_jobs_.insert(speculative, {h, prog, key, host::ticks_ms()});
         start_pipeline_worker();
         pipe_cv_.notify_one();
     }
@@ -788,7 +790,7 @@ VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
 }
 
 void VkRenderer::pipeline_worker() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER pipelines");
+    host::name_thread(L"HWDER pipelines");
     for (;;) {
         PipeJob job;
         {
@@ -812,7 +814,7 @@ void VkRenderer::pipeline_worker() {
         std::lock_guard<std::mutex> l(pipe_m_);
         if (job.warm) {
             ++warmup_finished_;
-            const u64 now = GetTickCount64();
+            const u64 now = host::ticks_ms();
             warmup_pending_max_ms_ = std::max(warmup_pending_max_ms_, now - job.enqueued_ms);
             if (job.warm->demanded)
                 audit_pending_max_ms_ = std::max(audit_pending_max_ms_, now - job.warm->demanded_ms);
@@ -828,7 +830,7 @@ void VkRenderer::pipeline_worker() {
             pipe_done_cv_.notify_one();
             continue;  // unverified warm results never enter the live completion/pending maps
         }
-        const u64 pending_ms = GetTickCount64() - job.enqueued_ms;
+        const u64 pending_ms = host::ticks_ms() - job.enqueued_ms;
         audit_pending_max_ms_ = std::max(audit_pending_max_ms_, pending_ms);
         static bool first = true;
         if (first) {
@@ -974,24 +976,24 @@ static void start_private_pipeline_prewarm() {
         hw_log("vk: prewarm disabled; live recipe recording remains enabled");
         return;
     }
-    const u64 start = GetTickCount64();
+    const u64 start = host::ticks_ms();
     warmup::Cache cache;
     const auto status = warmup::load(kWarmupFile, warmup_compatibility(), cache);
-    const u64 loaded = GetTickCount64();
+    const u64 loaded = host::ticks_ms();
     if (status != warmup::Status::Ok || cache.pipelines.empty()) {
         hw_log("vk: prewarm early load: %s, %zu recipes, %llu ms; renderer remains lazy", warmup::name(status),
                cache.pipelines.size(), (unsigned long long)(loaded - start));
         return;
     }
     auto* target = static_cast<VkRenderer*>(renderer());
-    hw_log("vk: prewarm early renderer allocation: %llu ms", (unsigned long long)(GetTickCount64() - loaded));
+    hw_log("vk: prewarm early renderer allocation: %llu ms", (unsigned long long)(host::ticks_ms() - loaded));
     target->start_prewarm(std::move(cache), loaded - start);
 }
 
 void start_pipeline_prewarm() {
     // Catalog preparation must use the game selected on the startup screen.
     // Defer only if a catalog exists; missing catalogs retain existing behavior.
-    if (catalog_enabled() && prewarm_enabled() && GetFileAttributesA(kCatalogFile) != INVALID_FILE_ATTRIBUTES) {
+    if (catalog_enabled() && prewarm_enabled() && [] { std::error_code ec; return std::filesystem::exists(kCatalogFile, ec); }()) {
         catalog_deferred = true;
         hw_log("catalog: preparation deferred until game selection");
         return;

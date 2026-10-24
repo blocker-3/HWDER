@@ -2,6 +2,8 @@
 // HWDER_VK_FRAME_DUMP) and the filmstrip capture (HWDER_FILMSTRIP). Moved text-for-text from vk_renderer.cpp;
 // the draw-path profile flush is in gpu/diag.cpp.
 #include "interp/interp.h"
+#include "host/timing.h"
+#include "host/platform.h"
 #include "vk_renderer.h"
 #include "debug_flags.h"
 
@@ -21,7 +23,7 @@ bool drawlog_active() {
     return g_drawlog != nullptr;
 }
 
-const u64 g_start_ms = GetTickCount64();
+const u64 g_start_ms = host::ticks_ms();
 
 void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt) {
     static const char* dir = debug::str(debug::DumpFrames);
@@ -32,7 +34,7 @@ void dump_frame(VkImage image, u32 w, u32 h, VkFormat fmt) {
     // HWDER_DUMP_AFTER=<secs>: no dumps (and no dump stalls) before that time, so the run reaches
     // the interesting part at normal speed.
     static double after_s = debug::value(debug::DumpAfter, 0.0);
-    if (after_s > 0 && GetTickCount64() - g_start_ms < (u64)(after_s * 1000.0)) {
+    if (after_s > 0 && host::ticks_ms() - g_start_ms < (u64)(after_s * 1000.0)) {
         n++;
         return;
     }
@@ -112,7 +114,7 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
         static const double dur = debug::value(debug::FilmstripFor, 1e9);
         static const double after = debug::value(debug::FilmstripAfter, 0.0);
         static double start = -1;
-        double now = (GetTickCount64() - g_start_ms) / 1000.0;
+        double now = (host::ticks_ms() - g_start_ms) / 1000.0;
         if (battle && start < 0) {
             if (hw_last_frame_draws.load() <= 450) return;
             start = now + atof(battle);
@@ -160,7 +162,7 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
         b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
         for (auto& bf : bufs) bf = create_buffer(SW * SH * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, true);
-        CreateDirectoryA(dir, nullptr);
+        { std::error_code mkdir_ec; std::filesystem::create_directory(dir, mkdir_ec); }
         char path[512];
         snprintf(path, sizeof(path), "%s/index.txt", dir);
         index = fopen(path, "w");
@@ -195,7 +197,7 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     presents[sl] = cap_seq;
     pending[sl] = true;
     if (index) {
-        fprintf(index, "%llu %.3f %s present=%llu\n", (unsigned long long)cap_seq, (GetTickCount64() - g_start_ms) / 1000.0, g_strip_tag,
+        fprintf(index, "%llu %.3f %s present=%llu\n", (unsigned long long)cap_seq, (host::ticks_ms() - g_start_ms) / 1000.0, g_strip_tag,
                 (unsigned long long)g_s.present_count);
         fflush(index);
     }

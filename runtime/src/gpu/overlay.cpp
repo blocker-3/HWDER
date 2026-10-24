@@ -26,9 +26,9 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "debug_flags.h"
 #ifdef _WIN32
 #include <shellapi.h>
-#include "debug_flags.h"
 #pragma comment(lib, "shell32.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);

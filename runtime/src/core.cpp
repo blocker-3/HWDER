@@ -584,12 +584,14 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
         for (int i = 0; i < 16; i++) snprintf(id + 2 * i, 3, "%02x", nso[0x40 + i]);
         if (strcmp(id, mi.build_id) != 0) {
             hw_log("loader: %s has build id %s, but this build was made for %s", mi.name, id, mi.build_id);
+#ifdef _WIN32
             if (!debug::flag(debug::Mute))
                 MessageBoxW(nullptr,
                             L"This HWDER build was prepared for a different version of the game than the files it "
                             L"was given (for example with or without the game update).\n\n"
                             L"Open HWDER Setup and choose Prepare again with the files you want to play.",
                             L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#endif
             hw_fatal("game module does not match the generated code");
         }
     }

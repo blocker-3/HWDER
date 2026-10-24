@@ -375,9 +375,15 @@ void validation_report() { validation_summary(true); }
     std::wstring msg = L"HWDER could not start because no Vulkan 1.2 graphics driver was found.\n\n";
     if (!found.empty()) msg += found + L"\n\n";
     msg += L"Install the latest driver for your graphics card (NVIDIA, AMD or Intel) and try again.";
+#ifdef _WIN32
     MessageBoxW(nullptr, msg.c_str(), L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#else
+    std::string text;
+    for (wchar_t ch : msg) text += ch < 128 ? (char)ch : '?';
+    if (!debug::flag(debug::Mute)) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "HWDER", text.c_str(), nullptr);
+#endif
     hw_fatal(why);
-    ExitProcess(1);
+    host::process_exit(1);
 }
 
 static void init_vulkan() {

@@ -2,6 +2,8 @@
 // halfway between the previous real frame's copy of the same draw and the game-drawn in-between frame, with the
 // HWDER_GI_OBJ_TRACE diagnostics. Moved text-for-text from vk_renderer.cpp.
 #include <cmath>
+#include "host/timing.h"
+#include "host/platform.h"
 
 #include "interp/camera.h"
 #include "vk_renderer.h"
@@ -58,7 +60,7 @@ enum ObjOutcome : u8 { kOutNoPrev, kOutNoTransform, kOutNoKey, kOutUnpaired, kOu
 
 void VkRenderer::obj_trace_log() {
     static u64 last = 0;
-    const u64 now = GetTickCount64();
+    const u64 now = host::ticks_ms();
     if (now - last < 1000) return;
     last = now;
     for (ObjTraceRec* r : {&obj_tr_skin_, &obj_tr_any_}) {
@@ -163,12 +165,12 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     if (cur_stage_ != 0 || index != 3 || bytes < 64 || bytes > 4096) return;  // world matrix / bone palette sizes
     struct Timer {
         double& acc;
-        LARGE_INTEGER t0;
-        explicit Timer(double& a) : acc(a) { QueryPerformanceCounter(&t0); }
+        host::Counter t0;
+        explicit Timer(double& a) : acc(a) { host::counter(&t0); }
         ~Timer() {
-            static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-            LARGE_INTEGER t1;
-            QueryPerformanceCounter(&t1);
+            static host::Counter f = [] { host::Counter x; host::counter_frequency(&x); return x; }();
+            host::Counter t1;
+            host::counter(&t1);
             acc += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
         }
     } timer(obj_st_.ms);

@@ -6,9 +6,11 @@ add_executable(host_values_test runtime/tests/host_values_test.cpp)
 add_executable(host_settings_test runtime/tests/host_settings_test.cpp runtime/src/gpu/settings.cpp)
 add_executable(host_platform_test runtime/tests/host_platform_test.cpp ${HOST_SERVICES})
 add_executable(host_kernel_test runtime/tests/host_kernel_test.cpp ${HOST_SERVICES}
-    runtime/src/kernel/kernel.cpp runtime/src/kernel/memory.cpp runtime/src/threads.cpp)
-add_library(host_interp_compile OBJECT runtime/src/interp/camera.cpp runtime/src/interp/frame_probe.cpp
-    runtime/src/interp/interp_draw.cpp runtime/src/service/ipc.cpp runtime/src/video/host1x.cpp)
+    runtime/src/kernel/kernel.cpp runtime/src/kernel/handles.cpp runtime/src/kernel/memory.cpp runtime/src/threads.cpp
+    runtime/src/debug_flags.cpp runtime/src/perf_stats.cpp)
+# Interpolation sources include generated game symbols (game/hook.h); the full runtime build compiles them.
+add_library(host_interp_compile OBJECT
+    runtime/src/service/ipc.cpp runtime/src/video/host1x.cpp)
 # Compile the SVC integration as well; its IPC/core symbols are supplied by the game runtime.
 add_library(host_svc_compile OBJECT runtime/src/kernel/svc.cpp)
 add_library(host_service_compile OBJECT runtime/src/service/applet.cpp runtime/src/service/misc.cpp)

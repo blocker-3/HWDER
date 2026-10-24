@@ -2,7 +2,11 @@
 // the VkRenderer class, the structs it works with, the command scheduler's state and the helpers that
 // more than one unit uses. All of it used to live in vk_renderer.cpp; it moved here text-for-text.
 #pragma once
+#ifdef _WIN32
 #include <windows.h>
+#endif
+#include "host/platform.h"
+#include "host/timing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>

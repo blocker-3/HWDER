@@ -468,7 +468,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         // Guest bytes of every sampled texture (HWDER_VK_DUMP_TEX=1): fd/tex_<addr>_WxH_f<fmt>_bh<n>_tws<n>_<bl|pitch>.guest
                         static bool dump_tex_bytes = debug::flag(debug::VkDumpTex);
                         if (dump_tex_bytes && img->readable) {
-                            CreateDirectoryA("fd", nullptr);
+                            { std::error_code mkdir_ec; std::filesystem::create_directory("fd", mkdir_ec); }
                             char path[256];
                             snprintf(path, sizeof(path), "fd/tex_%llx_%ux%u_f%d_bh%u_tws%u_%s%u.guest", (unsigned long long)img->addr,
                                      img->info.width, img->info.height, (int)img->info.fmt.vk, img->info.bh, img->info.tws,

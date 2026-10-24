@@ -301,7 +301,7 @@ void update_thread() {
     const u64 t0 = host::ticks_ms();
     for (;;) {
         hid::poll_host_input(in);
-        if (plus_spam && GetTickCount64() - t0 < 30000 && (GetTickCount64() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
+        if (plus_spam && host::ticks_ms() - t0 < 30000 && (host::ticks_ms() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
         if (battle) {
             u64 t = host::ticks_ms() - t0;
             // Every 3 s: B (leaves a sub-screen such as Battlefield Info; nothing on the pre-battle menu),

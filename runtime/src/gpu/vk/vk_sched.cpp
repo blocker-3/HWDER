@@ -2,6 +2,8 @@
 // that runs deferred work, the staging ring, and the graveyard for resources the presenter may still read.
 // Moved text-for-text from vk_renderer.cpp.
 #include "vk_renderer.h"
+#include "host/timing.h"
+#include "host/platform.h"
 
 namespace gpu::vk {
 
@@ -61,7 +63,7 @@ void wait_serial(u64 serial) {
 }
 
 void waiter_thread() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER vk waiter");
+    host::name_thread(L"HWDER vk waiter");
     for (;;) {
         Frame* f = nullptr;
         {

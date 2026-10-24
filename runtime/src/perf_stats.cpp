@@ -1,8 +1,10 @@
 // Per-thread CPU and wait statistics, see perf_stats.h.
 #include "perf_stats.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -14,6 +16,8 @@
 #include <vector>
 
 #include "debug_flags.h"
+#include "host/platform.h"
+#include "host/timing.h"
 #include "hwder/runtime.h"
 #include "kernel/kernel.h"
 
@@ -22,7 +26,7 @@ namespace perf {
 namespace {
 
 struct ThreadRec {
-    DWORD tid = 0;
+    uint32_t tid = 0;
     std::atomic<int64_t> wait[kWaitCount]{};
     std::atomic<uint64_t> samples{0}, ecore{0};
     std::atomic<int64_t> sleeps{0}, sleep_req{0}, sleep_over{0};
@@ -32,20 +36,21 @@ std::mutex g_m;
 std::vector<ThreadRec*> g_recs;  // never freed: a few dozen threads per run
 thread_local ThreadRec* t_rec;
 std::atomic<uint64_t> g_presents{0};
-std::atomic<DWORD> g_presenter{0};
+std::atomic<uint32_t> g_presenter{0};
 bool g_ecore[256];  // logical processor index -> efficiency core
 bool g_hybrid;
 
 ThreadRec* rec() {
     if (!t_rec) {
         t_rec = new ThreadRec;
-        t_rec->tid = GetCurrentThreadId();
+        t_rec->tid = host::thread_id();
         std::lock_guard<std::mutex> l(g_m);
         g_recs.push_back(t_rec);
     }
     return t_rec;
 }
 
+#ifdef _WIN32
 void load_core_classes() {
     ULONG len = 0;
     GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
@@ -188,6 +193,7 @@ void reporter(int period_ms) {
         }
     }
 }
+#endif
 
 int period() {
     static const int p = debug::value(debug::ThreadStats, 0);
@@ -202,8 +208,12 @@ void start() {
     static std::once_flag once;
     if (!enabled()) return;
     std::call_once(once, [] {
+#ifdef _WIN32
         load_core_classes();
         std::thread(reporter, std::max(500, period())).detach();
+#else
+        hw_log("perf: HWDER_THREAD_STATS per-thread report is not ported to Linux yet; sleep/wait counters only");
+#endif
     });
 }
 
@@ -214,10 +224,12 @@ void add_wait(WaitKind k, int64_t qpc_ticks) {
 
 void sample_core() {
     if (!enabled() || !g_hybrid) return;
+#ifdef _WIN32
     ThreadRec* r = rec();
     DWORD cpu = GetCurrentProcessorNumber();
     r->samples.fetch_add(1, std::memory_order_relaxed);
     if (cpu < 256 && g_ecore[cpu]) r->ecore.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void note_sleep(int64_t req_ns, int64_t actual_ns) {
@@ -231,19 +243,19 @@ void note_sleep(int64_t req_ns, int64_t actual_ns) {
 void note_present() {
     if (!enabled()) return;
     g_presents.fetch_add(1, std::memory_order_relaxed);
-    g_presenter.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    g_presenter.store(host::thread_id(), std::memory_order_relaxed);
 }
 
 WaitScope::WaitScope(WaitKind kind) : k(kind) {
     if (!enabled()) return;
-    LARGE_INTEGER a;
-    QueryPerformanceCounter(&a);
+    host::Counter a;
+    host::counter(&a);
     t0 = a.QuadPart;
 }
 WaitScope::~WaitScope() {
     if (!t0) return;
-    LARGE_INTEGER b;
-    QueryPerformanceCounter(&b);
+    host::Counter b;
+    host::counter(&b);
     add_wait(k, b.QuadPart - t0);
 }
 

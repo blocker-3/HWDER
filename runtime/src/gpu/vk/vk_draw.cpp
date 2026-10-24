@@ -2,6 +2,8 @@
 // and index staging, descriptor binding and command recording of every draw. Moved text-for-text from
 // vk_renderer.cpp.
 #include <cmath>
+#include "host/timing.h"
+#include "host/platform.h"
 
 #include "gpu/settings.h"
 #include "gpu/diag.h"
@@ -852,7 +854,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         static const double after = debug::value(debug::VkFrameDumpAfter, 0.0);
         char kb[20];
         snprintf(kb, sizeof(kb), "%016llx", (unsigned long long)prog_key);
-        if (GetTickCount64() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
+        if (host::ticks_ms() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
             dump_frame_ = g_s.present_count + 2;  // the next full present
             hw_log("fd: program %s drawn (draw #%llu); dumping from present %llu", kb, (unsigned long long)draws_, (unsigned long long)dump_frame_);
             dump_prog_.clear();
