@@ -65,6 +65,20 @@ int main() {
     check(host::memory_commit(memory, page), "recommit subset");
     for (std::size_t i = 0; i < page; ++i) check(memory[i] == 0, "recommit zeroes discarded guest data");
     check(memory[page] == 0x5a, "neighbor survives decommit");
+    void* pages[size / page];
+    std::size_t written = size / page;
+    if (host::write_watch_reset(memory, size, pages, &written)) {
+        written = size / page;
+        check(host::write_watch_reset(memory, size, pages, &written) && written == 0, "write watch drained");
+        memory[page + 7] = 1;
+        written = size / page;
+        check(host::write_watch_reset(memory, size, pages, &written), "write watch query");
+        check(written == 1 && pages[0] == memory + page, "write watch reports exactly the written page");
+        written = size / page;
+        check(host::write_watch_reset(memory, size, pages, &written) && written == 0, "write watch reset");
+        written = size / page;
+        check(!host::write_watch_reset(memory + size, page, pages, &written), "unwatched range refused");
+    } else std::puts("write watch unavailable on this host: texture cache hashes instead");
     check(host::memory_release(memory, size), "release reservation");
     // Exercise guest identity addresses without replacing a potentially occupied mapping.
     auto* fixed = reinterpret_cast<void*>(0x4000000000ull);

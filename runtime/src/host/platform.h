@@ -14,6 +14,11 @@ bool memory_commit(void* address, std::size_t size);
 bool memory_decommit(void* address, std::size_t size);
 bool memory_release(void* address, std::size_t size);
 unsigned long memory_error();
+// Pages written in [address, address + size) since the last call, reset as they are reported (Windows
+// GetWriteWatch with WRITE_WATCH_FLAG_RESET; Linux userfaultfd async write-protect + PAGEMAP_SCAN, kernel 6.7+).
+// `count` holds the capacity of `pages` and receives the number reported. False when the range is not inside
+// one write-watched reservation or the host cannot track writes: callers then re-hash instead.
+bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count);
 std::size_t memory_readable(void* address, std::size_t size);
 
 // Auto-reset events retain one pending wake (including a wake before a wait).

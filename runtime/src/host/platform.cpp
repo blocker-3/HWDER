@@ -8,10 +8,15 @@
 #include <malloc.h>
 #else
 #include <cerrno>
+#include <fcntl.h>
 #include <map>
 #include <mutex>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+#include <linux/fs.h>
+#include <linux/userfaultfd.h>
 #endif
 
 namespace host {
@@ -41,6 +46,13 @@ bool memory_commit(void* address, std::size_t size) {
 bool memory_decommit(void* address, std::size_t size) { return VirtualFree(address, size, MEM_DECOMMIT) != 0; }
 bool memory_release(void* address, std::size_t) { return VirtualFree(address, 0, MEM_RELEASE) != 0; }
 unsigned long memory_error() { return GetLastError(); }
+bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count) {
+    ULONG_PTR n = *count;
+    ULONG granularity = 0;
+    const bool ok = GetWriteWatch(WRITE_WATCH_FLAG_RESET, address, size, pages, &n, &granularity) == 0;
+    *count = ok ? (std::size_t)n : 0;
+    return ok;
+}
 #else
 namespace {
 std::mutex mappings_lock;
@@ -65,8 +77,59 @@ bool contains(void* address, std::size_t size) {
     errno = ENOMEM;
     return false;
 }
+
+// Write watch: write-watched reservations are registered with one userfaultfd in async write-protect mode, so
+// a write just clears the page's protection (no fault reaches us) and PAGEMAP_SCAN reports and re-protects
+// written pages in one call. Needs kernel 6.7+; anything missing leaves the texture cache's hash fallback.
+#if defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC) && defined(UFFD_USER_MODE_ONLY)
+#define HWDER_WRITE_WATCH 1
+int g_uffd = -2;  // -2 not tried, -1 unavailable
+int g_pagemap = -1;
+std::map<std::uintptr_t, std::size_t> watched;  // under mappings_lock
+
+bool write_watch_init() {
+    if (g_uffd != -2) return g_uffd >= 0;
+    g_uffd = -1;
+    const int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    uffdio_api api{};
+    api.api = UFFD_API;
+    api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
+    const int pagemap = fd >= 0 ? open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0 || pagemap < 0 || ioctl(fd, UFFDIO_API, &api) != 0) {
+        std::fprintf(stderr, "[hwder] mem: no write watch (userfaultfd async write-protect: errno %d); textures are re-hashed\n", errno);
+        if (fd >= 0) close(fd);
+        if (pagemap >= 0) close(pagemap);
+        return false;
+    }
+    g_uffd = fd;
+    g_pagemap = pagemap;
+    return true;
 }
-void* memory_reserve(void* address, std::size_t size, bool) {
+
+void write_watch_add(void* address, std::size_t size) {
+    if (!write_watch_init()) return;
+    uffdio_register reg{};
+    reg.range = {reinterpret_cast<std::uintptr_t>(address), size};
+    reg.mode = UFFDIO_REGISTER_MODE_WP;
+    uffdio_writeprotect wp{};
+    wp.range = reg.range;
+    wp.mode = UFFDIO_WRITEPROTECT_MODE_WP;
+    if (ioctl(g_uffd, UFFDIO_REGISTER, &reg) != 0 || ioctl(g_uffd, UFFDIO_WRITEPROTECT, &wp) != 0) {
+        std::fprintf(stderr, "[hwder] mem: write watch registration failed (errno %d)\n", errno);
+        return;
+    }
+    watched.emplace(reinterpret_cast<std::uintptr_t>(address), size);
+}
+
+bool watched_range(std::uintptr_t start, std::size_t size) {
+    auto it = watched.upper_bound(start);
+    if (it == watched.begin()) return false;
+    --it;
+    return start - it->first < it->second && size <= it->second - (start - it->first);
+}
+#endif
+}
+void* memory_reserve(void* address, std::size_t size, bool write_watch) {
     std::lock_guard<std::mutex> guard(mappings_lock);
     if (!page_range(address, size)) return nullptr;
     // Never use MAP_FIXED: it can silently destroy a host library/stack mapping.
@@ -84,6 +147,11 @@ void* memory_reserve(void* address, std::size_t size, bool) {
         return nullptr;
     }
     mappings.emplace(reinterpret_cast<std::uintptr_t>(result), size);
+#ifdef HWDER_WRITE_WATCH
+    if (write_watch) write_watch_add(result, size);
+#else
+    (void)write_watch;
+#endif
     return result;
 }
 bool memory_commit(void* address, std::size_t size) {
@@ -102,9 +170,54 @@ bool memory_release(void* address, std::size_t size) {
     if (it == mappings.end() || it->second != size) { errno = EINVAL; return false; }
     if (munmap(address, size) != 0) return false;
     mappings.erase(it);
+#ifdef HWDER_WRITE_WATCH
+    watched.erase(reinterpret_cast<std::uintptr_t>(address));
+#endif
     return true;
 }
 unsigned long memory_error() { return static_cast<unsigned long>(errno); }
+bool write_watch_reset(void* address, std::size_t size, void** pages, std::size_t* count) {
+    const std::size_t capacity = *count;
+    *count = 0;
+#ifdef HWDER_WRITE_WATCH
+    const auto start = reinterpret_cast<std::uintptr_t>(address);
+    {
+        std::lock_guard<std::mutex> guard(mappings_lock);
+        if (!page_range(address, size) || !watched_range(start, size)) return false;
+    }
+    static const std::uintptr_t page = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+    page_region regions[64];
+    pm_scan_arg arg{};
+    arg.size = sizeof(arg);
+    arg.flags = PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC;
+    arg.start = start;
+    arg.end = start + size;
+    arg.vec = reinterpret_cast<std::uintptr_t>(regions);
+    arg.vec_len = 64;
+    arg.category_mask = PAGE_IS_WRITTEN;
+    arg.return_mask = PAGE_IS_WRITTEN;
+    while (arg.start < arg.end && *count < capacity) {
+        arg.max_pages = capacity - *count;  // never re-protect a page that cannot be reported
+        const long n = ioctl(g_pagemap, PAGEMAP_SCAN, &arg);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        for (long r = 0; r < n; r++)
+            for (std::uintptr_t p = regions[r].start; p < regions[r].end && *count < capacity; p += page)
+                pages[(*count)++] = reinterpret_cast<void*>(p);
+        if (arg.walk_end <= arg.start) break;
+        arg.start = arg.walk_end;
+    }
+    return true;
+#else
+    (void)address;
+    (void)size;
+    (void)pages;
+    (void)capacity;
+    return false;
+#endif
+}
 #endif
 std::size_t memory_readable(void* address, std::size_t size) {
     const auto start = reinterpret_cast<std::uintptr_t>(address);

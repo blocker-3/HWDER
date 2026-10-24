@@ -458,14 +458,7 @@ void TextureCache::validate(Image* img) {
 
 int TextureCache::written_since_check(Image* img) { return written_since(img->addr, img->readable, img->watch_epoch); }
 
-// -1 means "unknown, hash it": Linux has no GetWriteWatch, so it always takes the hash fallback.
 int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
-#ifndef _WIN32
-    (void)addr;
-    (void)size;
-    (void)watch_epoch;
-    return -1;
-#else
     u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
     // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
@@ -481,18 +474,17 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
         const bool whole = queried != kNotWatched;
         const u64 qs = whole ? b : std::max(b, start), qe = whole ? b + kWatchBlock : std::min(b + kWatchBlock, end);
         watch_buf_.resize((qe - qs) >> 12);
-        ULONG_PTR n = watch_buf_.size();
-        ULONG gran = 0;
+        size_t n = watch_buf_.size();
         SlowTimer t("write watch query", 2.0);
         ProfScope wps(kProfWatch);
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void*)qs, qe - qs, watch_buf_.data(), &n, &gran) != 0) {
+        if (!host::write_watch_reset((void*)qs, qe - qs, watch_buf_.data(), &n)) {
             if (!whole) return -1;  // range not reserved with MEM_WRITE_WATCH
             queried = kNotWatched;
             b -= kWatchBlock;  // retry this block with the image's range
             continue;
         }
         if (whole) queried = serial;
-        for (ULONG_PTR i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+        for (size_t i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
     }
     if (epoch_ - watch_pruned_ >= 512) {  // forget old reports; images last checked before then re-hash once
         watch_pruned_ = epoch_ - 256;
@@ -505,7 +497,6 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;
     return 0;
-#endif
 }
 
 void TextureCache::alloc_image(Image* img) {
