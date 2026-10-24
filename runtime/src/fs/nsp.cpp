@@ -155,7 +155,7 @@ std::string env_str(const char* name) {  // UTF-8 (read wide: ANSI cannot spell 
     return e ? wide_to_utf8(e) : std::string();
 }
 
-std::string g_pick_nsp, g_pick_keys;  // set_paths()
+std::string g_pick_nsp, g_pick_keys, g_pick_update;  // set_paths(), set_update()
 
 // Candidate prod.keys locations, in priority order. An explicit path (HWDER_KEYS, else the picked one)
 // is the only candidate: a missing explicit file must not silently fall back to another prod.keys.
@@ -398,8 +398,93 @@ struct State {
     const Section* exefs = nullptr;
     const Section* romfs = nullptr;
     std::vector<PfsEntry> exefs_files;  // offsets relative to the exefs section
+    // The game's update, unpacked by Setup (tools/game_update.py): its main module, and its RomFS as a patch
+    // over the base game's. The indirect table maps each range of the patched RomFS section either to the base
+    // game's RomFS section (storage 0) or to the update's decrypted section in romfs.patch (storage 1).
+    struct Update {
+        std::string dir;
+        File patch;
+        u32 version = 0;
+        u64 romfs_off = 0, romfs_size = 0;
+        struct Range { u64 virt, phys; s32 storage; };
+        std::vector<Range> map;  // sorted by virt; each range ends where the next starts
+    };
+    std::unique_ptr<Update> update;
 };
 State* g_state = nullptr;
+
+// Smallest JSON reader that update.json needs: an unsigned number after "key":.
+bool json_number(const std::string& text, const char* key, u64& out) {
+    size_t at = text.find("\"" + std::string(key) + "\"");
+    if (at == std::string::npos || (at = text.find(':', at)) == std::string::npos) return false;
+    char* end = nullptr;
+    out = strtoull(text.c_str() + at + 1, &end, 10);
+    return end != text.c_str() + at + 1;
+}
+
+// Loads <dir>/update.json and romfs.patch and checks the indirect table. On failure the reason is returned
+// and the game runs without the update.
+std::string load_update(const std::string& dir, State::Update& u) {
+    u.dir = dir;
+    std::string text;
+    {
+        File f;
+        if (!f.open(dir + "\\update.json") || f.size() > 65536) return "update.json missing in " + dir;
+        text.resize(f.size());
+        if (!f.read(0, (u8*)text.data(), text.size())) return "cannot read update.json";
+    }
+    u64 version = 0, ind_off = 0, ind_size = 0, count = 0, size = 0;
+    if (!json_number(text, "version", version) || !json_number(text, "indirect_offset", ind_off) ||
+        !json_number(text, "indirect_size", ind_size) || !json_number(text, "indirect_count", count) ||
+        !json_number(text, "romfs_offset", u.romfs_off) || !json_number(text, "romfs_size", u.romfs_size) ||
+        !json_number(text, "patch_size", size))
+        return "update.json is incomplete";
+    if (!u.patch.open(dir + "\\romfs.patch") || u.patch.size() != size) return "romfs.patch missing or the wrong size";
+    if (ind_off > size || ind_size > size - ind_off || ind_size < 0x8000 || count == 0 || count > 1000000)
+        return "romfs.patch has no valid indirect table";
+    std::vector<u8> table(ind_size);
+    if (!u.patch.read(ind_off, table.data(), table.size())) return "cannot read the indirect table";
+    // BKTR bucket tree: a 0x4000-byte offset node, then 0x4000-byte entry sets {s32 index, s32 count, s64 end}
+    // of 0x14-byte entries {u64 virtual offset, u64 physical offset, s32 storage}.
+    for (u64 node = 0x4000; node + 0x4000 <= table.size() && u.map.size() < count; node += 0x4000) {
+        s32 n;
+        memcpy(&n, &table[node + 4], 4);
+        if (n < 0 || 16 + 0x14ull * n > 0x4000) return "corrupt indirect table";
+        for (s32 k = 0; k < n && u.map.size() < count; k++) {
+            State::Update::Range r;
+            const u8* e = &table[node + 16 + 0x14ull * k];
+            memcpy(&r.virt, e, 8);
+            memcpy(&r.phys, e + 8, 8);
+            memcpy(&r.storage, e + 16, 4);
+            if (r.storage != 0 && r.storage != 1) return "corrupt indirect table entry";
+            if (!u.map.empty() && r.virt <= u.map.back().virt) return "unsorted indirect table";
+            u.map.push_back(r);
+        }
+    }
+    if (u.map.size() != count || u.map[0].virt != 0) return "incomplete indirect table";
+    u.version = (u32)version;
+    return "";
+}
+
+// Reads the patched RomFS section (section-relative offsets) through the indirect table.
+bool update_read(const State& st, u64 virt, u8* dst, u64 size) {
+    const auto& map = st.update->map;
+    while (size) {
+        auto it = std::upper_bound(map.begin(), map.end(), virt, [](u64 v, const auto& r) { return v < r.virt; });
+        if (it == map.begin()) return false;
+        const auto& r = *(it - 1);
+        const u64 end = it == map.end() ? ~0ull : it->virt;
+        const u64 take = std::min(size, end - virt), phys = r.phys + (virt - r.virt);
+        bool ok = r.storage == 0 ? st.romfs && st.program.read(*st.romfs, phys, dst, take)
+                                 : phys <= st.update->patch.size() && take <= st.update->patch.size() - phys &&
+                                       st.update->patch.read(phys, dst, take);
+        if (!ok) return false;
+        dst += take;
+        virt += take;
+        size -= take;
+    }
+    return true;
+}
 
 bool find_nsp(const std::string& exe_dir, std::string& out) {
     if (std::string e = env_str("HWDER_NSP"); !e.empty()) {
@@ -462,6 +547,8 @@ void set_paths(const std::string& nsp, const std::string& keys) {
     g_pick_nsp = nsp;
     g_pick_keys = keys;
 }
+
+void set_update(const std::string& dir) { g_pick_update = dir; }
 
 const Info& info() { return g_info; }
 
@@ -592,6 +679,21 @@ bool init(const std::string& exe_dir, std::string& error) {
     std::string names;
     for (auto& p : st->exefs_files) names += (names.empty() ? "" : " ") + p.name;
     hw_log("nsp: exefs: %s", names.c_str());
+    std::string update = env_str("HWDER_UPDATE");
+    if (update.empty()) update = g_pick_update;
+    if (!update.empty()) {
+        auto u = std::make_unique<State::Update>();
+        std::string why = load_update(update, *u);
+        if (why.empty() && !st->romfs) why = "the base game has no RomFS to patch";
+        if (!why.empty()) return fail(Status::Unreadable, "game update in " + update + ": " + why);
+        hw_log("nsp: update %s: version %u, %zu RomFS ranges, patch %llu bytes", update.c_str(), u->version, u->map.size(),
+               (unsigned long long)u->patch.size());
+        inf.update_path = update;
+        inf.base_version = inf.version;
+        inf.version = u->version;
+        inf.has_version = true;
+        st->update = std::move(u);
+    }
     inf.status = Status::Ok;
     g_state = st.release();
     return true;
@@ -606,6 +708,13 @@ const std::string& path() {
 
 bool read_exefs(const char* name, std::vector<u8>& out) {
     if (!g_state) return false;
+    if (g_state->update) {  // the update's own modules (main, main.npdm) replace the base game's
+        File f;
+        if (f.open(g_state->update->dir + "\\exefs\\" + name)) {
+            out.resize(f.size());
+            return f.read(0, out.data(), out.size());
+        }
+    }
     for (const PfsEntry& e : g_state->exefs_files)
         if (e.name == name) {
             out.resize(e.size);
@@ -621,10 +730,21 @@ std::vector<std::string> exefs_files() {
     return v;
 }
 
-u64 romfs_size() { return g_state && g_state->romfs ? g_state->romfs->data_size : 0; }
+u64 romfs_size() {
+    if (g_state && g_state->update) return g_state->update->romfs_size;
+    return g_state && g_state->romfs ? g_state->romfs->data_size : 0;
+}
 
 bool romfs_read(u64 off, u8* dst, u64 size) {
     if (!g_state || !g_state->romfs) return false;
+    if (const auto* u = g_state->update.get()) {
+        if (off > u->romfs_size) return false;
+        if (size > u->romfs_size - off) {
+            memset(dst + (u->romfs_size - off), 0, (size_t)(size - (u->romfs_size - off)));
+            size = u->romfs_size - off;
+        }
+        return size == 0 || update_read(*g_state, u->romfs_off + off, dst, size);
+    }
     const Section& s = *g_state->romfs;
     if (off > s.data_size) return false;
     if (size > s.data_size - off) {

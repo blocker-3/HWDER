@@ -356,6 +356,7 @@ current values. Kinds:
 | `HWDER_SYNC_TRACE` | presence | off | nvdrv syncpoint wait / signal trace. |
 | `HWDER_THREAD_DUMP` | integer | unset | Dump all guest threads to the log every n seconds. |
 | `HWDER_THREAD_STATS` | integer | unset | Log per-thread CPU, waits and efficiency-core share every n ms, guest sleeps and the per-frame GPU thread profile (turns the draw profiler on). |
+| `HWDER_UPDATE` | presence | off | Folder of the game update unpacked by tools/game_update.py (read as a wide string by the loader; the startup screen notes it). |
 | `HWDER_VALIDATION` | presence | off | Enable the Vulkan validation layer (needs the Vulkan SDK). |
 | `HWDER_VI_TRACE` | presence | off | Display service (vi) parcel trace. |
 | `HWDER_VK_DUMP_CBUF` | string | unset | Frame dump: full cbuf contents of the fragment shader whose key starts with this hex prefix. |

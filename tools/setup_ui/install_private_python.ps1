@@ -1,7 +1,7 @@
 # Windows PowerShell5.1/.NET bootstrap. No Python, toolchain, admin or global changes.
 param([string]$DataRoot, [string]$SourceRoot,
       [ValidateSet('tools','check','prepare','launch','status')][string]$Action='tools',
-      [string]$Nonce='', [string]$Nsp='', [string]$Keys='',
+      [string]$Nonce='', [string]$Nsp='', [string]$Keys='', [string]$Update='',
       [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail, [switch]$PreviewLifecycle, [switch]$PreviewRace)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -254,6 +254,7 @@ function Invoke-PrivateBootstrap {
     if ($Action -eq 'tools') { $arguments+='--install' } else { $arguments+=@('--bridge-action',$Action) }
     if ($Nsp) { $arguments+=@('--nsp',$Nsp) }
     if ($Keys) { $arguments+=@('--keys',$Keys) }
+    if ($Update) { $arguments+=@('--update',$Update) }
     & $python @arguments
 }
 

@@ -67,13 +67,14 @@ bool game_interp() {
 
 namespace {
 
-// Return addresses inside Battle_Tick of its calls, as the generated code sets x30 for them.
-constexpr u64 kBeginFrameRet = 0x10002ACD0CULL;
-constexpr u64 kDrawRet = 0x10002ACD38ULL;
-constexpr u64 kPresentWindowQueryRet = 0x10002ACDB0ULL;
-constexpr u64 kPresentWindowRet = 0x10002ACDE0ULL;
-constexpr u64 kEndFrameRet = 0x10002ACDECULL;
-constexpr u64 kPresentRet = 0x10002ACE0CULL;
+// Return addresses inside Battle_Tick of its calls, as the generated code sets x30 for them. Offsets from the
+// function start, which is the same body in every supported game version (base 0x10002acb54 + 0x1b8 = 0x10002acd0c).
+constexpr u64 kBeginFrameRet = HW_ADDR_Battle_Tick + 0x1b8;
+constexpr u64 kDrawRet = HW_ADDR_Battle_Tick + 0x1e4;
+constexpr u64 kPresentWindowQueryRet = HW_ADDR_Battle_Tick + 0x25c;
+constexpr u64 kPresentWindowRet = HW_ADDR_Battle_Tick + 0x28c;
+constexpr u64 kEndFrameRet = HW_ADDR_Battle_Tick + 0x298;
+constexpr u64 kPresentRet = HW_ADDR_Battle_Tick + 0x2b8;
 
 thread_local bool g_in_extra = false;  // recursion guard and same-thread IPC diagnostic scope
 thread_local bool g_paired_real = false;  // this tick actually queued an extra present

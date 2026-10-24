@@ -7,6 +7,9 @@ extern "C" {
 typedef struct HwModuleInfo {
     const char* name;  // ExeFS file name (rtld, main, subsdk0, subsdk1, sdk)
     u64 base, image_size, text_lo, text_hi;
+    // First 16 bytes of the NSO's build id, as hex, from the module the code was generated from (null in a
+    // generated dir from before this field). The loader refuses a different module: the code would not match.
+    const char* build_id;
 } HwModuleInfo;
 extern const HwModuleInfo hw_modules[];
 extern const unsigned hw_module_count;

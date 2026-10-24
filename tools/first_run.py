@@ -197,24 +197,43 @@ def run_command(argv, cwd):
     subprocess.run([str(a) for a in argv], cwd=cwd, check=True)
 
 
-def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None):
+def unpack_update(cache, update, keys):
+    """The game update (.nsp or .nsz), unpacked once into the cache (tools/game_update.py): its main module and
+    its RomFS patch, decrypted. Keyed by the update file's hash; the game reads it from there (update_path)."""
+    import game_update
+    key = digest({"schema": SCHEMA, "update": file_hash(update), "unpacker": file_hash(Path(game_update.__file__))})
+    return completed_stage(cache, "update", key, lambda out: game_update.unpack(update, keys, out))
+
+
+def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None,
+            update=None):
     """Injectable stage boundary permits meaningful synthetic orchestration/failure tests."""
-    from local_game import read_program, supported_profile
+    from local_game import read_program, supported_profile, profile as profile_entry
     root, cache, nsp, keys = map(Path, (root, cache, nsp, keys))
     if not nsp.is_file() or nsp.suffix.lower() != ".nsp" or not keys.is_file():
         raise ValueError("Supply an existing .nsp and your own prod.keys via --nsp/--keys or HWDER_NSP/HWDER_KEYS")
+    if update is not None:
+        update = Path(update)
+        if not update.is_file() or update.suffix.lower() not in (".nsp", ".nsz"):
+            raise ValueError("Supply the game update as an existing .nsp or .nsz")
     generation_inputs, build_inputs = source_fingerprints(root)
     before = (nsp.stat().st_size, nsp.stat().st_mtime_ns)
     keys_before = (keys.stat().st_size, keys.stat().st_mtime_ns)
     log("validating NSP, own keys, title, module set and supported-version SHA-256")
     modules = (read_modules or read_program)(nsp, keys)
+    update_dir = None
+    if update is not None:
+        log("unpacking the game update (its main module and RomFS patch)")
+        update_dir = unpack_update(cache, update, keys)
+        modules = {**modules, "main": (update_dir / "exefs" / "main").read_bytes()}
     profile = supported_profile(modules, root / "tools" / "supported_games.json")
+    recomp = profile_entry(profile, root / "tools" / "supported_games.json").get("recomp", {})
     log(f"supported version: {profile}; hashing complete NSP for cache identity")
     game_hash = file_hash(nsp)
     if before != (nsp.stat().st_size, nsp.stat().st_mtime_ns):
         raise ValueError("Game input changed during validation; retry after the dump finishes copying")
     module_hashes = {name: hashlib.sha256(data).hexdigest() for name, data in modules.items()}
-    exefs_key = digest({"schema": SCHEMA, "game": game_hash, "modules": module_hashes})
+    exefs_key = digest({"schema": SCHEMA, "game": game_hash, "modules": module_hashes, "profile": profile})
     def extract(out):
         for name, data in modules.items():
             (out / name).write_bytes(data)
@@ -226,9 +245,12 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         args = [sys.executable, "-m", "recomp.gen_main", "--exefs", exefs, "--out", out]
         if toolchain.get("managed_directory"):
             args[1:1] = ["-B", "-X", "utf8"]
-        # Explicit entries remove gen_main's implicit dependency on the working directory.
-        args += ["--extra", root / "tools" / "recomp" / "extra_entries.txt"]
-        if (root / "data" / "extra_entries.txt").is_file():
+        # Explicit entries remove gen_main's implicit dependency on the working directory. Another game version
+        # brings its own symbol and entry files (tools/recomp/<version>/, made by remap_symbols.py).
+        args += ["--symbols", root / recomp.get("symbols", "tools/recomp/symbols.txt")]
+        for extra in recomp.get("extra", ["tools/recomp/extra_entries.txt"]):
+            args += ["--extra", root / extra]
+        if not recomp and (root / "data" / "extra_entries.txt").is_file():  # local finds are base-game addresses
             args += ["--extra", root / "data" / "extra_entries.txt"]
         run(args, root / "tools")
         if tree_hashes(exefs) != exefs_files:
@@ -300,6 +322,8 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         # Verify fresh AND reused output before the stable play transaction.
         # The static GNU ABI may not borrow host/toolchain DLLs at gameplay.
         managed_tools.game_image(exe)
+    # The game reads the unpacked update at run time (update_path in its settings; installed by setup_bridge).
+    marker = {**marker, "update_dir": str(update_dir) if update_dir else None}
     # Stable play directory retains user settings, saves and private caches across source updates.
     if before_publish:
         before_publish()  # UI commit permission: no stable play transaction has started yet.

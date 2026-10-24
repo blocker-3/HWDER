@@ -11,6 +11,22 @@
         "subsdk0": "17a8bd4c66350ea483f93ca83ac4ad2c991f195de90b8904c1ffcc45f10f8715",
         "subsdk1": "f9f05fa500561893e2133b9de8131776126f78e1d5c2c542e7d594046b844e3e"
       }
+    },
+    {
+      "id": "hwde-0100ae00096ea000-update-1.0.1",
+      "title_id": "0100ae00096ea000",
+      "note": "Base game plus update 1.0.1 (0100AE00096EA800, v65536): only main differs. Symbols remapped by tools/recomp/remap_symbols.py.",
+      "modules_sha256": {
+        "main": "6fe1f0581a06d09f8f3dccc75ffcbffb5ea35c79e6a57ed56e9de9734affde62",
+        "rtld": "3522d56dda056d4c7ba6f9508d6d1805d9a751b5a189a8700f9714ce06fb6c5a",
+        "sdk": "3997a78d8c907cab470bd7fd793d1d806c7fec44239b73a456e545597808b81e",
+        "subsdk0": "17a8bd4c66350ea483f93ca83ac4ad2c991f195de90b8904c1ffcc45f10f8715",
+        "subsdk1": "f9f05fa500561893e2133b9de8131776126f78e1d5c2c542e7d594046b844e3e"
+      },
+      "recomp": {
+        "symbols": "tools/recomp/v1.0.1/symbols.txt",
+        "extra": ["tools/recomp/v1.0.1/extra_entries.txt"]
+      }
     }
   ]
 }

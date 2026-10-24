@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import first_run
 
-PINS = {"cryptography": "47.0.0", "lz4": "4.4.5", "cffi": "2.0.0", "pycparser": "3.0"}
+PINS = {"cryptography": "47.0.0", "lz4": "4.4.5", "cffi": "2.0.0", "pycparser": "3.0", "zstandard": "0.25.0"}
 OWNER = "hwder-setup-components-v1"
 NONCE = ""
 
@@ -136,6 +136,9 @@ def checked_ready(data):
     nsp, keys = Path(config.get("nsp", "")), Path(config.get("keys", ""))
     if not nsp.is_file() or not keys.is_file():
         raise ValueError("Your game or key file moved. Pick it again, then Prepare.")
+    update = marker.get("update_dir")
+    if update and not (Path(update) / "update.json").is_file():
+        raise ValueError("Your prepared game update is missing. Choose Prepare again.")
     return exe, nsp, keys
 
 
@@ -238,7 +241,10 @@ def ready_status(data, managed=None, identity=process_identity):
 def installed_paths(data, exe):
     """Persist paths, never inputs, so the installed game works without the setup kit."""
     config = first_run.read_json(Path(data) / "setup-inputs.json")
-    values = {"nsp_path": str(Path(config["nsp"]).resolve()), "keys_path": str(Path(config["keys"]).resolve())}
+    update = first_run.read_json(Path(data) / "last-success.json").get("update_dir") or ""
+    # An empty update_path switches a previously prepared update off.
+    values = {"nsp_path": str(Path(config["nsp"]).resolve()), "keys_path": str(Path(config["keys"]).resolve()),
+              "update_path": str(Path(update).resolve()) if update else ""}
     for key, value in values.items():
         if any(c in value for c in "\r\n\0") or len((key + "=" + value).encode("utf-8")) >= 2046:
             raise ValueError("The selected path cannot be stored in the game's settings. Choose a shorter path.")
@@ -278,20 +284,22 @@ def commit_permission():
         raise ValueError("Cancelled before updating the playable version.")
 
 
-def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=None):
+def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=None, update=None):
     data = Path(data).resolve()
     nsp, keys = Path(nsp).resolve(), Path(keys).resolve()
+    update = Path(update).resolve() if update else None
     toolchain = backend.check_prerequisites(first_run.ROOT, managed) if managed else backend.check_prerequisites(first_run.ROOT)
     with backend.setup_lock(data):
         existing = data / "play/hwder.exe"
         if existing.is_file() and (running_game(data, existing) or discovered_game(existing)):
             raise ValueError("Your game is running. Close it, then try again.")
         exe = backend.prepare(first_run.ROOT, data, nsp, keys, max(1, min(8, os.cpu_count() or 1)),
-                              toolchain, before_publish=before_publish)
+                              toolchain, before_publish=before_publish, **({"update": update} if update else {}))
         # The original backend owns all extraction/build/publication/certification and the host lock.
         if first_run.file_hash(exe) != backend.read_json(data / "last-success.json").get("exe_sha256"):
             raise ValueError("Prepared executable certificate did not match.")
-        backend.atomic_json(data / "setup-inputs.json", {"nsp": str(nsp), "keys": str(keys)})
+        backend.atomic_json(data / "setup-inputs.json", {"nsp": str(nsp), "keys": str(keys),
+                            **({"update": str(update)} if update else {})})
         installed_paths(data, exe)
     emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe), paths_ready="yes")
 
@@ -383,6 +391,7 @@ def main():
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--nsp")
     parser.add_argument("--keys")
+    parser.add_argument("--update")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--demo-fail", action="store_true")
     parser.add_argument("--demo-lifecycle", action="store_true")
@@ -418,7 +427,7 @@ def main():
             if not args.nsp or not args.keys:
                 raise ValueError("Choose your NSP and prod.keys files.")
             prepare(args.data, args.nsp, args.keys, before_publish=commit_permission if args.ui_protocol else None,
-                    managed=args.managed_toolchain)
+                    managed=args.managed_toolchain, update=args.update or None)
         elif args.action == "launch":
             launch(args.data,managed=True if args.managed_launch else args.managed_toolchain)
         elif args.action == "status":

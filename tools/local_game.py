@@ -121,3 +121,11 @@ def supported_profile(modules, manifest):
         if profile["title_id"] == f"{TITLE_ID:016x}" and profile["modules_sha256"] == hashes:
             return profile["id"]
     raise ValueError("Unsupported game version: ExeFS SHA-256 does not match the tested base game. No code generated")
+
+
+def profile(profile_id, manifest):
+    """The profile entry: its optional "recomp" names the symbol and extra-entry files of that version."""
+    for entry in json.loads(Path(manifest).read_text(encoding="utf-8"))["profiles"]:
+        if entry["id"] == profile_id:
+            return entry
+    raise ValueError("Unknown game profile " + profile_id)

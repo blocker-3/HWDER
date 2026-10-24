@@ -87,6 +87,7 @@ std::string pick_file(const wchar_t* title, const wchar_t* type_name, const wcha
 // Re-runs the NSP and key checks with the current picks.
 void check() {
     hwfs::nsp::set_paths(settings::launch().nsp_path, settings::launch().keys_path);
+    hwfs::nsp::set_update(settings::launch().update_path);
     hwfs::nsp::reset();
     std::string err;
     hwfs::nsp::init(g_dir, err);
