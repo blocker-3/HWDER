@@ -270,7 +270,8 @@ def probe_imports(output):
         "import lz4.block;v=b'private synthetic setup'*31;"
         "assert lz4.block.decompress(lz4.block.compress(v))==v;"
         "import cffi,pycparser;assert cffi.__version__=='2.0.0';"
-        "print('managed-python: AES/LZ4/import contracts PASS')"
+        "import zstandard;assert zstandard.ZstdDecompressor().decompress(zstandard.ZstdCompressor().compress(v))==v;"
+        "print('managed-python: AES/LZ4/zstd/import contracts PASS')"
     )
     subprocess.run([str(Path(output) / "python/python.exe"), "-I", "-B", "-c", script],
                    env=environment(Path(output).parent), check=True)
@@ -320,7 +321,7 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
         packages = python / "Lib/site-packages"
         packages.mkdir(parents=True)
         for item in value["artifacts"]:
-            if item["id"] in ("cryptography", "lz4", "cffi", "pycparser"):
+            if item["id"] in ("cryptography", "lz4", "cffi", "pycparser", "zstandard"):
                 base = output / item["id"]
                 for entry in base.iterdir():
                     if entry.name.endswith(".pth") or (packages / entry.name).exists():
@@ -376,7 +377,7 @@ def prerequisites(source, directory):
     if not complete(directory, key,checked):
         raise ValueError("Private tool certificate changed. Choose Install private tools.")
     import importlib.metadata
-    versions = {name:importlib.metadata.version(name) for name in ("cryptography","lz4","cffi","pycparser")}
+    versions = {name:importlib.metadata.version(name) for name in ("cryptography","lz4","cffi","pycparser","zstandard")}
     for item in value["artifacts"]:
         if item["id"] in versions and versions[item["id"]] != item["version"]:
             raise ValueError("Private Python package identity differs from the pinned wheels")
@@ -457,6 +458,7 @@ def main():
     parser.add_argument("--nonce",default="")
     parser.add_argument("--nsp")
     parser.add_argument("--keys")
+    parser.add_argument("--update")
     args = parser.parse_args()
     value = manifest()
     if args.nonce and not re.fullmatch("[0-9a-f]{32}",args.nonce):
@@ -479,6 +481,8 @@ def main():
                 command+=["--nsp",args.nsp]
             if args.keys:
                 command+=["--keys",args.keys]
+            if args.update:
+                command+=["--update",args.update]
             return subprocess.run(command,env=environment(directory,value)).returncode
         except (ValueError,OSError,subprocess.SubprocessError) as error:
             event("log",str(error))

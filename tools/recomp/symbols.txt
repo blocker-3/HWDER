@@ -22,6 +22,9 @@
 0x1000c2b5e8  g_Scene                  data        # ptr to the scene object S (render cameras at S+0x71360)
 0x1000c21de0  g_GfxGlobals             data        # ptr; [[+64]+88] is the window target passed to GfxDevice_PresentWindow
 0x100000fd70  game_sincosf             func
+0x100073c7d0  FrameDelta60a            data        # rodata float 1/60 s, the per-frame time step (HWDER_PATCH_DT)
+0x100073f038  FrameDelta60b            data        # rodata float 1/60 s, second copy
+0x100073c2ac  FrameDelta30             data        # rodata float 1/30 s, the half-rate step
 
 # ---- stage props (runtime/src/game/stage_props.cpp)
 0x100044660c  StageLod_Update          func hook   # (stage renderer): per-layer draw distances, docked crowd rule zeroes layer 1; runtime/src/game/stage_props.cpp

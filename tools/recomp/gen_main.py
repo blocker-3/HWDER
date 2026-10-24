@@ -130,7 +130,9 @@ def main():
         log(f"  {len(starts)} functions; stats {dict(em.stats)}")
         all_starts += starts
         resumable += getattr(em, "resumable", [])
-        mod_infos.append((name, mod.base, mod.m.image_size, mod.text_lo, mod.text_hi))
+        with open(os.path.join(a.exefs, name), "rb") as nso:
+            build_id = nso.read(0x60)[0x40:0x50].hex()
+        mod_infos.append((name, mod.base, mod.m.image_size, mod.text_lo, mod.text_hi, build_id))
 
     for old in os.listdir(a.out):  # drop files from an older layout
         if old.startswith("rc_") and old.endswith(".c") and old not in files:
@@ -181,8 +183,8 @@ def main():
     write_if_changed("symbols.h", "\n".join(sym_h))
     with open(os.path.join(a.out, "module_info.c"), "w") as f:
         f.write('#include "hwder/module.h"\n\nconst HwModuleInfo hw_modules[] = {\n')
-        for name, base, size, tlo, thi in mod_infos:
-            f.write(f'  {{ "{name}", {hx(base)}, {hx(size)}, {hx(tlo)}, {hx(thi)} }},\n')
+        for name, base, size, tlo, thi, build_id in mod_infos:
+            f.write(f'  {{ "{name}", {hx(base)}, {hx(size)}, {hx(tlo)}, {hx(thi)}, "{build_id}" }},\n')
         f.write("};\nconst unsigned hw_module_count = sizeof(hw_modules) / sizeof(hw_modules[0]);\n")
     log(f"done: {len(all_starts)} functions in {len(files)} files")
 

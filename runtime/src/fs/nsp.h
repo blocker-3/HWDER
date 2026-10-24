@@ -15,6 +15,9 @@ constexpr uint64_t kTitleId = 0x0100AE00096EA000ull;
 // Paths picked on the startup screen (empty = search). Used after HWDER_NSP / HWDER_KEYS and before
 // the automatic search; a set path that does not exist counts as missing, with no fallback.
 void set_paths(const std::string& nsp, const std::string& keys);
+// The game's update, unpacked by Setup (tools/game_update.py) into a folder; used after HWDER_UPDATE. Empty = none.
+// With an update, its main module replaces the base game's and the RomFS is read through the update's patch.
+void set_update(const std::string& dir);
 
 // Looks for an NSP (HWDER_NSP, the picked path, else *.nsp beside the exe) and keys (HWDER_KEYS, the
 // picked path, else prod.keys beside the exe, ~/.switch, yuzu/Ryujinx key folders). Returns true when
@@ -38,7 +41,9 @@ struct Info {
     size_t key_count = 0, title_key_count = 0;
     uint64_t title_id = 0;        // program NCA title ID (0 = not read)
     std::string title_source;     // where title_id was read, e.g. "program NCA <name>.nca header"
-    uint32_t version = 0;         // from the CNMT
+    uint32_t version = 0;         // from the CNMT (the update's, when one is applied)
+    uint32_t base_version = 0;    // the base game's, when an update is applied
+    std::string update_path;      // the unpacked update in use ("" = base game only)
     bool has_version = false;
     bool nsp_explicit = false, keys_explicit = false;  // set by an env var or the picked path
 };

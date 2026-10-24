@@ -56,6 +56,24 @@ class Bridge(unittest.TestCase):
         for name, version in bridge.PINS.items():
             self.assertIn(name + "==" + version, pins)
 
+    def test_prepared_update_reaches_the_game_settings_and_is_switched_off_without_one(self):
+        exe = self.fixture()
+        update = self.data / "update/abc/output"
+        update.mkdir(parents=True)
+        (update / "update.json").write_text("{}")
+        marker = bridge.first_run.read_json(self.data / "last-success.json")
+        bridge.first_run.atomic_json(self.data / "last-success.json", {**marker, "update_dir": str(update)})
+        bridge.installed_paths(self.data, exe)
+        settings = (exe.parent / "hwder_settings.ini").read_text()
+        self.assertIn("update_path=" + str(update.resolve()), settings)
+        self.assertEqual(bridge.checked_ready(self.data)[0], exe)
+        (update / "update.json").unlink()
+        with self.assertRaisesRegex(ValueError, "update is missing"):
+            bridge.checked_ready(self.data)
+        bridge.first_run.atomic_json(self.data / "last-success.json", marker)
+        bridge.installed_paths(self.data, exe)
+        self.assertIn("update_path=\n", (exe.parent / "hwder_settings.ini").read_text())
+
     def test_unknown_existing_environment_refused_before_installer(self):
         (self.data / "setup-python").mkdir()
         with self.assertRaisesRegex(ValueError, "not owned"):

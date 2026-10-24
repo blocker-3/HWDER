@@ -131,6 +131,22 @@
       "license": "BSD-3-Clause",
       "license_source": "https://pypi.org/project/pycparser/3.0/",
       "metadata_source": "https://pypi.org/pypi/pycparser/3.0/json"
+    },
+    {
+      "id": "zstandard",
+      "version": "0.25.0",
+      "url": "https://files.pythonhosted.org/packages/d9/82/b9c06c870f3bd8767c201f1edbdf9e8dc34be5b0fbc5682c4f80fe948475/zstandard-0.25.0-cp313-cp313-win_amd64.whl",
+      "sha256": "1f830a0dac88719af0ae43b8b2d6aef487d437036468ef3c2ea59c51f9d55fd5",
+      "max_download_bytes": 510000,
+      "max_unpacked_bytes": 5000000,
+      "max_entries": 50000,
+      "archive_root": "",
+      "required": [
+        "zstandard/__init__.py"
+      ],
+      "license": "BSD-3-Clause (python-zstandard, bundling zstd under BSD-3-Clause)",
+      "license_source": "https://github.com/indygreg/python-zstandard/blob/0.25.0/LICENSE",
+      "metadata_source": "https://pypi.org/pypi/zstandard/0.25.0/json"
     }
   ]
 }

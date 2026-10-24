@@ -128,12 +128,13 @@ void load() {
                 i = j + 1;
             }
         }
-        else if (k == "nsp_path" || k == "keys_path" || k == "save_dir" || k == "save_copy_from") {
+        else if (k == "nsp_path" || k == "keys_path" || k == "save_dir" || k == "save_copy_from" || k == "update_path") {
             std::string path = v;  // UTF-8, as written by save()
             while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
             (k == "nsp_path"    ? g_launch.nsp_path
              : k == "keys_path" ? g_launch.keys_path
              : k == "save_dir"  ? g_launch.save_dir
+             : k == "update_path" ? g_launch.update_path
                                 : g_launch.save_copy_from) = path;
         }
         else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
@@ -176,6 +177,7 @@ void save() {
     fprintf(f, "nsp_path=%s\nkeys_path=%s\nskip_prelaunch=%d\n", g_launch.nsp_path.c_str(), g_launch.keys_path.c_str(),
             (int)g_launch.skip_prelaunch);
     fprintf(f, "save_dir=%s\n", g_launch.save_dir.c_str());
+    if (!g_launch.update_path.empty()) fprintf(f, "update_path=%s\n", g_launch.update_path.c_str());
     if (!g_launch.save_copy_from.empty()) fprintf(f, "save_copy_from=%s\n", g_launch.save_copy_from.c_str());
     fclose(f);
 }

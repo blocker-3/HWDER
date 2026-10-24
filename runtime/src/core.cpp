@@ -19,6 +19,7 @@
 #include "hwder/runtime.h"
 #include "kernel/kernel.h"
 #include "service/ipc.h"
+#include "symbols.h"
 #include "gpu/display.h"
 #include "gpu/prelaunch.h"
 #include "gpu/renderer.h"
@@ -497,6 +498,20 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
         hw_log("loader: cannot read %s from %s", mi.name, hwfs::nsp::active() ? hwfs::nsp::path().c_str() : exefs.c_str());
         hw_fatal("missing ExeFS module");
     }
+    if (mi.build_id) {
+        char id[33];
+        for (int i = 0; i < 16; i++) snprintf(id + 2 * i, 3, "%02x", nso[0x40 + i]);
+        if (strcmp(id, mi.build_id) != 0) {
+            hw_log("loader: %s has build id %s, but this build was made for %s", mi.name, id, mi.build_id);
+            if (!debug::flag(debug::Mute))
+                MessageBoxW(nullptr,
+                            L"This HWDER build was prepared for a different version of the game than the files it "
+                            L"was given (for example with or without the game update).\n\n"
+                            L"Open HWDER Setup and choose Prepare again with the files you want to play.",
+                            L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            hw_fatal("game module does not match the generated code");
+        }
+    }
     u32 flags = *(u32*)&nso[0xC];
     struct Seg { u32 file_off, mem_off, size, extra; } seg[3];
     memcpy(seg, &nso[0x10], sizeof(seg));
@@ -521,9 +536,9 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
             float f = (float)atof(hz);
             if (f >= 30.0f) {
                 float dt = 1.0f / f, dt2 = 2.0f / f;
-                memcpy((void*)(mi.base + 0x73c7d0), &dt, 4);
-                memcpy((void*)(mi.base + 0x73f038), &dt, 4);
-                memcpy((void*)(mi.base + 0x73c2ac), &dt2, 4);
+                memcpy((void*)HW_ADDR_FrameDelta60a, &dt, 4);
+                memcpy((void*)HW_ADDR_FrameDelta60b, &dt, 4);
+                memcpy((void*)HW_ADDR_FrameDelta30, &dt2, 4);
                 hw_log("loader: patched frame delta constants to 1/%.0f s", f);
             }
         }
@@ -621,6 +636,7 @@ int main(int argc, char** argv) {
         settings::load();
         hwfs::run_pending_save_copy();  // a save folder change made in the menu last session
         hwfs::nsp::set_paths(settings::launch().nsp_path, settings::launch().keys_path);
+        hwfs::nsp::set_update(settings::launch().update_path);
         std::string err;
         bool nsp = hwfs::nsp::init(dir, err);
         bool have_dir = GetFileAttributesW(to_w(exefs + "\\main").c_str()) != INVALID_FILE_ATTRIBUTES;

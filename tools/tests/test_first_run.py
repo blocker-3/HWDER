@@ -119,6 +119,41 @@ class Fixture(unittest.TestCase):
         self.assertEqual(commands[0][1:4],["-B","-X","utf8"])
         self.assertIn("-m",commands[0])
 
+    def test_update_replaces_main_selects_its_profile_and_is_recorded(self):
+        updated_main = b"NSO0fixture-updated-main"
+        (self.root / "tools/recomp/v9").mkdir()
+        for name in ("symbols.txt", "extra_entries.txt"):
+            (self.root / "tools/recomp/v9" / name).write_text("synthetic remapped " + name)
+        update_profile = {"id": "synthetic-update", "title_id": f"{local_game.TITLE_ID:016x}",
+                          "modules_sha256": {**self.profile["modules_sha256"],
+                                             "main": hashlib.sha256(updated_main).hexdigest()},
+                          "recomp": {"symbols": "tools/recomp/v9/symbols.txt",
+                                     "extra": ["tools/recomp/v9/extra_entries.txt"]}}
+        (self.root / "tools/supported_games.json").write_text(json.dumps({"profiles": [self.profile, update_profile]}))
+        update = Path(self.temp.name) / "own-update.nsz"
+        update.write_bytes(b"synthetic update; no game content")
+        def unpack(path, keys, out):
+            self.assertEqual((Path(path), Path(keys)), (update, self.keys))
+            (out / "exefs").mkdir()
+            (out / "exefs/main").write_bytes(updated_main)
+            (out / "update.json").write_text("{}")
+        commands = []
+        def run(args, cwd):
+            commands.append([str(a) for a in args]); self.run_stage(args, cwd)
+        with patch("game_update.unpack", side_effect=unpack):
+            exe = setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain, run,
+                                lambda nsp, keys: self.modules, update=update)
+        generate = next(c for c in commands if "-m" in c)
+        self.assertIn(str(self.root / "tools/recomp/v9/symbols.txt"), generate)
+        self.assertIn(str(self.root / "tools/recomp/v9/extra_entries.txt"), generate)
+        self.assertNotIn(str(self.root / "tools/recomp/extra_entries.txt"), generate)
+        marker = json.loads((self.cache / "last-success.json").read_text())
+        self.assertEqual(Path(marker["update_dir"], "exefs/main").read_bytes(), updated_main)
+        self.assertTrue(exe.is_file())
+        with self.assertRaisesRegex(ValueError, "update"):
+            setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain, run,
+                          lambda nsp, keys: self.modules, update=Path(self.temp.name) / "missing.nsz")
+
     def test_default_prerequisites_remain_opt_in_managed(self):
         with patch("managed_tools.prerequisites",return_value={"kind":"private"}) as selected:
             self.assertEqual(setup.check_prerequisites(self.root,"private"),{"kind":"private"})

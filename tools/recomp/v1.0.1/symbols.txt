@@ -1,0 +1,65 @@
+# Remapped by tools/recomp/remap_symbols.py from symbols.txt (same names and notes; addresses for this build).
+# Named guest symbols for the recompiled modules (runtime/src/game, docs/camera.md, docs/frame-loop.md).
+#
+#   <address>  <Name>  [func|data]  [hook]   # note
+#
+# Name is a C identifier. For a func, gen_main.py emits in generated/symbols.h
+#   #define f_<Name> f_<addr>            (and f_<Name>_orig for a hook)
+#   #define HW_ADDR_<Name> <addr>ULL
+# and a name table (hw_symbols[]) that backtraces and logs use. A hook keeps its generated body as
+# f_<addr>_orig and the runtime defines f_<addr> (see runtime/src/game/hook.h). A data symbol only
+# gets HW_ADDR_<Name>. Addresses are guest addresses (main at 0x1000000000). Names are ours, inferred.
+
+# ---- camera (docs/camera.md)
+0x100057d168  Camera_BuildProj         func hook   # projection from fov/aspect/near/far; runtime/src/game/widescreen.cpp
+0x100057ce00  Camera_Update            func        # (cam, view dirty, proj dirty): rebuilds view, proj, viewproj
+0x100057cec4  Camera_BuildView         func        # view matrix from eye/at/up (+roll)
+0x10003e7114  Camera_CopyFrom          func        # copies 0x150 bytes from +0x10
+0x10003d47fc  RenderCamera_Sync        func hook   # (scene, slot): game camera -> render slot, once per tick; runtime/src/interp/camera.cpp
+0x10003d63d4  RenderCamera_SyncAll     func        # calls RenderCamera_Sync for the active screens
+0x10003d6864  Scene_GetRenderCamera    func        # (scene, screen) reads the slot at scene+0x710e0
+0x10003d0ca4  CameraConstants_Upload   func        # render side: fNear/fFar/fFov/vViewInfo constant buffer
+0x1000c21880  g_CameraManager          data        # ptr; per screen camera at +0x350 + screen * 0x5a0
+0x1000c2b5e8  g_Scene                  data        # ptr to the scene object S (render cameras at S+0x71360)
+0x1000c21de0  g_GfxGlobals             data        # ptr; [[+64]+88] is the window target passed to GfxDevice_PresentWindow
+0x100000fd70  game_sincosf             func
+0x100073c7d0  FrameDelta60a            data        # rodata float 1/60 s, the per-frame time step (HWDER_PATCH_DT)
+0x100073f038  FrameDelta60b            data        # rodata float 1/60 s, second copy
+0x100073c2ac  FrameDelta30             data        # rodata float 1/30 s, the half-rate step
+
+# ---- stage props (runtime/src/game/stage_props.cpp)
+0x1000446894  StageLod_Update          func hook   # (stage renderer): per-layer draw distances, docked crowd rule zeroes layer 1; runtime/src/game/stage_props.cpp
+0x1000455858  StageLod_ScaleFlag       func        # bit 0 of a mode word; doubles the crowd count (the original then also zeroes layer 1)
+0x10003cf318  Perf_IsHandheld          func        # 1 for performance configuration 0x10001 (handheld), 0 for 0x20003/0x20004 (docked)
+0x1000c2ba80  StageLod_CrowdOwner      data        # **ptr: object whose +88 is the crowd count n the rule compares with 60
+0x1000170c58  StageLod_CrowdCap        func        # returns *(0x1000c337b8), the crowd rule's upper bound (210 in battle)
+0x1000455c38  StageLod_ModeGate        func        # true for global mode *(*(0x1000c22d68)+3408) in 7..19: far stage parts keep their alpha
+0x10003cf294  Perf_ReadConfiguration   func        # sets the performance configurations and stores the current one at 0x1000ca3358
+0x100043f5a0  StagePart_UpdateLod      func        # (part, view): camera distance and detail level of one stage part, then fade and append
+0x100043fb98  StagePart_UpdateFade     func        # (part, view, d, bias): range = table[layer] + bias + r/2, fade state part+392, alpha part+384
+0x1000446ccc  StagePart_Append         func        # (owner, view, part, ...): draw item for a visible stage part in the pass's bucket
+0x100003c108  DrawBucket_CountMeshes   func        # (bucket, item): per-slot mesh counts, totals at bucket+2080/+2084
+0x10003d5744  DrawBucket_CopyToList    func        # (renderer, pass, sub, bucket): bucket entries -> draw list (sub-passes 5..8 variant)
+0x10003d7e0c  StageList_Draw           func        # (list owner, slot): draws list +8+8*slot with count +80+4*slot via DrawList_Render
+0x10003d887c  DrawList_Render          func        # (ctx, n, list, ...): draws every {hdr, item} entry, grouped by material
+0x1000047600  StageRecord_Register     func        # (base, obj): adds obj to the per-frame 700-entry stage record array (skips when full)
+
+# ---- frame loop (docs/frame-loop.md)
+0x10002ad584  MainThread_FrameLoop     func        # per-frame function on MainThread
+0x10002acd7c  Battle_Tick              func hook   # (scene x19, frame state x20, gfx device x21): the whole battle tick; runtime/src/interp/interp_draw.cpp
+0x10002acaa4  Menu_Frame               func        # non-battle screens draw through this instead
+0x100051ec4c  GfxDevice_BeginFrame     func hook   # (dev, w, h, ..); runtime/src/interp/interp_draw.cpp
+0x10003881c4  Scene_Draw               func        # (scene): scene slot 5 and the camera constants
+0x100052f944  GfxDevice_PresentWindow  func        # (dev, 0, 0, window target, 0), when the scene asks (vcall scene+192)
+0x100051eca8  GfxDevice_EndFrame       func        # (dev, 1)
+0x100051e904  GfxDevice_Present        func        # (dev, 0): SubmitGPFIFO, QueueBuffer, DequeueBuffer
+0x10001e3038  Profiler_Marker          func        # when [x20+662] == 0
+0x1000387af8  UpdateJob_Body           func        # scene update job (slot 2), also called on MainThread
+0x100045df64  JobSystem_Run            func
+0x1000176760  SceneA_PublishCameras    func        # scene class A (vtable 0x1000ba6008) slot 3
+0x10001768a4  SceneA_Draw              func        # slot 5
+0x10001767e8  SceneA_Slot18            func
+0x100017654c  SceneA_Update            func        # slot 2
+0x1000176478  SceneA_PostUpdate        func        # slot 4
+0x10002d98dc  SceneB_PublishCameras    func        # scene class B (vtable 0x1000bd36f8) slot 3
+0x10002d9aa0  SceneB_Draw              func        # slot 5
