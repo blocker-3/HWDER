@@ -130,3 +130,29 @@ Every run has one 100-170 ms frame at ~40 s, the battle load (`pushbuffer entry 
 profiler adds ~10%): object blending for in-between frames 2.7 ms, texture binding 1.8 ms, vertex 0.8 ms, key
 building 0.7 ms, recording 0.7 ms. It is the same profile as on Windows, scaled by the slower CPU; MainThread's
 high share is its present-wait poll. The busy-spot dips are therefore the single translator thread, not a Linux gap.
+
+## Busy-spot speed-ups (2026-10-25, 7eae304 and 4564e01)
+
+`HWDER_SAMPLE_US=500` samples the GPU command thread's CPU time (Linux) and writes counts per function and
+address to `<log>.samples.txt`; `addr2line -f -i -C -e hwder <offset>` in the container gives the line. It showed:
+crowd bone-palette pairing for in-between frames 13% (scalar compare of whole palettes against dozens of
+candidates), clock reads 3% (clock_gettime behind host::counter), the written-page map walk in every texture
+check 5%, per-draw heap-allocated profile phases ~2%.
+
+Changes: AVX palette compare with nearest candidates first; host::counter reads the invariant TSC on Linux
+(calibrated once, as QueryPerformanceCounter does on Windows); texture checks skip the page map when their
+blocks had no write report since the last check; profile phases are std::optional. Pairing outcomes are
+unchanged (matched ~75%, blended ~48% of c3 blocks, ambiguous under 0.1%). Tried and dropped: a guest spin-wait
+backoff (no change), 8 MiB write-watch blocks (more calls), -O3 (no change).
+
+Busy spot, 120 fps mode, autoplay harness (`tools/linux_autoplay_compare.py`):
+
+| Build | GPU thread per frame | fps |
+|---|---|---|
+| af2ea14 (before) | 10.4-10.5 ms | 89-93 |
+| 4564e01 | 9.0-9.1 ms | 102-105 |
+
+Still short of 120 there: each tick needs two translated frames (~18 ms of GPU-thread work per 16.7 ms tick).
+Next candidates from the profile: driver calls (RADV ~10%, submit/write-watch ioctls ~12%), std::unordered_map
+lookups in the vertex/index/geometry caches (~6%), command decode (~1.6 ms per frame). The changes are portable
+(the TSC part is Linux-only); the branch builds on Windows, where they are not yet measured.
