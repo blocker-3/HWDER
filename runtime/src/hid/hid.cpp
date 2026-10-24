@@ -327,8 +327,8 @@ void update_thread() {
             }
             if (skip && !prebattle && t > 8000 && !in_battle) {
                 u64 s6 = t % 6000;
-                // + only on movie/dialogue frames (few draws): on Select Mode it opens the Manual applet,
-                // which hangs.
+                // + only on movie/dialogue frames (few draws): on Select Mode it opens the manual (web applet),
+                // which closes at once but eats the press.
                 static bool skip_armed = false;  // + was pressed this cycle: Left selects Yes on its prompt
                 if (s6 < 120) {
                     // After Select Mode (the first menu-sized frame plus 10 s) + also continues the
