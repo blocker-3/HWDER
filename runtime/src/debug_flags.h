@@ -73,8 +73,8 @@ enum Id {
     SyncTrace,  // HWDER_SYNC_TRACE
     ThreadDump,  // HWDER_THREAD_DUMP
     ThreadStats,  // HWDER_THREAD_STATS
-    Update,  // HWDER_UPDATE
     TotalMemMb,  // HWDER_TOTAL_MEM_MB
+    Update,  // HWDER_UPDATE
     UsedMemMb,  // HWDER_USED_MEM_MB
     Validation,  // HWDER_VALIDATION
     ViTrace,  // HWDER_VI_TRACE

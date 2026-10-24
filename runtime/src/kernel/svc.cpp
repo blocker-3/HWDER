@@ -8,6 +8,7 @@
 
 #include "../service/ipc.h"
 #include "debug_flags.h"
+#include "gpu/settings.h"
 #include "kernel.h"
 #include "sync.h"
 #include "perf_stats.h"
@@ -34,14 +35,19 @@ static u64 used_memory() {
 // TotalMemorySize: a docked retail Switch's 3285 MiB application pool. HWDER_TOTAL_MEM_MB=<n> (experiment, off by
 // default) tells the game more: it sizes its heap as total minus used, and above 4 GiB takes its dev-kit layout
 // (a 1792 MiB graphics pool, the rest from what remains). Capped at the 6 GiB heap ceiling (kHeapMax) plus used.
+// The menu's Game memory option (settings game_memory_mb, 0 = the Switch's figure) chooses it; the environment
+// variable wins. Read once, at the game's first query, so a change takes effect at the next start.
 static u64 total_memory() {
     static const u64 total = [] {
         u64 v = g_process.total_memory;
-        const int mb = debug::value(debug::TotalMemMb, 0);
+        int mb = debug::value(debug::TotalMemMb, 0);
+        const char* from = "HWDER_TOTAL_MEM_MB";
+        if (mb <= 0) mb = settings::launch().game_memory_mb, from = "Game memory setting";
         if (mb > 0) {
             v = std::min<u64>((u64)mb << 20, mem::kHeapMax + used_memory());
-            hw_log("svc: TotalMemorySize overridden to %llu MiB (HWDER_TOTAL_MEM_MB experiment)", (unsigned long long)(v >> 20));
+            hw_log("svc: TotalMemorySize set to %llu MiB (%s)", (unsigned long long)(v >> 20), from);
         }
+        settings::launch().game_memory_active_mb = (int)(v >> 20);
         return v;
     }();
     return total;

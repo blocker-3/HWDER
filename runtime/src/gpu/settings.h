@@ -67,6 +67,8 @@ struct Launch {
     bool skip_prelaunch = false;
     std::string save_dir;        // save folder; empty = <exe dir>\save (see fs/save_dir.h)
     std::string save_copy_from;  // copy saves from this folder into save_dir at the next launch (set in the in-game menu)
+    int game_memory_mb = 0;          // memory the game is told it has (TotalMemorySize); 0 = a Switch's 3285 MiB
+    int game_memory_active_mb = 0;   // what this run told the game (set by the kernel at boot; not saved)
 };
 
 // Startup switches. Each is applied as its environment variable before the subsystems read it, so a
