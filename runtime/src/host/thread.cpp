@@ -1,5 +1,6 @@
 #include "host/platform.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <condition_variable>
@@ -55,6 +56,7 @@ void thread_join_release(void* thread) { WaitForSingleObject(thread, INFINITE); 
 [[noreturn]] void thread_exit() { ExitThread(0); }
 [[noreturn]] void process_exit(int code) { ExitProcess(static_cast<UINT>(code)); }
 std::uint32_t thread_id() { return GetCurrentThreadId(); }
+std::uint32_t thread_os_id(void* thread) { return GetThreadId(thread); }
 void thread_yield() { SwitchToThread(); }
 #else
 namespace {
@@ -69,6 +71,7 @@ struct Thread {
     Event complete;
     ThreadEntry entry;
     void* argument;
+    std::atomic<std::uint32_t> tid{0};
 };
 void signal_complete(void* opaque) {
     event_signal(&static_cast<Thread*>(opaque)->complete);
@@ -79,6 +82,7 @@ void* thread_entry(void* opaque) {
     // pthread_exit also executes this handler. Detached native stacks are reclaimed
     // at exit; the public handle remains waitable through its separate completion event.
     pthread_cleanup_push(signal_complete, thread.get());
+    thread->tid = thread_id();
     event_wait(&thread->start);
     thread->entry(thread->argument);
     pthread_cleanup_pop(1);
@@ -132,6 +136,9 @@ void thread_join_release(void* opaque) {
 [[noreturn]] void thread_exit() { pthread_exit(nullptr); }
 [[noreturn]] void process_exit(int code) { std::_Exit(code); }
 std::uint32_t thread_id() { return static_cast<std::uint32_t>(syscall(SYS_gettid)); }
+std::uint32_t thread_os_id(void* opaque) {
+    return opaque ? (*static_cast<std::shared_ptr<Thread>*>(opaque))->tid.load() : 0;
+}
 void thread_yield() { sched_yield(); }
 #endif
 }  // namespace host

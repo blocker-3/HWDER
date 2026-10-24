@@ -4,9 +4,14 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -76,78 +81,137 @@ void load_core_classes() {
     hw_log("perf: %d performance and %d efficiency logical processors", p, e);
 }
 
+#endif
+
+// One sample of a host thread: id, CPU time so far and its name.
+struct ThreadSample {
+    uint32_t tid;
+    double cpu_ms;
+    std::string name;
+};
+
+#ifdef _WIN32
 double ft_ms(const FILETIME& f) { return (((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 10000.0; }
+
+double process_cpu_ms() {
+    FILETIME pc, pe, pk, pu;
+    GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
+    return ft_ms(pk) + ft_ms(pu);
+}
+
+std::vector<ThreadSample> thread_samples() {
+    std::vector<ThreadSample> out;
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof(te)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        FILETIME c, e, k, u;
+        ThreadSample t{te.th32ThreadID, GetThreadTimes(h, &c, &e, &k, &u) ? ft_ms(k) + ft_ms(u) : 0, "host"};
+        PWSTR d = nullptr;
+        if (SUCCEEDED(GetThreadDescription(h, &d)) && d && d[0]) {
+            char b[128];
+            WideCharToMultiByte(CP_UTF8, 0, d, -1, b, sizeof(b), nullptr, nullptr);
+            t.name = b;
+        }
+        if (d) LocalFree(d);
+        CloseHandle(h);
+        out.push_back(t);
+    }
+    CloseHandle(snap);
+    return out;
+}
+#else
+// utime + stime of a /proc stat line, in ms (fields 14 and 15, counted after the parenthesised name).
+double stat_cpu_ms(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return 0;
+    char line[1024];
+    const bool got = std::fgets(line, sizeof(line), f) != nullptr;
+    std::fclose(f);
+    const char* rest = got ? std::strrchr(line, ')') : nullptr;
+    unsigned long long utime = 0, stime = 0;
+    if (!rest || std::sscanf(rest + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &utime, &stime) != 2) return 0;
+    static const double tick_ms = 1000.0 / (double)sysconf(_SC_CLK_TCK);
+    return (double)(utime + stime) * tick_ms;
+}
+
+double process_cpu_ms() { return stat_cpu_ms("/proc/self/stat"); }
+
+std::vector<ThreadSample> thread_samples() {
+    std::vector<ThreadSample> out;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        const std::string dir = entry.path().string();
+        const uint32_t tid = (uint32_t)std::strtoul(entry.path().filename().c_str(), nullptr, 10);
+        if (!tid) continue;
+        ThreadSample t{tid, stat_cpu_ms(dir + "/stat"), "host"};
+        if (FILE* f = std::fopen((dir + "/comm").c_str(), "r")) {
+            char b[64];
+            if (std::fgets(b, sizeof(b), f)) {
+                b[std::strcspn(b, "\n")] = 0;
+                if (b[0]) t.name = b;
+            }
+            std::fclose(f);
+        }
+        out.push_back(t);
+    }
+    return out;
+}
+#endif
 
 struct Row {
     std::string name;
     double cpu_pct, wait_ms[kWaitCount], ecore_pct;
     int64_t sleeps, sleep_req, sleep_over;
-    DWORD tid;
+    uint32_t tid;
 };
 
 void reporter(int period_ms) {
-    SetThreadDescription(GetCurrentThread(), L"HWDER perf stats");
-    std::map<DWORD, double> prev_cpu;
-    std::map<DWORD, int64_t> prev_wait[kWaitCount];
-    std::map<DWORD, std::pair<uint64_t, uint64_t>> prev_core;
-    std::map<DWORD, int64_t> prev_sl[3];
-    LARGE_INTEGER freq, last, now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&last);
+    host::name_thread(L"HWDER perf stats");
+    std::map<uint32_t, double> prev_cpu;
+    std::map<uint32_t, int64_t> prev_wait[kWaitCount];
+    std::map<uint32_t, std::pair<uint64_t, uint64_t>> prev_core;
+    std::map<uint32_t, int64_t> prev_sl[3];
+    host::Counter freq, last, now;
+    host::counter_frequency(&freq);
+    host::counter(&last);
     uint64_t last_presents = g_presents.load();
-    FILETIME pc, pe, pk, pu;
-    GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
-    double last_proc = ft_ms(pk) + ft_ms(pu);
-    const DWORD pid = GetCurrentProcessId();
+    double last_proc = process_cpu_ms();
     for (;;) {
-        Sleep(period_ms);
-        QueryPerformanceCounter(&now);
+        host::sleep_ms((uint32_t)period_ms);
+        host::counter(&now);
         const double wall = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
         last = now;
         const uint64_t presents = g_presents.load();
-        GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
-        const double proc = ft_ms(pk) + ft_ms(pu);
+        const double proc = process_cpu_ms();
 
         // Guest thread labels by host thread id.
-        std::map<DWORD, std::string> guest;
+        std::map<uint32_t, std::string> guest;
         for (auto& t : kern::all_threads()) {
             if (!t->host_handle || t->exited) continue;
             char b[160];
             snprintf(b, sizeof(b), "guest %llu %s prio %d core %d entry %llx", (unsigned long long)t->id, t->name.c_str(), t->priority,
                      t->ideal_core, (unsigned long long)t->entry);
-            guest[GetThreadId(t->host_handle)] = b;
+            guest[host::thread_os_id(t->host_handle)] = b;
         }
-        std::map<DWORD, ThreadRec*> recs;
+        std::map<uint32_t, ThreadRec*> recs;
         {
             std::lock_guard<std::mutex> l(g_m);
             for (ThreadRec* r : g_recs) recs[r->tid] = r;
         }
 
         std::vector<Row> rows;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        THREADENTRY32 te{sizeof(te)};
-        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-            if (te.th32OwnerProcessID != pid) continue;
-            HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
-            if (!h) continue;
-            FILETIME c, e, k, u;
-            double cpu = GetThreadTimes(h, &c, &e, &k, &u) ? ft_ms(k) + ft_ms(u) : 0;
+        for (const ThreadSample& sample : thread_samples()) {
             Row r{};
-            r.tid = te.th32ThreadID;
+            r.tid = sample.tid;
             auto pit = prev_cpu.find(r.tid);
-            r.cpu_pct = pit == prev_cpu.end() ? 0 : (cpu - pit->second) * 100.0 / wall;
-            prev_cpu[r.tid] = cpu;
+            r.cpu_pct = pit == prev_cpu.end() ? 0 : (sample.cpu_ms - pit->second) * 100.0 / wall;
+            prev_cpu[r.tid] = sample.cpu_ms;
             if (auto g = guest.find(r.tid); g != guest.end()) r.name = g->second;
-            else {
-                PWSTR d = nullptr;
-                if (SUCCEEDED(GetThreadDescription(h, &d)) && d && d[0]) {
-                    char b[128];
-                    WideCharToMultiByte(CP_UTF8, 0, d, -1, b, sizeof(b), nullptr, nullptr);
-                    r.name = b;
-                } else r.name = "host";
-                if (d) LocalFree(d);
-            }
-            CloseHandle(h);
+            else r.name = sample.name;
             if (r.tid == g_presenter.load()) r.name += " [presents]";
             if (auto ri = recs.find(r.tid); ri != recs.end()) {
                 ThreadRec* t = ri->second;
@@ -166,7 +230,6 @@ void reporter(int period_ms) {
             } else r.ecore_pct = -1;
             rows.push_back(r);
         }
-        CloseHandle(snap);
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.cpu_pct > b.cpu_pct; });
         const double frames = (double)(presents - last_presents);
         hw_log("perf: %.0f ms window: %.1f guest fps, process CPU %.2f cores, %zu threads", wall, frames * 1000.0 / wall,
@@ -193,7 +256,6 @@ void reporter(int period_ms) {
         }
     }
 }
-#endif
 
 int period() {
     static const int p = debug::value(debug::ThreadStats, 0);
@@ -210,10 +272,8 @@ void start() {
     std::call_once(once, [] {
 #ifdef _WIN32
         load_core_classes();
-        std::thread(reporter, std::max(500, period())).detach();
-#else
-        hw_log("perf: HWDER_THREAD_STATS per-thread report is not ported to Linux yet; sleep/wait counters only");
 #endif
+        std::thread(reporter, std::max(500, period())).detach();
     });
 }
 

@@ -36,6 +36,8 @@ void thread_join_release(void* thread);
 // Runtime workers live until process termination; do not run global destructors concurrently.
 [[noreturn]] void process_exit(int code);
 std::uint32_t thread_id();
+// The OS id (thread_id() inside it) of a started thread_create thread; 0 before it runs.
+std::uint32_t thread_os_id(void* thread);
 void thread_yield();
 std::uint64_t monotonic_ns();
 }  // namespace host
