@@ -78,7 +78,7 @@ historical and no longer in the code.
 
 ## Busy battles (2026-10-24)
 
-Measured on a ~1500-draw stage-4 battle (`hywar/docs/busy-stage-perf.md`): the GPU command thread was the limit
+Measured on a ~1500-draw stage-4 battle: the GPU command thread was the limit
 (12.5 ms per frame on main). Batched write-watch queries, persistent vertex/index ranges, the copy-and-return presenter
 above, a P-core preference on hybrid CPUs, exact guest sleeps and pacer catch-up bring 120 mode to 8.35 ms per frame
 there and native 60 to 16.7 ms.
