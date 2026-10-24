@@ -14,6 +14,7 @@ Inventory of every `getenv("HWDER_...")` in `runtime/src` at code-structure comm
 | `HWDER_AUTOPLAY_CAM` | presence | - | Autoplay: also turn the camera with the right stick (2 s right, 2 s left, 2 s still). | 1 |
 | `HWDER_AUTOPLAY_CIRCLE` | presence | - | Autoplay: run in a slow circle (one turn every 8 s) so the view covers every direction. | 1 |
 | `HWDER_AUTOPLAY_IDLE` | presence | - | Autoplay: no input once in battle (experiments). | 1 |
+| `HWDER_AUTOPLAY_PLUS` | presence | - | Test: tap + five times a second for the first 30 s (players who press + through the startup and title screens). | 1 |
 | `HWDER_AUTOPLAY_SKIP` | presence | - | Autoplay: the 6 s cutscene-skip cycle for a save that starts with the story cutscenes. | 1 |
 | `HWDER_CACHE_PROFILE` | presence | - | Pipeline cache / warmup save: log retrieval, snapshot, validation, serialization and disk timings (cache-save:). Read on every save. | 6 |
 | `HWDER_CACHE_SAVE_SYNC` | string | unset | Exactly "1": save the warmup records synchronously instead of on the background task. | 1 |
@@ -192,6 +193,7 @@ Kinds: `presence` = set at all (`getenv() != nullptr`); `on-unless-0` = on unles
 | `HWDER_VK_DUMP_TEX` | `runtime/src/gpu/vk/vk_resources.cpp:462` | presence -> flag(id) |
 | `HWDER_AUTOPLAY` | `runtime/src/hid/hid.cpp:285` | presence -> flag(id) |
 | `HWDER_AUTOPLAY` | `runtime/src/hid/hid.cpp:289` | site keeps its own parse of the string -> str(id) |
+| `HWDER_AUTOPLAY_PLUS` | `runtime/src/hid/hid.cpp:287` | presence -> flag(id) |
 | `HWDER_AUTOPLAY_SKIP` | `runtime/src/hid/hid.cpp:315` | presence -> flag(id) |
 | `HWDER_AUTOPLAY_IDLE` | `runtime/src/hid/hid.cpp:349` | presence -> flag(id) |
 | `HWDER_AUTOPLAY_CIRCLE` | `runtime/src/hid/hid.cpp:356` | presence -> flag(id) |
