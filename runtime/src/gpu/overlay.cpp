@@ -786,9 +786,36 @@ static void tab_input(bool& changed) {
                         hid::host_button_name(hid::kHostLeftShoulder, type), hid::host_button_name(hid::kHostRightShoulder, type));
 }
 
+// Memory the game is told it has. It sizes its heap from it once, at boot, so a change applies at the next start.
+static void opt_game_memory(bool& changed) {
+    settings::Launch& l = settings::launch();
+    static const struct { int mb; const char* name; } kSizes[] = {
+        {0, "Switch (3.2 GB)"}, {4096, "4 GB"}, {6144, "6 GB (experimental)"}};
+    const char* cur = "Custom";
+    for (const auto& s : kSizes)
+        if (s.mb == l.game_memory_mb) cur = s.name;
+    if (ImGui::BeginCombo("Game memory", cur)) {
+        for (const auto& s : kSizes)
+            if (ImGui::Selectable(s.name, s.mb == l.game_memory_mb)) {
+                l.game_memory_mb = s.mb;
+                changed = true;
+            }
+        ImGui::EndCombo();
+    }
+    help("How much memory the game is told it has. A Switch gives it 3.2 GB; the game sizes its own memory from\n"
+         "that number when it starts. Above 4 GB it uses its developer-console layout, which has more room for\n"
+         "graphics. 6 GB uses up to about 3 GB more of your PC's RAM. Takes effect when you next start the game.");
+    const int want = l.game_memory_mb > 0 ? l.game_memory_mb : 3285;
+    if (l.game_memory_active_mb > 0 && l.game_memory_active_mb != want)  // (HWDER_TOTAL_MEM_MB also lands here)
+        ImGui::TextDisabled("Restart the game to use it. This session runs with %d MB.", l.game_memory_active_mb);
+}
+
 static void tab_gameplay(bool& changed) {
     section("Save folder");
     opt_save_folder(true, changed);
+
+    section("Game memory");
+    opt_game_memory(changed);
 
     section("Cheats (save file)");
     static std::string status;

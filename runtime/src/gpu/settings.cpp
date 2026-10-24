@@ -138,6 +138,7 @@ void load() {
                                 : g_launch.save_copy_from) = path;
         }
         else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
+        else if (k == "game_memory_mb") g_launch.game_memory_mb = std::clamp(atoi(v), 0, 8192);
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
     }
     fclose(f);
@@ -177,6 +178,7 @@ void save() {
     fprintf(f, "nsp_path=%s\nkeys_path=%s\nskip_prelaunch=%d\n", g_launch.nsp_path.c_str(), g_launch.keys_path.c_str(),
             (int)g_launch.skip_prelaunch);
     fprintf(f, "save_dir=%s\n", g_launch.save_dir.c_str());
+    fprintf(f, "game_memory_mb=%d\n", g_launch.game_memory_mb);
     if (!g_launch.update_path.empty()) fprintf(f, "update_path=%s\n", g_launch.update_path.c_str());
     if (!g_launch.save_copy_from.empty()) fprintf(f, "save_copy_from=%s\n", g_launch.save_copy_from.c_str());
     fclose(f);
