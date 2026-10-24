@@ -14,7 +14,7 @@ python3 tools/build.py --generated-dir build/link-check-generated --build-dir bu
 ### Known gaps (Windows features without a Linux equivalent yet)
 
 - Texture/geometry write watch: done (8187ec6). Write-watched guest memory registers with userfaultfd async write-protect and `PAGEMAP_SCAN` reports written pages (kernel 6.7+; older kernels log "no write watch" and keep hashing). Max's Ally playtest 2026-10-24: all 60 fps checks good; at 120 busy areas dipped to ~75 before and ~100 after.
-- `HWDER_THREAD_STATS`: wait and sleep counters work, the per-thread CPU report is Windows-only.
+- `HWDER_THREAD_STATS`: done (cba01eb); the per-thread report reads `/proc/self/task` on Linux.
 - Crash handling: no minidumps; Linux prints a signal message and leaves core dumps to the system.
 - Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
 - Error dialogs: the "wrong game version" and save-copy failure dialogs are log-only on Linux; the missing-Vulkan dialog uses an SDL message box.
@@ -101,3 +101,32 @@ Begin at native60/default settings. Check startup/controller/menu navigation, ga
 Controlled normal exits restore exclusive fullscreen modes before terminating. Fatal exits may remain abrupt. Linux crash signals leave an async-safe stderr message and defer to the system's local core-dump policy. Windows minidumps/register suspension, draw-write page census and suspended-thread matrix diagnostics are unavailable. Regular gameplay/full-object interpolation remains implemented. Textures use the existing hash fallback because Linux lacks Windows GetWriteWatch.
 
 Submitted Bazzite/Ubuntu 24.04.5 native evidence passed the FFmpeg 6.1.1 probe (51 I/P/B pictures, 23,040 NV12 pixel checks), all three synthetic tests and 45 Python tests (4 Windows skips). Corrected native host aggregate coverage subsequently compiled and passed six tests; direct SSH validation with the settings correction now compiles the aggregate and passes all seven tests. Native runtime compilation originally exposed applet/time-service calls and then the settings `_putenv_s` call; these observed portability blockers are corrected, together with later native-only diagnostics/filesystem calls in nvdrv and the Vulkan texture/renderer code. Direct SSH validation on the Ally completed the full native game build and normal first-run ELF verification/publication; all dynamic runtime libraries resolved. No gameplay, controller/GPU/media playback or real-save acceptance is established. Max's Ally playtest remains required.
+
+## Unattended autoplay runs on the Ally
+
+`tools/linux_autoplay.py` runs on the Bazzite host (outside the container). Each run gets its own folder under
+`HWDER-linux-native/runs/autoplay/` with a hard link of the play build, copies of its settings and pipeline caches
+and a copy of a fixed save (`runs/autoplay/fixtures/autoplay` = test-saves/autoplay 9038..., `busy-spot` = 38e7...).
+The play folder and its save are never written. The game runs in `hwder-dev` inside a headless gamescope
+(1920x1080, 120 Hz, nothing on screen; Max approved this 2026-10-24) and is stopped after `--seconds`. Keep the SSH
+session open for the whole run: Tailscale SSH ends host processes started from a session when it closes.
+
+~~~sh
+cd /var/home/bazzite/Documents/HWDER-linux-native
+python3 hwder/tools/linux_autoplay.py --fixture busy-spot --mode 120 --seconds 90 --name busy120 [--stats 2000] [--filmstrip]
+~~~
+
+Results 2026-10-25 (build cba01eb, Ally Z1 Extreme, RADV), 300-frame window averages in battle:
+
+| Run | fps | Notes |
+|---|---|---|
+| autoplay, 120 | 8.33-8.39 ms (~120) | 0 extra frames skipped; filmstrip normal |
+| autoplay, 60 | 16.67-17.1 ms (58-60) | |
+| busy-spot, 120 | 10.7-11.8 ms (85-93) | ~1280 draws; real frame 12.5 ms mean |
+| busy-spot, 60 | 16.67-17.2 ms (58-60) | |
+
+Every run has one 100-170 ms frame at ~40 s, the battle load (`pushbuffer entry ... took 1xx ms`). With
+`--stats 2000` at the busy spot the `HWDER GPU` thread is 95-97% busy (12.4 ms per frame at ~1270 draws; the
+profiler adds ~10%): object blending for in-between frames 2.7 ms, texture binding 1.8 ms, vertex 0.8 ms, key
+building 0.7 ms, recording 0.7 ms. It is the same profile as on Windows, scaled by the slower CPU; MainThread's
+high share is its present-wait poll. The busy-spot dips are therefore the single translator thread, not a Linux gap.

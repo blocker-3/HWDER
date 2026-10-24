@@ -68,10 +68,12 @@ def prepare(args, run):
 
 
 def environment(args, run):
+    # The launcher (gamescope, distrobox/podman) keeps the real HOME; only the game's own files are redirected.
     env = {k: v for k, v in os.environ.items() if not k.startswith("HWDER_") and k != "LD_PRELOAD"}
-    env.update(HOME=str(run / "home"), TMPDIR=str(run / "tmp"), XDG_CACHE_HOME=str(run / "home/.cache"),
-               XDG_CONFIG_HOME=str(run / "home/.config"), XDG_DATA_HOME=str(run / "home/.local/share"),
-               MESA_SHADER_CACHE_DIR=str(RUNS / "mesa-cache"))
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")  # unset in SSH sessions; gamescope needs it
+    game = {"HOME": str(run / "home"), "TMPDIR": str(run / "tmp"), "XDG_CACHE_HOME": str(run / "home/.cache"),
+            "XDG_CONFIG_HOME": str(run / "home/.config"), "XDG_DATA_HOME": str(run / "home/.local/share"),
+            "MESA_SHADER_CACHE_DIR": str(RUNS / "mesa-cache")}
     flags = {"HWDER_NSP": str(ROOT / "Hyrule Warriors Definitive Edition.nsp"), "HWDER_KEYS": str(ROOT / "prod.keys"),
              "HWDER_LOG": str(run / "hwder.log"), "HWDER_MUTE": "1", "HWDER_NO_PRELAUNCH": "1", "HWDER_NO_DUMP": "1",
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
@@ -85,14 +87,14 @@ def environment(args, run):
     for kv in args.env:
         k, _, v = kv.partition("=")
         flags[k] = v
-    env.update(flags)
-    return env, flags
+    game.update(flags)
+    return env, game, flags
 
 
-def stop(run, deadline):
+def stop(proc, run, deadline):
     exe = str(run / "hwder")
     pid = None
-    while time.time() < deadline:
+    while time.time() < deadline and proc.poll() is None:
         for p in running_games():
             try:
                 if os.readlink(f"/proc/{p}/exe") == exe:
@@ -100,6 +102,8 @@ def stop(run, deadline):
             except OSError:
                 pass
         time.sleep(1)
+    if proc.poll() is not None and not (pid and os.path.exists(f"/proc/{pid}")):
+        return f"exited on its own (launcher exit {proc.returncode}) before the deadline"
     if pid is None:
         return "game was not running at the deadline"
     os.kill(pid, signal.SIGTERM)
@@ -122,9 +126,13 @@ def summarize(run, args, flags, outcome):
     lines = [f"run {run.name}: fixture {args.fixture}, mode {args.mode}, {args.seconds} s, {outcome}",
              f"flags: {' '.join(f'{k}={v}' for k, v in flags.items() if k not in ('HWDER_NSP', 'HWDER_KEYS'))}"]
     if avgs:
-        steady = avgs[2:] or avgs  # the first windows include loading
-        lines.append(f"300-frame windows: {len(avgs)}; steady avg {min(steady):.2f}-{max(steady):.2f} ms "
-                     f"({1000 / max(steady):.0f}-{1000 / min(steady):.0f} fps); worst frame {max(worst):.1f} ms")
+        # Battle windows: in 120 mode from the first 120 Hz window on (menus run at 60); the first two include loading.
+        first = next((i for i, a in enumerate(avgs) if a < 12.0), len(avgs)) if args.mode == 120 else 2
+        start = min(first + 1, len(avgs) - 1)  # the first battle window still contains the load
+        steady, worst_battle = avgs[start:], worst[start:]
+        lines.append(f"300-frame windows: {len(avgs)}; battle avg {min(steady):.2f}-{max(steady):.2f} ms "
+                     f"({1000 / max(steady):.0f}-{1000 / min(steady):.0f} fps); worst battle frame {max(worst_battle):.1f} ms; "
+                     f"worst frame overall {max(worst):.1f} ms")
     lines += ["", "frame windows:"] + frames + ["", "120 fps mode:"] + gi[-8:] + ["", "errors:"] + bad[:20]
     if perf:
         lines += ["", "thread stats (last report):"]
@@ -178,15 +186,19 @@ def main():
         raise SystemExit("hwder is already running; not starting a test")
     run = owned(RUNS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{args.name}")
     prepare(args, run)
-    env, flags = environment(args, run)
-    game = ["/usr/bin/distrobox", "enter", "-n", "hwder-dev", "--", "env", "-u", "LD_PRELOAD", str(run / "hwder")]
+    env, game_env, flags = environment(args, run)
+    listed = subprocess.run(["/usr/bin/distrobox", "list", "--no-color"], capture_output=True, text=True, env=env).stdout
+    if not re.search(r"\|\s*hwder-dev\s*\|", listed):
+        raise SystemExit("the hwder-dev container is missing; not creating one")
+    game = (["/usr/bin/distrobox", "enter", "-n", "hwder-dev", "--", "env", "-u", "LD_PRELOAD"]
+            + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")])
     if not args.visible:
         w, h = args.size.split("x")
         game = ["/usr/bin/gamescope", "--backend", "headless", "-W", w, "-H", h, "-w", w, "-h", h, "-r", "120", "--"] + game
     with open(run / "console.log", "wb") as console:
         proc = subprocess.Popen(game, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
-        outcome = stop(run, time.time() + args.seconds)
+        outcome = stop(proc, run, time.time() + args.seconds)
         try:
             proc.wait(timeout=20)
         except subprocess.TimeoutExpired:
