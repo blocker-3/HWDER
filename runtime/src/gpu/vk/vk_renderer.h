@@ -418,6 +418,11 @@ public:
         cbufs_[stage][slot] = {va, size, valid};
     }
 
+    void yield_to_present() override {
+        // std::recursive_mutex is not fair: the GPU thread re-took it for every draw and the compositor's present waited
+        // until a whole submission was translated (7-16 ms in big battles), delaying every shown frame.
+        while (present_waiting_.load(std::memory_order_acquire)) std::this_thread::yield();
+    }
     void draw(const u32* regs, const DrawParams& p) override {
         ProfScope ps(kProfDrawTotal);
         std::lock_guard<std::recursive_mutex> l(m_);
@@ -485,6 +490,7 @@ public:
         if (prof_flush() > 50.0)
             hw_log("vk: profile tex (frame so far): %u created, %u uploads (%llu KiB), %u downloads", tc_.n_creates, tc_.n_uploads,
                    (unsigned long long)(tc_.upload_bytes >> 10), tc_.n_downloads);
+        ProfScope ps(kProfSubmit);
         g_rec.flush();
     }
     void wait_idle() override {
@@ -671,6 +677,7 @@ private:
     MemoryManager* mm_;
     TextureCache tc_;
     std::recursive_mutex m_;
+    std::atomic<int> present_waiting_{0};  // compositor threads waiting for m_ in present()
     std::mutex inv_m_;
     std::vector<std::pair<u64, u64>> invalidations_;
     CbufBinding cbufs_[5][18];
@@ -821,6 +828,18 @@ private:
         u32 w = 0, h = 0;
         bool failed = false;
     } post_;
+    // 120 fps mode: presenter-owned copies of presented frames, so the guest buffer is returned before the
+    // release grid wait (see vi.cpp). Three, reused once their screen blit has finished.
+    struct HoldImage {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        u32 w = 0, h = 0;
+        VkFormat fmt = VK_FORMAT_UNDEFINED;
+        u64 ticket = 0;
+    };
+    HoldImage hold_[3];
+    u32 hold_next_ = 0;
+    int capture_for_present(Image* img, u32 w, u32 h);  // index into hold_, -1 when no copy was made
     Framebuffer cur_fb_;
     u64 draws_ = 0, skipped_ = 0;
     struct Stats {

@@ -394,6 +394,7 @@ static void draw(Engine3D& e, bool indexed, u32 first, u32 count, u32 topology) 
     sync_cbufs(e);
     {
         OpTimer t("draw", count);
+        renderer()->yield_to_present();
         renderer()->draw(e.regs, p);
     }
 }
@@ -404,6 +405,7 @@ static void macro_send(void* ctx, u32 method, u32 value) { method_3d(*(Engine3D*
 static u32 macro_read(void* ctx, u32 reg) { return reg < m3d::kNumRegs ? ((Engine3D*)ctx)->regs[reg] : 0; }
 
 static void flush_macro(Engine3D& e) {
+    diag::ProfScope ps(diag::kProfMacro);
     if (e.macro_index < 0) return;
     u32 index = (u32)e.macro_index;
     e.macro_index = -1;
@@ -487,6 +489,7 @@ static void method_3d(Engine3D& e, u32 method, u32 value) {
             p.instance = e.instance;
             sync_cbufs(e);
             OpTimer t("inline-index draw", p.count);
+            renderer()->yield_to_present();
             renderer()->draw_inline_indices(e.regs, p, e.inline_indices.data(), 4);
             e.inline_indices.clear();
         } else if (e.indexed) {
@@ -811,6 +814,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
 }
 
 static void process_pushbuffer(Channel* ch, const u32* words, u32 count) {
+    diag::ProfScope ps(diag::kProfPushbuf);
     u32 i = 0;
     while (i < count) {
         u32 h = words[i++];

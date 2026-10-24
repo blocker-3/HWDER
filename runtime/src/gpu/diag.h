@@ -28,13 +28,13 @@ enum ProfPhase {
     kProfCbuf, kProfTexGet, kProfTexView, kProfSampler, kProfDescAlloc, kProfDescUpdate, kProfFbGet, kProfFbView,
     kProfReadable, kProfCreateImage, kProfAllocBind, kProfUpload, kProfStage, kProfDecode,
     kProfGetLayout, kProfGetOverlaps, kProfGetMatch, kProfGetValidate, kProfGetMiss, kProfClear, kProfInvalidate, kProfPresent,
-    kProfKeyBuild, kProfTexHit, kProfValidate, kProfWatch, kProfHash, kProfTextures, kProfDrawTotal, kProfCount
+    kProfKeyBuild, kProfTexHit, kProfValidate, kProfWatch, kProfHash, kProfTextures, kProfSubmit, kProfFrameBegin, kProfMacro, kProfPushbuf, kProfDrawTotal, kProfCount
 };
 static const char* const kProfNames[kProfCount] = {
     "program", "framebuffer", "vertex", "index", "descriptors", "pipeline", "record",
     "|cbuf", "tex-get", "tex-view", "sampler", "desc-alloc", "desc-update", "fb-get", "fb-view",
     "|readable", "create-image", "alloc-bind", "upload", "stage", "decode",
-    "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "tex-hit", "validate", "watch", "hash", "textures", "|draw-total"};
+    "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "tex-hit", "validate", "watch", "hash", "textures", "submit", "frame-begin", "macro(incl)", "pushbuf(incl)", "|draw-total"};
 extern double g_prof[kProfCount];
 extern uint32_t g_prof_draws;
 extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets, g_prof_vtx_bytes, g_prof_vtx_copies, g_prof_idx_bytes, g_prof_idx_scanned;  // constant-buffer bytes/bindings staged, descriptor sets allocated

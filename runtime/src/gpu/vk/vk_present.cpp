@@ -148,14 +148,79 @@ void VkRenderer::post_picture(Image* img) {
     tc_.mark_modified(img);
 }
 
+int VkRenderer::capture_for_present(Image* img, u32 w, u32 h) {
+    const u32 i = hold_next_;
+    HoldImage& hd = hold_[i];
+    while (hd.ticket && !display::wait_present_done(hd.ticket, 1000000000ull)) {
+    }
+    hd.ticket = 0;
+    const VkFormat fmt = img->info.fmt.vk;
+    if (hd.w != w || hd.h != h || hd.fmt != fmt) {
+        if (hd.image) {
+            VkImage im = hd.image;
+            VkDeviceMemory m = hd.mem;
+            retire_resource([im, m] {
+                vkDestroyImage(dev(), im, nullptr);
+                vkFreeMemory(dev(), m, nullptr);
+            });
+            hd.image = VK_NULL_HANDLE;
+        }
+        VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ci.imageType = VK_IMAGE_TYPE_2D;
+        ci.format = fmt;
+        ci.extent = {w, h, 1};
+        ci.mipLevels = ci.arrayLayers = 1;
+        ci.samples = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (vkCreateImage(dev(), &ci, nullptr, &hd.image) != VK_SUCCESS) {
+            hd.image = VK_NULL_HANDLE;
+            hd.w = hd.h = 0;
+            return -1;
+        }
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(dev(), hd.image, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(vkAllocateMemory(dev(), &ai, nullptr, &hd.mem));
+        VK_CHECK(vkBindImageMemory(dev(), hd.image, hd.mem, 0));
+        VkImageMemoryBarrier ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.image = hd.image;
+        ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &ib);
+        hd.w = w;
+        hd.h = h;
+        hd.fmt = fmt;
+    }
+    g_rec.barrier();
+    VkImageCopy c{};
+    c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.extent = {w, h, 1};
+    vkCmdCopyImage(g_rec.cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, hd.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    g_rec.barrier();
+    hold_next_ = (i + 1) % 3;
+    return (int)i;
+}
+
 void VkRenderer::present(const FramebufferInfo& fb) {
     VkImage image = VK_NULL_HANDLE;
+    int hold = -1;
+    u64 capture_serial = 0;
     u32 w = fb.width, h = fb.height;
     LARGE_INTEGER pt0, pt1, pt2, ptf;
     QueryPerformanceFrequency(&ptf);
     QueryPerformanceCounter(&pt0);
     {
+        present_waiting_.fetch_add(1, std::memory_order_acq_rel);
         std::lock_guard<std::recursive_mutex> l(m_);
+        present_waiting_.fetch_sub(1, std::memory_order_acq_rel);
         QueryPerformanceCounter(&pt1);
         process_invalidations();
         // Several images can share the presented address (a 3D render target, a VIC/CPU-written movie
@@ -287,7 +352,12 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             }
         }
         dump_frame(image, w, h, img->info.fmt.vk);
+        if (fb.on_captured && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !img->info.fmt.depth) {
+            hold = capture_for_present(img, w, h);
+            if (hold >= 0) image = hold_[hold].image;
+        }
         g_rec.flush();
+        capture_serial = g_rec.serial() - 1;
         g_s.present_count++;
         {
             static u64 draws_at_last = 0;
@@ -385,7 +455,12 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     // Includes the frame limiter's wait (a full 33 ms at swap interval 2), hence the high threshold.
     SlowTimer timer("present", 60.0);
     ProfScope ps(kProfPresent);
+    if (hold >= 0) {
+        wait_serial(capture_serial);  // the copy has run: the guest buffer is no longer needed
+        fb.on_captured();
+    }
     display::present_image(image, w, h, fb.swap_interval, g_s.timeline, g_rec.serial() - 1, fb.release_hz);
+    if (hold >= 0) hold_[hold].ticket = display::last_present_ticket();
 }
 
 }  // namespace gpu::vk::detail
