@@ -270,6 +270,17 @@ along the arc (quaternions) made it worse (odd shapes; black ground flashes) and
 * Jumping while resizing (120 fps only, also on the logo screens): a resize with Unlocked resolution changes the internal scale, and `apply_scale` destroyed every scaled render target at once, including frames queued ahead in the other buffer slots (triple buffering), so the presenter re-uploaded stale guest memory. Rescaled targets are now recreated when the game next renders into them (`texture_cache.cpp`).
 * Picture stretched after a resize (also at 60 fps): the game rebuilds a projection only when its camera's dirty byte (+353) is set, so Fill ultrawide kept the old aspect. `game/widescreen.cpp` remembers the perspective cameras it handled and marks them dirty when the window aspect or the fov setting changes.
 
+## Parchment in the right side band (Max, 2026-10-23)
+
+In a 3440x1440 window the menus and loading screens showed a black band on the left but stretched parchment
+on the right. The parchment quad is wider than the screen and starts at its left edge; on a Switch the 16:9
+clip volume hides the rest. The pillarbox squeeze of 2D draws (push constant `viewport_scale[1]`) pulled that
+off-screen part into the right band. The vertex epilogue (`shader/program.cpp`) now writes two clip distances
+for squeezed 2D vertices that keep the unsqueezed |x| <= w, so a pillarboxed draw stays inside the centred
+16:9 area; full-screen passes that sample render targets and 3D draws are not squeezed and not clipped.
+Checked with a filmstrip of logo, menu, loading screen and battle at 3440x1440 (Fill ultrawide on) and the
+Vulkan validation layer (no messages).
+
 ## Ultrawide side bands flashing (Max, 2026-10-19)
 
 Since triple buffering, the side bands of "Fill ultrawide" were blacked out on frames whose full-width

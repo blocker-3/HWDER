@@ -160,6 +160,7 @@ public:
     bool in_centroid[32] = {};
     Id position = 0, frag_coord = 0, front_facing = 0, point_coord = 0, vertex_index = 0, instance_index = 0;
     Id point_size = 0, clip_distance = 0, layer_out = 0, viewport_out = 0, primitive_id = 0;
+    bool pillar_clip_only = false;  // clip_distance holds only the two pillarbox planes (emit_epilogue)
     Id frag_out[8] = {}, frag_depth = 0, sample_mask = 0, helper_inv = 0;
     Id push_var = 0, subgroup_id = 0, local_id = 0, workgroup_id = 0;
     std::vector<Id> io_vars;
