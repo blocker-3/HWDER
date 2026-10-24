@@ -347,6 +347,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         w.pTexelBufferView = &dw.texels[first];
     }
     // sampled textures
+    ProfScope* texs = new ProfScope(kProfTextures);
     for (const auto& t : res.textures) {
         u32 n = std::max(1u, t.count);
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n);
@@ -373,6 +374,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                         te = &it->second;
                 }
                 if (te) {
+                    ProfScope hps(kProfTexHit);
                     st_.tic_hit++;
                     tc_.validate(te->img);
                     if (te->view) ii.imageView = te->view;
@@ -487,6 +489,7 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         }
         w.pImageInfo = &dw.images[first];
     }
+    delete texs;
     // storage images
     for (const auto& im : res.images) {
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1);

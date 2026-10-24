@@ -28,6 +28,8 @@ void prof_window_log(unsigned frames, double busy_ms) {
     g_prof_win_draws = 0;
 }
 
+bool prof_enabled() { return debug::flag(debug::ProfileMs) || debug::flag(debug::ThreadStats); }
+
 double prof_flush() {
     double total = 0;
     for (double v : g_prof) total += v;

@@ -28,25 +28,39 @@ enum ProfPhase {
     kProfCbuf, kProfTexGet, kProfTexView, kProfSampler, kProfDescAlloc, kProfDescUpdate, kProfFbGet, kProfFbView,
     kProfReadable, kProfCreateImage, kProfAllocBind, kProfUpload, kProfStage, kProfDecode,
     kProfGetLayout, kProfGetOverlaps, kProfGetMatch, kProfGetValidate, kProfGetMiss, kProfClear, kProfInvalidate, kProfPresent,
-    kProfKeyBuild, kProfDrawTotal, kProfCount
+    kProfKeyBuild, kProfTexHit, kProfValidate, kProfWatch, kProfHash, kProfTextures, kProfDrawTotal, kProfCount
 };
 static const char* const kProfNames[kProfCount] = {
     "program", "framebuffer", "vertex", "index", "descriptors", "pipeline", "record",
     "|cbuf", "tex-get", "tex-view", "sampler", "desc-alloc", "desc-update", "fb-get", "fb-view",
     "|readable", "create-image", "alloc-bind", "upload", "stage", "decode",
-    "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "|draw-total"};
+    "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "tex-hit", "validate", "watch", "hash", "textures", "|draw-total"};
 extern double g_prof[kProfCount];
 extern uint32_t g_prof_draws;
 extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets;  // constant-buffer bytes/bindings staged, descriptor sets allocated
+// The profile costs two clock reads per scope, ~25 scopes per draw: only with HWDER_PROFILE_MS or HWDER_THREAD_STATS.
+bool prof_enabled();
+inline double prof_tick_ms() {
+    static const double ms = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1000.0 / f.QuadPart;
+    }();
+    return ms;
+}
 struct ProfScope {
     ProfPhase ph;
     LARGE_INTEGER a;
-    explicit ProfScope(ProfPhase p) : ph(p) { QueryPerformanceCounter(&a); }
+    explicit ProfScope(ProfPhase p) : ph(p) {
+        static const bool on = prof_enabled();
+        a.QuadPart = 0;
+        if (on) QueryPerformanceCounter(&a);
+    }
     ~ProfScope() {
-        LARGE_INTEGER b, f;
+        if (!a.QuadPart) return;
+        LARGE_INTEGER b;
         QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
-        g_prof[ph] += (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+        g_prof[ph] += (b.QuadPart - a.QuadPart) * prof_tick_ms();
     }
 };
 // Logs the accumulated profile when it exceeds HWDER_PROFILE_MS (default 200 ms), then resets it; returns the total.
