@@ -325,7 +325,12 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                    (unsigned long long)st_.draws, (unsigned long long)st_.skipped, (unsigned long long)st_.clears,
                    (unsigned long long)st_.dispatches, (unsigned long long)st_.blits, programs_.size(), pipelines_.size(),
                    shaders_.size(), tc_.n_uploads, (unsigned long long)(tc_.upload_bytes >> 10), tc_.n_downloads, tc_.n_creates);
-            hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames", gpu::gpu_busy_ms_reset() / 120.0);
+            {
+                prof_flush();
+                const double busy = gpu::gpu_busy_ms_reset();
+                hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames", busy / 120.0);
+                diag::prof_window_log(120, busy);
+            }
         }
         const u64 audit_now = GetTickCount64();
         if (audit_now - audit_report_ms_ >= 10000) {

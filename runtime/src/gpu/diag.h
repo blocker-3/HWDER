@@ -37,6 +37,7 @@ static const char* const kProfNames[kProfCount] = {
     "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "|draw-total"};
 extern double g_prof[kProfCount];
 extern uint32_t g_prof_draws;
+extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets;  // constant-buffer bytes/bindings staged, descriptor sets allocated
 struct ProfScope {
     ProfPhase ph;
     LARGE_INTEGER a;
@@ -50,6 +51,8 @@ struct ProfScope {
 };
 // Logs the accumulated profile when it exceeds HWDER_PROFILE_MS (default 200 ms), then resets it; returns the total.
 double prof_flush();
+// Logs the profile accumulated over the last `frames` presents (per frame) with the GPU thread busy time, then resets it.
+void prof_window_log(unsigned frames, double busy_ms);
 
 // Logs scopes that exceed `limit_ms` (stall diagnostics).
 struct SlowTimer {

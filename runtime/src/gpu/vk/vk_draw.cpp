@@ -707,6 +707,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         {
             ProfScope aps(kProfDescAlloc);
             sets[s] = alloc_set(sl->layout);
+            g_prof_sets++;
         }
         u32 group = s;  // bind group of the stage
         auto cbuf = [this, group](u32 index, u32 offset) -> u32 {

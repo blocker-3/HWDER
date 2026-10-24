@@ -238,6 +238,8 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
         if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
         Slice s = g_rec.stage(bytes, props.minUniformBufferOffsetAlignment);
+        g_prof_cbufs++;
+        g_prof_cbuf_bytes += bytes;
         // Object blending: vertex-stage c3 holds the object/bone transforms; build it in cached memory (the staging
         // slice is write-combined: reading it back is very slow), blend, then write it out once.
         const bool obj = bound && obj_candidate(c.index, bytes);

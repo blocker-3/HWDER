@@ -425,6 +425,7 @@ public:
         do_draw(regs, p, nullptr, 0);
     }
     void draw_inline_indices(const u32* regs, const DrawParams& p, const void* indices, u32 index_size) override {
+        ProfScope ps(kProfDrawTotal);
         std::lock_guard<std::recursive_mutex> l(m_);
         process_invalidations();
         do_draw(regs, p, indices, index_size);
