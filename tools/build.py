@@ -79,6 +79,8 @@ def main():
         ap.error("--jobs must be at least 1")
     if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe or a.managed_runtime_link):
         ap.error("--only-file cannot be combined with a test/library mode")
+    if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
+        ap.error("--host-tests requires tools/tests/host.cmake from the complete source kit")
     if a.managed_probe and not a.managed_toolchain:
         ap.error("--managed-probe requires a certified --managed-toolchain")
     if a.managed_runtime_link and (not a.managed_toolchain or not a.generated_dir):

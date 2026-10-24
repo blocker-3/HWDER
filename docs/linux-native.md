@@ -1,6 +1,26 @@
 # Experimental native Linux x86-64 source port
 
-Status: implemented source candidate; native public tests partly passed on Bazzite, with observed compile blockers fixed in the retest overlay. Native aggregate compilation, full runtime build and gameplay validation remain pending. Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan1.3 graphics. A Windows regression build does not validate Linux. Do not describe this candidate as playable until the native checks and on-device tests below succeed.
+Status (2026-10-24): the `linux-native` branch is main v0.2.2 (e7df07f) plus the 18 Linux port commits of 2026-10-19 and one follow-up that ports main's newer code (renderer split, debug-flag table, perf stats, multi-player input, save picker) to the host layer. On the Ally (Bazzite, Ubuntu 24.04 `hwder-dev` distrobox, Clang 18, RADV Phoenix / Mesa 25.2): host tests 7/7, synthetic tests 6/6, Python tests pass apart from the two public-runtime-fixture tests that also fail on main (its guest allowlist predates the game layer), and the complete runtime compiles and links against the link-check fixture below. The same branch still builds on Windows and its synthetic tests pass. Not yet done on this branch: a real first-run build from the user's dump and any gameplay. Target: Bazzite on a ROG Ally, AVX2 x86-64 CPU and Vulkan 1.3 graphics. Do not describe it as playable until the on-device tests below succeed.
+
+### Link check without a game dump
+
+`tools/tests/link_check_fixture.py` writes a stand-in generated directory (symbols.h from `tools/recomp/symbols.txt`, empty guest stubs, empty function and module tables). It proves the whole runtime compiles and links; the executable has no game modules and must never be run:
+
+~~~sh
+python3 tools/tests/link_check_fixture.py --output build/link-check-generated
+python3 tools/build.py --generated-dir build/link-check-generated --build-dir build/link-check --jobs 4
+~~~
+
+### Known gaps (Windows features without a Linux equivalent yet)
+
+- Texture invalidation: no GetWriteWatch, so every validated texture is re-hashed (`TextureCache::written_since` returns "unknown"). Expect extra CPU cost in busy scenes; a soft-dirty/mprotect tracker is the likely fix.
+- `HWDER_THREAD_STATS`: wait and sleep counters work, the per-thread CPU report is Windows-only.
+- Crash handling: no minidumps; Linux prints a signal message and leaves core dumps to the system.
+- Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
+- Error dialogs: the "wrong game version" and save-copy failure dialogs are log-only on Linux; the missing-Vulkan dialog uses an SDL message box.
+- The native Setup window, setup kits and Steam shortcut tooling are Windows-only; Linux uses `tools/first_run.py` / `play-local.sh`.
+- XInput fallback is Windows-only; SDL handles every pad on Linux.
+- The save picker's "choose zmha.bin" file mode and the 60 Hz monitor switch need checking on the device.
 
 ## Source and dependencies
 
