@@ -288,34 +288,46 @@ std::string jsonField(const std::string& json,const std::string& name){
     else while(i<json.size()&&std::isdigit((unsigned char)json[i]))v+=json[i++];
     return v;
 }
-// Saves grid art as config/grid/<id>p, <id>, <id>_hero, <id>_logo and <id>_icon (Steam's names for a shortcut),
-// keeping any picture the player already set. Returns a sentence for the status line; `icon` gets the icon path.
-std::wstring steamGridArtwork(const std::wstring& key,const fs::path& grid,uint32_t id,fs::path& icon){
+// Steam's names for a shortcut's pictures in config/grid: <id>p (portrait), <id> (wide), <id>_hero, <id>_logo, <id>_icon.
+struct Artwork{fs::path grid;std::wstring base;fs::path icon;int saved=0,kept=0;};
+bool artPresent(Artwork& a,const std::wstring& suffix){
+    std::error_code e;for(const wchar_t* ext:{L".png",L".jpg"})if(fs::exists(a.grid/(a.base+suffix+ext),e)){if(suffix==L"_icon")a.icon=a.grid/(a.base+suffix+ext);return true;}
+    return false;
+}
+// Downloads one picture (PNG or JPEG only) unless the player already has one there.
+void artSave(Artwork& a,const std::wstring& suffix,const std::wstring& url,bool counted=true){
+    if(artPresent(a,suffix)){if(counted)++a.kept;return;}
+    DWORD status=0;const auto picture=httpsGet(url,L"",status);if(status!=200||picture.size()<64)return;
+    const bool png=picture.compare(0,4,"\x89PNG")==0,jpg=picture.compare(0,3,"\xFF\xD8\xFF")==0;if(!png&&!jpg)return;
+    std::error_code e;fs::create_directories(a.grid,e);const auto target=a.grid/(a.base+suffix+(png?L".png":L".jpg"));
+    std::ofstream o(target,std::ios::binary|std::ios::trunc);o.write(picture.data(),(std::streamsize)picture.size());
+    if(o){++a.saved;if(suffix==L"_icon")a.icon=target;}
+}
+// With the player's own SteamGridDB key: community art, including a logo. Returns a problem sentence or "".
+std::wstring steamGridArtwork(const std::wstring& key,Artwork& a){
     const std::wstring api=L"https://www.steamgriddb.com/api/v2/";DWORD status=0;
     const auto found=httpsGet(api+L"search/autocomplete/Hyrule%20Warriors%3A%20Definitive%20Edition",key,status);
-    if(status==401||status==403)return L" SteamGridDB did not accept the API key, so no artwork was added.";
-    const auto game=jsonField(found,"id");
-    if(status!=200||game.empty())return L" Artwork could not be downloaded from SteamGridDB (no connection or no match).";
-    std::error_code e;fs::create_directories(grid,e);
-    struct Art{const wchar_t* query;std::wstring stem;};
-    const std::wstring base=std::to_wstring(id),g=wide(game);
-    const Art arts[]={{L"grids/game/",base+L"p"},{L"grids/game/",base},{L"heroes/game/",base+L"_hero"},{L"logos/game/",base+L"_logo"},{L"icons/game/",base+L"_icon"}};
-    const wchar_t* filters[]={L"?dimensions=600x900&types=static&mimes=image/png,image/jpeg",L"?dimensions=920x430,460x215&types=static&mimes=image/png,image/jpeg",
-                              L"?types=static&mimes=image/png,image/jpeg",L"?types=static&mimes=image/png",L"?types=static&mimes=image/png"};
-    int saved=0,kept=0;
-    for(int k=0;k<5;++k){
-        bool present=false;for(const wchar_t* ext:{L".png",L".jpg"})if(fs::exists(grid/(arts[k].stem+ext),e)){present=true;if(k==4)icon=grid/(arts[k].stem+ext);}
-        if(present){++kept;continue;}
-        const auto list=httpsGet(api+arts[k].query+g+filters[k],key,status);const auto url=jsonField(list,"url");
-        if(status!=200||url.empty())continue;
-        const auto picture=httpsGet(wide(url),L"",status);if(status!=200||picture.size()<64)continue;
-        const bool png=picture.compare(0,4,"\x89PNG")==0,jpg=picture.compare(0,3,"\xFF\xD8\xFF")==0;if(!png&&!jpg)continue;
-        const auto target=grid/(arts[k].stem+(png?L".png":L".jpg"));
-        std::ofstream o(target,std::ios::binary|std::ios::trunc);o.write(picture.data(),(std::streamsize)picture.size());
-        if(o){++saved;if(k==4)icon=target;}
+    if(status==401||status==403)return L" SteamGridDB did not accept the API key.";
+    const auto game=wide(jsonField(found,"id"));if(status!=200||game.empty())return L" SteamGridDB could not be reached.";
+    const std::pair<const wchar_t*,const wchar_t*> kinds[]={{L"p",L"grids/game/%s?dimensions=600x900"},{L"",L"grids/game/%s?dimensions=920x430,460x215"},
+        {L"_hero",L"heroes/game/%s?"},{L"_logo",L"logos/game/%s?"},{L"_icon",L"icons/game/%s?"}};
+    for(const auto& [suffix,query]:kinds){
+        if(artPresent(a,suffix))continue;
+        std::wstring path=query;path.replace(path.find(L"%s"),2,game);path+=std::wstring(path.back()==L'?'?L"":L"&")+L"types=static&mimes=image/png,image/jpeg";
+        const auto url=jsonField(httpsGet(api+path,key,status),"url");if(status==200&&!url.empty())artSave(a,suffix,wide(url),false);
     }
-    if(!saved&&!kept)return L" SteamGridDB had no artwork for it.";
-    return L" Artwork from SteamGridDB: "+std::to_wstring(saved)+L" new, "+std::to_wstring(kept)+L" kept.";
+    return {};
+}
+// Without a key: the game's key art from Nintendo's own store image service, cropped to Steam's sizes on their side
+// (store page hyrule-warriors-definitive-edition-switch). There is no logo there; Steam shows the name instead.
+void nintendoArtwork(Artwork& a){
+    const std::wstring art=L"/store/software/switch/70010000006023/4b035b357b10e59dce73609dd071e61d131d90b2e477c29088f26fbe50b44d1b";
+    const std::wstring cdn=L"https://assets.nintendo.com/image/upload/";
+    artSave(a,L"p",cdn+L"c_fill,g_auto,w_600,h_900/f_jpg/q_auto"+art);
+    artSave(a,L"",cdn+L"c_fill,w_920,h_430/f_jpg/q_auto"+art);
+    artSave(a,L"_hero",cdn+L"c_fill,g_north,w_1920,h_620/f_jpg/q_auto"+art);
+    artSave(a,L"_icon",cdn+L"c_fill,g_auto,w_256,h_256/f_png"+art);
+    if(artPresent(a,L"_logo"))++a.kept;
 }
 // The Steam account to add to: the most recent login in config/loginusers.vdf, else the only userdata account.
 std::wstring steamAccount(const fs::path& root){
@@ -357,11 +369,17 @@ void addToSteamIn(const fs::path& root){
     steam::Shortcut entry{steamName,utf8(installedExe.wstring()),utf8(installedExe.parent_path().wstring()),utf8(installedExe.wstring())};
     std::string out;uint32_t id=0;auto added=steam::add(existing,entry,out,&id);
     if(added==steam::Added::Unreadable){state(L"Steam's game list is in a format Setup does not know, so it was left unchanged.");return;}
-    std::wstring artNote;fs::path icon;
-    const auto key=steamGridKey();
-    if(key.empty())artNote=L" For box art, enter a free SteamGridDB API key under Advanced and choose Add to Steam again.";
-    else{state(L"Downloading artwork from SteamGridDB…");UpdateWindow(window);artNote=steamGridArtwork(key,root/L"userdata"/account/L"config"/L"grid",id,icon);}
-    if(!icon.empty()){entry.icon=utf8(icon.wstring());added=steam::add(existing,entry,out,&id);}
+    // Artwork: the player's SteamGridDB key first when given, then Nintendo's store art for anything still missing.
+    // The window tests pass a synthetic Steam folder (steamDirectory) and stay offline.
+    Artwork art{root/L"userdata"/account/L"config"/L"grid",std::to_wstring(id)};std::wstring artNote;
+    if(steamDirectory.empty()){
+        state(L"Downloading artwork\u2026");UpdateWindow(window);
+        const auto key=steamGridKey();const std::wstring problem=key.empty()?std::wstring():steamGridArtwork(key,art);
+        nintendoArtwork(art);
+        artNote=art.saved?L" Box art added.":art.kept?L" Your existing artwork was kept.":L" Box art could not be downloaded; check the internet connection.";
+        artNote+=problem;
+    }
+    if(!art.icon.empty()){entry.icon=utf8(art.icon.wstring());added=steam::add(existing,entry,out,&id);}
     if(added==steam::Added::AlreadyThere){state(L"HWDER is already in your Steam library."+artNote);return;}
     fs::create_directories(file.parent_path(),e);
     if(!existing.empty()){fs::copy_file(file,fs::path(file)+=L".hwder-backup",fs::copy_options::overwrite_existing,e);if(e){state(L"Could not back up Steam's game list, so it was left unchanged.");return;}}
