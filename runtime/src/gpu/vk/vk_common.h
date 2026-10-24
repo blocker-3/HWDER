@@ -110,6 +110,10 @@ using diag::g_prof_draws;
 using diag::g_prof_cbuf_bytes;
 using diag::g_prof_cbufs;
 using diag::g_prof_sets;
+using diag::g_prof_vtx_bytes;
+using diag::g_prof_vtx_copies;
+using diag::g_prof_idx_bytes;
+using diag::g_prof_idx_scanned;
 using diag::ProfScope;
 using diag::SlowTimer;
 using diag::prof_flush;
@@ -242,6 +246,9 @@ public:
     u64 upload_bytes = 0;
     u64 hash_budget_epoch_ = 0, hash_budget_ = 0;
     int written_since_check(Image* img);  // 1 written, 0 clean, -1 memory not write-watched
+    // The same for any guest range; `watch_epoch` is the caller's record of its last check (0 at first).
+    int written_since(u64 addr, u64 size, u64& watch_epoch);
+    u64 epoch() const { return epoch_; }
     void download(Image* img);  // write GPU data back to guest memory (waits for the GPU)
     void collect_garbage();
     // helpers for image info from TIC

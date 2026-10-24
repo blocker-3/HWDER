@@ -721,6 +721,33 @@ private:
         if (n > 128) h = hash_bytes(p + n - 64, 64, h);
         return h;
     }
+    // Persistent geometry: vertex/index ranges the game left unchanged stay in GPU-visible chunks across frames
+    // instead of being copied to the staging ring every frame (16 MB per frame in a big battle). Validity: the
+    // texture cache's write watch, checked once per submission, plus the sample hash. A rewritten range goes back
+    // to the ring and is kept again only after a few clean submissions. Index scans (vmin/vmax) use the same check.
+    static constexpr u64 kGeomChunk = 32ull << 20;
+    static constexpr u32 kGeomMaxChunks = 16;
+    struct GeomChunk {
+        Buffer buf;
+        u64 head = 0;
+        std::shared_ptr<std::atomic<u64>> live;  // bytes still held; frees run once the GPU is done with them
+    };
+    struct GeomEntry {
+        u64 watch_epoch = 0, checked_serial = 0, sample = 0, last_epoch = 0;
+        u32 clean = 0;           // consecutive clean submissions
+        bool clean_now = false;  // this submission's check
+        int chunk = -1;          // resident copy: chunk and offset
+        u64 off = 0, bytes = 0;
+        bool has_range = false;  // index scan result
+        u32 vmin = 0, vmax = 0;
+    };
+    std::vector<GeomChunk> geom_chunks_;
+    int geom_cur_ = -1;
+    std::unordered_map<u64, GeomEntry> geom_;
+    u64 geom_swept_ = 0;
+    bool geom_check(GeomEntry& e, const u8* src, u64 bytes);
+    bool geom_slice(u64 key, const u8* src, u64 bytes, Slice& out);  // true: a resident copy of these bytes
+    void geom_release(GeomEntry& e);
     // Per-TIC lookup cache: texture handle words -> image/view, valid while no image was created or
     // destroyed (tc_.generation). Only plain textures are cached; images with a same-address alias or
     // GPU-written content keep going through TextureCache::get() for the alias refresh.

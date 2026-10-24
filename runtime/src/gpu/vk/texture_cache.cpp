@@ -459,8 +459,10 @@ void TextureCache::validate(Image* img) {
     if (h != img->hash) upload(img);
 }
 
-int TextureCache::written_since_check(Image* img) {
-    u64 start = img->addr & ~0xFFFull, end = (img->addr + img->readable + 0xFFF) & ~0xFFFull;
+int TextureCache::written_since_check(Image* img) { return written_since(img->addr, img->readable, img->watch_epoch); }
+
+int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
+    u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
     // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
     // images that share a few blocks, and each GetWriteWatch call cost ~5 us. The batch (recorder serial)
@@ -493,8 +495,8 @@ int TextureCache::written_since_check(Image* img) {
         for (auto it = written_pages_.begin(); it != written_pages_.end();)
             it = it->second < watch_pruned_ ? written_pages_.erase(it) : std::next(it);
     }
-    u64 since = img->watch_epoch;
-    img->watch_epoch = epoch_;
+    u64 since = watch_epoch;
+    watch_epoch = epoch_;
     if (since < watch_pruned_) return 1;
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;

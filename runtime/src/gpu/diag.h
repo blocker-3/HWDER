@@ -37,7 +37,7 @@ static const char* const kProfNames[kProfCount] = {
     "|get-layout", "get-overlaps", "get-match", "get-validate", "get-miss", "|clear", "invalidate", "present", "keybuild", "tex-hit", "validate", "watch", "hash", "textures", "|draw-total"};
 extern double g_prof[kProfCount];
 extern uint32_t g_prof_draws;
-extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets;  // constant-buffer bytes/bindings staged, descriptor sets allocated
+extern uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets, g_prof_vtx_bytes, g_prof_vtx_copies, g_prof_idx_bytes, g_prof_idx_scanned;  // constant-buffer bytes/bindings staged, descriptor sets allocated
 // The profile costs two clock reads per scope, ~25 scopes per draw: only with HWDER_PROFILE_MS or HWDER_THREAD_STATS.
 bool prof_enabled();
 inline double prof_tick_ms() {
