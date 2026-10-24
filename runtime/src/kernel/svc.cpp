@@ -2,6 +2,7 @@
 // Register conventions follow the HOS SVC ABI (arguments in x0-x7, results in w0 + x1..).
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <random>
 
@@ -30,6 +31,22 @@ static u64 used_memory() {
     return mem::heap_size() + fixed;
 }
 
+// TotalMemorySize: a docked retail Switch's 3285 MiB application pool. HWDER_TOTAL_MEM_MB=<n> (experiment, off by
+// default) tells the game more: it sizes its heap as total minus used, and above 4 GiB takes its dev-kit layout
+// (a 1792 MiB graphics pool, the rest from what remains). Capped at the 6 GiB heap ceiling (kHeapMax) plus used.
+static u64 total_memory() {
+    static const u64 total = [] {
+        u64 v = g_process.total_memory;
+        const int mb = debug::value(debug::TotalMemMb, 0);
+        if (mb > 0) {
+            v = std::min<u64>((u64)mb << 20, mem::kHeapMax + used_memory());
+            hw_log("svc: TotalMemorySize overridden to %llu MiB (HWDER_TOTAL_MEM_MB experiment)", (unsigned long long)(v >> 20));
+        }
+        return v;
+    }();
+    return total;
+}
+
 static void svc_query_memory(Ctx* c) {
     mem::Region r = mem::query(c->x[2]);
     u8* out = (u8*)c->x[0];
@@ -51,7 +68,7 @@ static Result get_info(u32 id0, Handle h, u64 id1, u64* out) {
     case 3: *out = mem::kAliasSize; return 0;
     case 4: *out = mem::kHeapBase; return 0;
     case 5: *out = mem::kHeapMax; return 0;
-    case 6: *out = g_process.total_memory; return 0;           // TotalMemorySize
+    case 6: *out = total_memory(); return 0;                   // TotalMemorySize
     case 7: *out = used_memory(); return 0;                    // UsedMemorySize
     case 8: *out = 0; return 0;                                // DebuggerAttached
     case 9: *out = 0; return 0;                                // ResourceLimit (no handle)
@@ -69,7 +86,7 @@ static Result get_info(u32 id0, Handle h, u64 id1, u64* out) {
     case 17: *out = 0; return 0;
     case 18: *out = g_process.title_id; return 0;              // ProgramId
     case 20: *out = 0; return 0;                               // UserExceptionContextAddress
-    case 21: *out = g_process.total_memory; return 0;          // TotalNonSystemMemorySize
+    case 21: *out = total_memory(); return 0;                  // TotalNonSystemMemorySize
     case 22: *out = used_memory(); return 0;                   // UsedNonSystemMemorySize
     case 23: *out = 1; return 0;                               // IsApplication
     case 0xF0000002: *out = now_ticks(); return 0;             // ThreadTickCount

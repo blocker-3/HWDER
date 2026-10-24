@@ -357,6 +357,7 @@ current values. Kinds:
 | `HWDER_THREAD_DUMP` | integer | unset | Dump all guest threads to the log every n seconds. |
 | `HWDER_THREAD_STATS` | integer | unset | Log per-thread CPU, waits and efficiency-core share every n ms, guest sleeps and the per-frame GPU thread profile (turns the draw profiler on). |
 | `HWDER_UPDATE` | presence | off | Folder of the game update unpacked by tools/game_update.py (read as a wide string by the loader; the startup screen notes it). |
+| `HWDER_TOTAL_MEM_MB` | integer | unset | Experiment, off by default: the TotalMemorySize the game is told, in MiB (a Switch: 3285). Above 4096 the game takes its dev-kit memory layout; capped at the 6 GiB heap ceiling plus UsedMemorySize. |
 | `HWDER_USED_MEM_MB` | integer | unset | Kernel: the fixed part of UsedMemorySize in MiB (default 48, the mapped code and main stack); 256 is the old figure that left the game a 208 MiB smaller heap. |
 | `HWDER_VALIDATION` | presence | off | Enable the Vulkan validation layer (needs the Vulkan SDK). |
 | `HWDER_VI_TRACE` | presence | off | Display service (vi) parcel trace. |
