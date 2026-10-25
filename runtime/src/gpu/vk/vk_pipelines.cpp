@@ -685,13 +685,11 @@ void VkRenderer::adopt_pipeline_results() {
         if (jp) record_pipeline(prog, key);
     }
     pipe_done_.clear();
-    pipe_done_any_.store(false, std::memory_order_relaxed);
 }
 
 VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
     u64 h = hash_bytes(&key, sizeof(key));
-    // Adopt pipelines finished by the worker threads (the flag spares the lock on the many draws with none).
-    if (pipe_done_any_.load(std::memory_order_acquire)) {
+    {   // adopt pipelines finished by the worker threads
         std::lock_guard<std::mutex> l(pipe_m_);
         adopt_pipeline_results();
     }
@@ -841,7 +839,6 @@ void VkRenderer::pipeline_worker() {
                    (unsigned long long)job.hash, (unsigned long long)pending_ms, pipe != VK_NULL_HANDLE);
         }
         pipe_done_.push_back({job.hash, pipe, job.prog, job.key});
-        pipe_done_any_.store(true, std::memory_order_release);
         pipe_done_cv_.notify_one();
     }
 }
