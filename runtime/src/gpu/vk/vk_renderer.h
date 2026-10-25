@@ -758,7 +758,7 @@ private:
     };
     std::vector<GeomChunk> geom_chunks_;
     int geom_cur_ = -1;
-    std::unordered_map<u64, GeomEntry> geom_;
+    FlatMap<GeomEntry> geom_;
     u64 geom_swept_ = 0;
     bool geom_check(GeomEntry& e, const u8* src, u64 bytes);
     bool geom_slice(u64 key, const u8* src, u64 bytes, Slice& out);  // true: a resident copy of these bytes

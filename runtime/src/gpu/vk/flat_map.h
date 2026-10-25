@@ -1,6 +1,7 @@
 // A small open-addressing hash map for the renderer's per-draw caches keyed by 64-bit hashes (vertex/index slice
 // and index-range caches). std::unordered_map spent ~50-80 ns per lookup there (a modulo and a node pointer chase),
-// several lookups per draw. Linear probing in one array, Fibonacci hashing. No erase; clear() empties it.
+// several lookups per draw. Linear probing in one array, Fibonacci hashing. erase_if() rebuilds the table; clear()
+// empties it.
 // Pointers to values stay valid until the next insert of a new key (which may grow the table).
 #pragma once
 #include <algorithm>
@@ -37,6 +38,18 @@ public:
         return slots_[i].second;
     }
     std::size_t size() const { return size_; }
+    // Removes every entry for which pred(key, value) is true (rebuilding the table; pointers become invalid).
+    template <class Pred>
+    void erase_if(Pred pred) {
+        std::vector<Slot> old_slots;
+        std::vector<std::uint8_t> old_used;
+        old_slots.swap(slots_);
+        old_used.swap(used_);
+        mask_ = size_ = 0;
+        shift_ = 64;
+        for (std::size_t i = 0; i < old_slots.size(); i++)
+            if (old_used[i] && !pred(old_slots[i].first, old_slots[i].second)) (*this)[old_slots[i].first] = old_slots[i].second;
+    }
     void clear() {
         std::fill(used_.begin(), used_.end(), 0);
         size_ = 0;

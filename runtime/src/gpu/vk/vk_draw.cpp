@@ -178,14 +178,11 @@ bool VkRenderer::geom_slice(u64 key, const u8* src, u64 bytes, Slice& out) {
         if (epoch - geom_swept_ >= 300 || geom_.size() > 200000) {
             geom_swept_ = epoch;
             const bool all = geom_.size() > 200000;
-            for (auto it = geom_.begin(); it != geom_.end();) {
-                if (all || epoch - it->second.last_epoch > 300) {
-                    if (it->second.chunk >= 0) geom_release(it->second);
-                    it = geom_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            geom_.erase_if([&](u64, GeomEntry& g) {
+                if (!all && epoch - g.last_epoch <= 300) return false;
+                if (g.chunk >= 0) geom_release(g);
+                return true;
+            });
         }
     }
     GeomEntry& e = geom_[key];
