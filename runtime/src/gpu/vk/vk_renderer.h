@@ -271,6 +271,9 @@ struct StageLayout {
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     std::vector<VkDescriptorType> types;
     std::vector<u32> counts;
+    // The last set filled for this layout, reused by a draw with identical descriptors in the same submission.
+    VkDescriptorSet last_set = VK_NULL_HANDLE;
+    u64 last_key = 0, last_serial = ~0ull;
 };
 
 struct ShaderEntry {
@@ -670,6 +673,14 @@ private:
     std::condition_variable pipe_done_cv_;
     std::deque<PipeJob> pipe_jobs_;
     std::vector<PipeDone> pipe_done_;
+    std::atomic<u32> pipe_done_n_{0};  // pipe_done_.size(), read without pipe_m_ to skip the lock when it is empty
+    VkPipeline last_pipe_ = VK_NULL_HANDLE;  // get_pipeline's previous result and key (GPU thread only)
+    PipelineKey last_pipe_key_{};
+    static constexpr u32 kProgStateWords = 141;  // get_program's program-selecting registers
+    GfxProgram* last_prog_ = nullptr;
+    u64 last_prog_key_ = 0, last_prog_frame_ = 0;
+    u32 last_prog_state_[kProgStateWords] = {};
+    GfxProgram* get_program_hashed(const u32* regs, const u32* rtf, u64* key_out);
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
@@ -689,8 +700,7 @@ private:
     u64 warmup_pending_max_ms_ = 0;
     size_t warmup_storage_bytes_ = 0;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
-    bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
-                        const std::function<u32(u32, u32)>& cbuf, const std::function<bool(u32, u64&, u32&)>& cb_range,
+    bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet& set, const CbufBinding* cbs, u32 ncbs,
                         const u32* tic_pool_regs, bool linked_tsc, std::vector<std::function<void()>>& post);
     bool read_tic(u64 pool_va, u32 limit, u32 index, u32* out);
 
@@ -742,6 +752,8 @@ private:
         VkIndexType it = VK_INDEX_TYPE_MAX_ENUM;
         VkPipelineLayout pc_layout = VK_NULL_HANDLE;
         shader::PushConstants pc{};
+        VkPipelineLayout set_layout = VK_NULL_HANDLE;  // layout the graphics sets below were bound with
+        VkDescriptorSet sets[5] = {};
     } rs_;
     // Same guest vertex/index range staged again within one submission (instanced crowds, multi-pass
     // meshes): reuse the staging slice instead of copying it again. Validated by a sample hash.
@@ -800,9 +812,19 @@ private:
         ViewParams vp;
     };
     FlatMap<TicEntry> tic_cache_;
+    static constexpr u32 kTicFast = 1024, kSamplerFast = 256;
+    TicEntry tic_fast_[kTicFast] = {};  // by TIC index: copies of tic_cache_ hits (same validity rule)
+    struct SamplerFast {
+        u32 tsc[8];
+        int aniso;
+        VkSampler sampler;
+    };
+    SamplerFast sampler_fast_[kSamplerFast] = {};  // by TSC index
     Framebuffer fb_cache_;
-    u64 fb_cache_key_ = 0, fb_cache_gen_ = 0;
+    u64 fb_cache_gen_ = 0;
     bool fb_cache_valid_ = false;
+    static constexpr u32 kFbKeyWords = 8 * 16 + 5 + 3 + 2;  // RenderTarget, Zeta, ZetaSize, RtControl, ZetaEnable
+    u32 fb_cache_regs_[kFbKeyWords] = {};  // the render-target registers fb_cache_ was resolved from
     size_t pcache_saved_ = 0;  // pipelines_.size() at the last save
     void save_pipeline_cache() {
         save_warmup_records();
@@ -848,6 +870,8 @@ private:
     Image* dummy3d_ = nullptr;
     Image* dummy1d_ = nullptr;
     VkSampler dummy_sampler_ = VK_NULL_HANDLE;
+    VkImageView dummy_views_[8] = {};  // by VkImageViewType
+    VkImageView dummy_view_lookup(VkImageViewType t);
     // FXAA / sharpening on the tonemapped picture (post.comp), run right after the final tonemap pass.
     void post_picture(Image* img);
     struct {

@@ -324,8 +324,7 @@ void Recorder::end_rendering() {
     vkCmdEndRendering(cb_);
     rendering = false;
     gputime::mark(gputime::kOther);
-    static const bool exp_nb = getenv("HWDER_EXP_NOBARRIER") != nullptr;  // EXPERIMENT
-    if (!exp_nb) full_barrier(cb_);
+    full_barrier(cb_);
 }
 
 void Recorder::barrier() {

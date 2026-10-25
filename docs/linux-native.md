@@ -239,3 +239,40 @@ busy spot the Ally is limited by the shared ~30 W package budget (CPU clocks aga
 one thread. Remaining candidates: less GPU work per frame, and burning less power in MainThread's fence-wait
 spin and the object thread's spin (single runs of blocking variants showed no change; worth a power-aware
 retest with more runs).
+
+Round 9 (2026-10-25): `HWDER_GPU_TIMING=<s>` logs GPU busy/idle per frame and the costliest render passes from
+GPU timestamps, and the 120-frame `gpu thread busy` line is followed by the GPU thread's waits for the GPU
+(submission fences, pushbuffer syncpoints, semaphore acquires). The GPU thread never waits on the GPU at the busy
+spot: it spends 7.7-8.3 ms of real CPU per frame translating. Removing the end-of-pass barriers saved only
+~0.2 ms of GPU time per frame and was dropped, as was a no-clear probe (both were measurement-only switches).
+
+Round 10 (2026-10-25): GPU-thread CPU cost per draw. Sampled at the busy spot the thread spent its time in
+bind_resources (11%), RADV (13%), write-watch ioctls (7%), command decode (~10%: pushbuffer words, method
+dispatch, macros), per-draw hashing of register blocks and pipeline keys (~5%) and texture checks.
+Kept, each measured interleaved, three runs each (GPU thread per frame):
+- per-draw lookups: the program, framebuffer and pipeline caches compare the previous draw's registers/key
+  word for word before hashing; the pipeline-result lock is taken only when a worker has published results;
+  unbound texture slots use cached dummy views; texture headers and samplers go through small direct-mapped
+  caches by TIC/TSC index in front of the hashed ones; bind_resources takes the stage's constant-buffer bindings
+  instead of std::function callbacks; the slow-op timer is cheaper. Against 61c2571: 8.14-8.24 -> 7.52-7.59 ms.
+- command decode: plain 3D register writes (every method outside method_3d's switch) are stored inline by the
+  pushbuffer and macro loops (HWDER_GPU_TRACE=2/3 keeps the full path), the pushbuffer is prefetched, and macro
+  parameter buffers keep their capacity: 7.41-7.75 -> 7.25-7.37 ms.
+- no slow-op timer per draw (a slow draw still shows as a slow pushbuffer entry); vertex/index staging computes
+  its sample hash and per-submission cache lookup only when the persistent geometry cache misses, and the index
+  range scan trusts an unchanged persistent range first: 7.28-7.38 -> 7.24-7.27 ms (small, pure removals).
+- descriptor-set reuse: a graphics stage whose constant-buffer contents (hashed), textures and samplers equal
+  the last set filled for its layout in the same queue submission binds that set again, without staging copies,
+  allocation or update; `vkCmdBindDescriptorSets` is skipped for a set already bound with the same layout. About
+  40% of stage sets are reused (705-730 of ~1800 per frame): 7.17-7.27 -> 6.99-7.00 ms.
+Measured and dropped: one write-watch query over runs of adjacent 2 MiB blocks (280k -> 119k ioctls per run but
+1.88 -> 1.62 s of kernel time: the cost is the page walk, not the call), and a host-cached staging ring (GPU
+thread 7.38-7.43 -> 7.43-7.66 ms).
+
+Total at the busy spot at 120: GPU thread 8.14-8.24 -> 6.99-7.00 ms per frame (-15%), frame 8.72-8.83 ->
+8.51-8.57 ms (113-115 -> 117-118 fps). The frame gains less because the cycle is now a chain: the GPU thread
+translates the in-between frame (~6.8 ms), the GPU finishes it ~3.7 ms later, and only then does MainThread
+record the next in-between frame (~7 ms with its waits); the GPU thread idles ~3-4 ms per two frames.
+Regression: autoplay at 120 8.36-8.80 ms (before 8.35-9.09), 60 fps on both saves 58-60 fps, no errors,
+thumbnails as before, host tests pass. The 60 fps runs' one long frame entering the battle (~44 s) was
+170-183 ms against 154-161 ms before.

@@ -264,20 +264,22 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
         if (!inline_idx) {
             u64 kw[3] = {(u64)(uintptr_t)idx_src, ((u64)p.count << 8) | (isize << 1) | (key.prim_restart ? 1 : 0), 0x1d1d};
             ikey = hash_bytes(kw, sizeof(kw), 0);
-            isample = sample_hash(idx_src, (u64)p.count * isize);
-            auto cit = idx_range_cache_.find(ikey);
-            if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample)
-                cached = &cit->second;
             range = &geom_[ikey ^ 0x5ca75ca75ca75ca7ull];
+            // Unchanged since its scan (write watch + sample): use the persistent range without the per-submission cache.
             if (!geom_check(*range, idx_src, (u64)p.count * isize) || !range->has_range) {
-                if (cached) range->has_range = true, range->vmin = cached->vmin, range->vmax = cached->vmax;
-            }
-            if (range->has_range && !cached) {
-                idx_range_cache_[ikey] = {g_rec.serial(), isample, range->vmin, range->vmax};
-                cached = &idx_range_cache_[ikey];
+                isample = sample_hash(idx_src, (u64)p.count * isize);
+                auto cit = idx_range_cache_.find(ikey);
+                if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample) {
+                    cached = &cit->second;
+                    range->has_range = true, range->vmin = cached->vmin, range->vmax = cached->vmax;
+                }
             }
         }
-        if (cached) {
+        if (range && range->has_range && !cached) {
+            st_.idx_hit++;
+            vmin = range->vmin;
+            vmax = range->vmax;
+        } else if (cached) {
             st_.idx_hit++;
             vmin = cached->vmin;
             vmax = cached->vmax;
@@ -374,12 +376,12 @@ void VkRenderer::stage_vertex_input(const u32* regs, const DrawParams& p, DrawCt
         {
             u64 kw[2] = {va + start, bytes};
             u64 vkey = hash_bytes(kw, sizeof(kw), 0x7b7b);
-            u64 vsample = sample_hash(src, avail);
-            auto vit = vb_cache_.find(vkey);
+            u64 vsample = 0;
+            FlatMap<SliceEntry>::Slot* vit = nullptr;
             if (avail == bytes && geom_slice(vkey, src, bytes, sl)) {
                 st_.vb_hit++;
-            } else if (vit != vb_cache_.end() && vit->second.serial == g_rec.serial() && vit->second.bytes == bytes &&
-                vit->second.sample == vsample) {
+            } else if ((vsample = sample_hash(src, avail), vit = vb_cache_.find(vkey)) && vit->second.serial == g_rec.serial() &&
+                       vit->second.bytes == bytes && vit->second.sample == vsample) {
                 st_.vb_hit++;
                 sl = vit->second.slice;
             } else {
@@ -483,11 +485,12 @@ void VkRenderer::stage_indices(const DrawParams& p, const void* inline_idx, Draw
             Slice sl;
             u64 kw[2] = {(u64)(uintptr_t)idx_src, (u64)count * isize};
             u64 ikey2 = hash_bytes(kw, sizeof(kw), 0x1b1b);
-            u64 isample2 = sample_hash(idx_src, (u64)count * isize);
-            auto iit = vb_cache_.find(ikey2);
+            u64 isample2 = 0;
+            FlatMap<SliceEntry>::Slot* iit = nullptr;
             if (!inline_idx && geom_slice(ikey2, idx_src, (u64)count * isize, sl)) {
-            } else if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
-                iit->second.bytes == (u64)count * isize && iit->second.sample == isample2) {
+            } else if (!inline_idx && (isample2 = sample_hash(idx_src, (u64)count * isize), iit = vb_cache_.find(ikey2)) &&
+                       iit->second.serial == g_rec.serial() && iit->second.bytes == (u64)count * isize &&
+                       iit->second.sample == isample2) {
                 sl = iit->second.slice;
             } else {
                 sl = g_rec.stage((u64)count * isize, 16);
@@ -535,8 +538,15 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         rs_.pipe = pipe;
     }
+    if (rs_.set_layout != prog->layout) {  // sets bound with another layout no longer count as bound
+        rs_.set_layout = prog->layout;
+        for (VkDescriptorSet& bs : rs_.sets) bs = VK_NULL_HANDLE;
+    }
     for (u32 s = 0; s < 5; s++)
-        if (sets[s]) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, s, 1, &sets[s], 0, nullptr);
+        if (sets[s] && rs_.sets[s] != sets[s]) {
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, s, 1, &sets[s], 0, nullptr);
+            rs_.sets[s] = sets[s];
+        }
     for (u32 s = 0; s < 16; s++)
         if ((streams_used & (1u << s)) && (rs_.vb[s] != vbufs[s] || rs_.vo[s] != voffs[s])) {
             vkCmdBindVertexBuffers(cb, s, 1, &vbufs[s], &voffs[s]);
@@ -753,17 +763,20 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     }
     std::optional<ProfScope> phase(std::in_place, kProfFramebuffer);
     // The render-target registers rarely change between draws: reuse the last resolved framebuffer
-    // while they (and the texture cache's image set) are unchanged.
-    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
-    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
-    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
+    // while they (and the texture cache's image set) are unchanged. Compared word for word (cheaper than hashing them).
+    u32 fbregs[kFbKeyWords];
+    memcpy(fbregs, regs + RenderTarget, 8 * 16 * 4);
+    memcpy(fbregs + 128, regs + Zeta, 5 * 4);
+    memcpy(fbregs + 133, regs + ZetaSize, 3 * 4);
+    fbregs[136] = regs[RtControl];
+    fbregs[137] = regs[ZetaEnable];
     Framebuffer fb;
-    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
+    if (fb_cache_valid_ && fb_cache_gen_ == tc_.generation && memcmp(fb_cache_regs_, fbregs, sizeof(fbregs)) == 0) {
         fb = fb_cache_;
     } else {
         fb = resolve_framebuffer(regs, false, 0);
         fb_cache_ = fb;
-        fb_cache_key_ = fbkey;
+        memcpy(fb_cache_regs_, fbregs, sizeof(fbregs));
         fb_cache_gen_ = tc_.generation;
         fb_cache_valid_ = true;
     }
@@ -805,27 +818,8 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         if (!prog->stages[s]) continue;
         StageLayout* sl = prog->layouts[s];
         if (sl->types.empty()) continue;
-        {
-            ProfScope aps(kProfDescAlloc);
-            sets[s] = alloc_set(sl->layout);
-            g_prof_sets++;
-        }
-        u32 group = s;  // bind group of the stage
-        auto cbuf = [this, group](u32 index, u32 offset) -> u32 {
-            if (index >= 18) return 0;
-            const CbufBinding& b = cbufs_[group][index];
-            if (!b.valid || offset + 4 > b.size) return 0;
-            return read_u32(b.va + offset);
-        };
-        auto range = [this, group](u32 index, u64& lo, u32& size) -> bool {
-            if (index >= 18) return false;
-            const CbufBinding& b = cbufs_[group][index];
-            lo = b.va;
-            size = b.size;
-            return b.valid;
-        };
-        cur_stage_ = (int)s;
-        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post);
+        cur_stage_ = (int)s;  // s is also the stage's bind group; bind_resources allocates (or reuses) sets[s]
+        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbufs_[s], 18, pools, linked, post);
     }
 
     phase.reset();
@@ -1037,8 +1031,6 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         fb.color[rt]->full_width_frame = g_s.present_count;
         fb.color[rt]->full_width_since_present = true;
     }
-    static const bool exp_nc = getenv("HWDER_EXP_NOCLEAR") != nullptr;  // EXPERIMENT
-    if (exp_nc) return;
     begin_rendering(fb);
     vkCmdClearAttachments(g_rec.cmd_in_pass(), (u32)att.size(), att.data(), 1, &r);
     gputime::count_clear();
@@ -1128,13 +1120,9 @@ void VkRenderer::do_dispatch(const u32* cr, u64 qmd_va) {
     if (!cp->layout->types.empty()) {
         set = alloc_set(cp->layout->layout);
         u32 pools[6] = {cr[0x55D], cr[0x55E], cr[0x55F], cr[0x557], cr[0x558], cr[0x559]};
-        auto range = [cb_va, cb_size](u32 index, u64& lo, u32& size) -> bool {
-            if (index >= 8 || !cb_va[index]) return false;
-            lo = cb_va[index];
-            size = cb_size[index];
-            return true;
-        };
-        bind_resources(cp->sh->prog.resources, cp->layout, set, cbuf, range, pools, linked, post);
+        CbufBinding cbs[8];
+        for (u32 i = 0; i < 8; i++) cbs[i] = {cb_va[i], cb_size[i], cb_va[i] != 0};
+        bind_resources(cp->sh->prog.resources, cp->layout, set, cbs, 8, pools, linked, post);
     }
     VkCommandBuffer cb = g_rec.cmd();
     full_barrier(cb);
