@@ -87,6 +87,7 @@ static const Flag kTable[] = {
     {VkFrameDumpSkip, "HWDER_VK_FRAME_DUMP_SKIP", "Frame dump auto trigger: dump the n-th present after the trigger (strtoull, base 0).", kInt},
     {VkInitDepth, "HWDER_VK_INIT_DEPTH", "Initial clear value of newly created depth images.", kFloat},
     {VkNoCull, "HWDER_VK_NO_CULL", "Disable face culling.", kPresence},
+    {VkSyncSubmit, "HWDER_VK_SYNC_SUBMIT", "Submit Vulkan work on the GPU command thread instead of its own submit thread (comparison).", kPresence},
     {VkVerbose, "HWDER_VK_VERBOSE", "Verbose renderer logging: the first draws, texture handles and clears.", kPresence},
     {VkWhiteTex, "HWDER_VK_WHITE_TEX", "Bind the white dummy texture instead of every sampled texture.", kPresence},
     {WaitTrace, "HWDER_WAIT_TRACE", "Kernel: log slow WaitSynchronization calls.", kPresence},

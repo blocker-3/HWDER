@@ -182,3 +182,10 @@ in the order the draws were bound, with each queue submit waiting until it has w
 GPU thread 8.35-8.45 -> 8.11-8.21 ms per frame, 108-109 -> 111 fps. The GPU thread waits ~0.01 ms per tick for
 it. Blending outcomes, 60 fps runs and thumbnails unchanged. The gain is smaller than the ~1 ms per frame the
 blending costs, presumably because a second busy core shares the handheld's power budget (inferred).
+
+Round 6 (2026-10-25): vkQueueSubmit runs on its own thread ("HWDER vk submit"), in order; the GPU thread hands
+the frame over (it is already in flight, its serial counts as submitted; timeline waits may precede the
+signalling submit). `HWDER_VK_SYNC_SUBMIT=1` submits on the GPU thread. Same binary, interleaved, three runs each
+at the busy spot: GPU thread 8.26-8.38 -> 7.86-8.01 ms per frame, 109-110 -> 111-113 fps. 60 and 120 runs on both
+saves: no errors, no fence or GPU timeouts, thumbnails normal. Retested properly and still neutral: cached device
+limits and a cheaper per-draw timer.

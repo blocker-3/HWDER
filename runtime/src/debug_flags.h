@@ -91,6 +91,7 @@ enum Id {
     VkFrameDumpSkip,  // HWDER_VK_FRAME_DUMP_SKIP
     VkInitDepth,  // HWDER_VK_INIT_DEPTH
     VkNoCull,  // HWDER_VK_NO_CULL
+    VkSyncSubmit,  // HWDER_VK_SYNC_SUBMIT
     VkVerbose,  // HWDER_VK_VERBOSE
     VkWhiteTex,  // HWDER_VK_WHITE_TEX
     WaitTrace,  // HWDER_WAIT_TRACE

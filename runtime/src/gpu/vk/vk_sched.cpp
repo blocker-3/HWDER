@@ -47,16 +47,70 @@ Frame* new_frame() {
 }  // namespace
 
 namespace {
-u64 g_submits = 0;
-host::Counter g_submit_ticks{};
+std::atomic<u64> g_submits{0}, g_submit_ticks{0};
+
+// vkQueueSubmit runs on its own thread, in order (~20 us of kernel time each, ~24 per busy battle frame). The GPU
+// thread hands the frame over and moves on; the frame is already in_flight and its serial counts as submitted,
+// which is safe with a timeline semaphore (waits may start before the signalling submit). HWDER_VK_SYNC_SUBMIT=1
+// submits on the GPU thread as before.
+struct SubmitQueue {
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<Frame*> frames;
+} g_sq;
+
+void queue_submit(Frame* f) {
+    u64 serial = f->serial;
+    VkTimelineSemaphoreSubmitInfo ts{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    ts.signalSemaphoreValueCount = 1;
+    ts.pSignalSemaphoreValues = &serial;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO, &ts};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &f->cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &g_s.timeline;
+    SlowTimer timer("vkQueueSubmit", 30.0);
+    std::lock_guard<std::mutex> q(display::device().queue_lock);
+    host::Counter t0, t1;
+    host::counter(&t0);
+    VkResult r = vkQueueSubmit(display::device().queue, 1, &si, VK_NULL_HANDLE);
+    host::counter(&t1);
+    g_submits.fetch_add(1, std::memory_order_relaxed);
+    g_submit_ticks.fetch_add((u64)(t1.QuadPart - t0.QuadPart), std::memory_order_relaxed);
+    if (r != VK_SUCCESS) {
+        hw_log("vk: vkQueueSubmit failed %d", (int)r);
+        hw_fatal("vk: submit");
+    }
 }
+
+void submit_thread() {
+    host::name_thread(L"HWDER vk submit");
+    for (;;) {
+        Frame* f;
+        {
+            std::unique_lock<std::mutex> l(g_sq.m);
+            g_sq.cv.wait(l, [] { return !g_sq.frames.empty(); });
+            f = g_sq.frames.front();
+            g_sq.frames.pop_front();
+        }
+        queue_submit(f);
+    }
+}
+
+bool async_submit() {
+    static const bool on = [] {
+        if (debug::flag(debug::VkSyncSubmit)) return false;
+        std::thread(submit_thread).detach();
+        return true;
+    }();
+    return on;
+}
+}  // namespace
 void submit_stats_reset(u64* submits, double* ms) {
     host::Counter f;
     host::counter_frequency(&f);
-    *submits = g_submits;
-    *ms = g_submit_ticks.QuadPart * 1000.0 / f.QuadPart;
-    g_submits = 0;
-    g_submit_ticks.QuadPart = 0;
+    *submits = g_submits.exchange(0);
+    *ms = g_submit_ticks.exchange(0) * 1000.0 / f.QuadPart;
 }
 
 void wait_serial(u64 serial) {
@@ -200,27 +254,15 @@ void Recorder::flush() {
     g_s.cur = nullptr;
     cb_ = VK_NULL_HANDLE;
     u64 serial = serial_++;
-    VkTimelineSemaphoreSubmitInfo ts{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-    ts.signalSemaphoreValueCount = 1;
-    ts.pSignalSemaphoreValues = &serial;
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO, &ts};
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &f->cb;
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &g_s.timeline;
-    {
-        SlowTimer timer("vkQueueSubmit", 30.0);
-        std::lock_guard<std::mutex> q(display::device().queue_lock);
-        host::Counter t0, t1;
-        host::counter(&t0);
-        VkResult r = vkQueueSubmit(display::device().queue, 1, &si, VK_NULL_HANDLE);
-        host::counter(&t1);
-        g_submits++;
-        g_submit_ticks.QuadPart += t1.QuadPart - t0.QuadPart;
-        if (r != VK_SUCCESS) {
-            hw_log("vk: vkQueueSubmit failed %d", (int)r);
-            hw_fatal("vk: submit");
+    f->serial = serial;
+    if (async_submit()) {
+        {
+            std::lock_guard<std::mutex> l(g_sq.m);
+            g_sq.frames.push_back(f);
         }
+        g_sq.cv.notify_one();
+    } else {
+        queue_submit(f);
     }
     {
         std::lock_guard<std::mutex> l(g_s.m);

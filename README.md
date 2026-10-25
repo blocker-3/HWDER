@@ -378,6 +378,7 @@ current values. Kinds:
 | `HWDER_VK_FRAME_DUMP_SKIP` | integer | unset | Frame dump auto trigger: dump the n-th present after the trigger (strtoull, base 0). |
 | `HWDER_VK_INIT_DEPTH` | number | unset | Initial clear value of newly created depth images. |
 | `HWDER_VK_NO_CULL` | presence | off | Disable face culling. |
+| `HWDER_VK_SYNC_SUBMIT` | presence | off | Submit Vulkan work on the GPU command thread instead of its own submit thread (comparison). |
 | `HWDER_VK_VERBOSE` | presence | off | Verbose renderer logging: the first draws, texture handles and clears. |
 | `HWDER_VK_WHITE_TEX` | presence | off | Bind the white dummy texture instead of every sampled texture. |
 | `HWDER_WAIT_TRACE` | presence | off | Kernel: log slow WaitSynchronization calls. |
