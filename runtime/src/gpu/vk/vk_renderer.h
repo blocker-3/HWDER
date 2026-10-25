@@ -166,16 +166,21 @@ inline VkPrimitiveTopology topology(u32 t) {
     }
 }
 inline VkFormat cached_vertex_format(u32 raw, u32* size) {
-    static std::unordered_map<u32, std::pair<VkFormat, u32>> cache;
-    u32 k = raw & 0xFFE00000u;  // size, type, bgra
-    auto it = cache.find(k);
-    if (it == cache.end()) {
+    // Indexed by the 11 bits that matter (size, type, bgra); filled on first use. GPU thread only.
+    struct Entry {
+        bool set;
+        u32 size;
+        VkFormat format;
+    };
+    static Entry cache[2048];
+    Entry& e = cache[raw >> 21];
+    if (!e.set) {
         u32 sz = 0;
-        VkFormat f = vertex_format(raw, &sz);
-        it = cache.emplace(k, std::make_pair(f, sz)).first;
+        const VkFormat f = vertex_format(raw, &sz);
+        e = {true, sz, f};
     }
-    if (size) *size = it->second.second;
-    return it->second.first;
+    if (size) *size = e.size;
+    return e.format;
 }
 
 inline VkLogicOp logic_op(u32 v) { return v >= 0x1500 && v <= 0x150F ? (VkLogicOp)(v - 0x1500) : VK_LOGIC_OP_COPY; }
@@ -645,6 +650,7 @@ private:
     std::condition_variable pipe_done_cv_;
     std::deque<PipeJob> pipe_jobs_;
     std::vector<PipeDone> pipe_done_;
+    std::atomic<bool> pipe_done_any_{false};  // pipe_done_ is not empty (set under pipe_m_)
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
@@ -690,13 +696,13 @@ private:
     std::vector<std::pair<u64, u64>> invalidations_;
     CbufBinding cbufs_[5][18];
     VkPipelineCache pcache_ = VK_NULL_HANDLE;
-    std::unordered_map<u64, std::pair<u64, u64>> prog_hash_cache_;  // code va -> {quick hash, full hash}
+    FlatMap<std::pair<u64, u64>> prog_hash_cache_;  // code va -> {quick hash, full hash}
     struct ProgState {
         u64 key;
         GfxProgram* prog;
         u64 frame;
     };
-    std::unordered_map<u64, ProgState> prog_state_cache_;  // program-selecting registers -> program (per frame)
+    FlatMap<ProgState> prog_state_cache_;  // program-selecting registers -> program (per frame)
     GfxProgram* get_program_slow(const u32* regs, u64* key_out);
     DescWrite dw_;  // reused between draws (avoids re-allocating the deques per stage per draw)
     // Command-buffer state already recorded: skip vkCmd* calls that would set the same value again.
