@@ -36,6 +36,7 @@ static const Flag kTable[] = {
     {GiLog, "HWDER_GI_LOG", "120 fps mode: log its timing and skip reasons periodically.", kPresence},
     {GiLogMs, "HWDER_GI_LOG_MS", "Period of the HWDER_GI_LOG reports in ms (strtoull, base 10).", kInt},
     {GiNoObjects, "HWDER_GI_NO_OBJECTS", "120 fps mode: interpolate the camera only, no object/bone blending (comparison).", kPresence},
+    {GiObjSync, "HWDER_GI_OBJ_SYNC", "120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison).", kPresence},
     {GiObjTrace, "HWDER_GI_OBJ_TRACE", "120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms.", kPresence},
     {GpuTrace, "HWDER_GPU_TRACE", "GPU command trace; \"2\": raw 3D method stream (first 200000); \"3\": host methods, class binds and submissions.", kString},
     {Hold, "HWDER_HOLD", "On a fatal error keep the window up showing the reason instead of exiting.", kPresence},

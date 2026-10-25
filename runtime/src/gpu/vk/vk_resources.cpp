@@ -245,12 +245,20 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         // slice is write-combined: reading it back is very slow), blend, then write it out once.
         const bool obj = bound && obj_candidate(c.index, bytes);
         alignas(16) static thread_local u8 obj_buf[4096];
-        if (obj) {
+        if (obj && obj_async()) {
+            ProfScope ops(kProfObj);
+            ObjJob& job = obj_job_slot();
+            u64 n = std::min<u64>(bytes, size);
+            mm_->read(va, job.data, n);
+            if (n < bytes) memset(job.data + n, 0, bytes - n);
+            job.dst = s.ptr, job.bytes = bytes, job.index = c.index, job.key = cur_draw_key_, job.tag = gpu::exec_gi_tag();
+            obj_job_push();
+        } else if (obj) {
             ProfScope ops(kProfObj);
             u64 n = std::min<u64>(bytes, size);
             mm_->read(va, obj_buf, n);
             if (n < bytes) memset(obj_buf + n, 0, bytes - n);
-            obj_transforms(c.index, obj_buf, bytes);
+            obj_transforms(c.index, obj_buf, bytes, cur_draw_key_, gpu::exec_gi_tag());
             memcpy(s.ptr, obj_buf, bytes);
         } else if (bound) {
             ProfScope cps(kProfCbufCopy);

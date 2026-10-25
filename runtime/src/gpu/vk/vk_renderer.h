@@ -72,6 +72,8 @@ struct Sched {
     std::vector<std::tuple<u64, u64, std::function<void()>>> graveyard;  // serial, present count, fn
 };
 extern Sched g_s;
+// Called by Recorder::flush before it submits (the renderer finishes CPU-side writes into staging slices).
+extern void (*g_before_submit)();
 extern Recorder g_rec;
 
 void wait_serial(u64 serial);
@@ -578,7 +580,27 @@ private:
     void obj_cbuf_census(u32 index, const u8* data, u64 bytes);
     void obj_trace_log();
     void obj_frame_begin(u64 tag);
-    void obj_transforms(u32 index, u8* data, u64 bytes);
+    void obj_transforms(u32 index, u8* data, u64 bytes, u64 draw_key, u64 tag);
+    // The blending runs on its own thread (vk_interp_objects.cpp) in the order the draws were bound: the GPU thread
+    // copies the guest block and queues it with its staging slice; every submit first waits for the queue to empty.
+    struct ObjJob {
+        u8* dst;
+        u64 key, tag, bytes;
+        u32 index;
+        alignas(16) u8 data[4096];
+    };
+    static constexpr u32 kObjJobs = 2048;
+    std::unique_ptr<ObjJob[]> obj_jobs_;
+    std::atomic<u32> obj_head_{0}, obj_tail_{0};
+    std::atomic<bool> obj_sleeping_{false};
+    std::atomic<u64> obj_wait_ns_{0};  // GPU thread time spent in obj_drain waiting for the blending thread
+    std::mutex obj_m_;
+    std::condition_variable obj_cv_;
+    bool obj_async();  // whether blending is asynchronous (starts the thread on first use)
+    ObjJob& obj_job_slot();  // the next free job (waits while the queue is full)
+    void obj_job_push();     // queues the job returned by obj_job_slot()
+    void obj_drain();        // returns once every queued job has written its staging slice
+    void obj_worker();
     bool obj_candidate(u32 index, u64 bytes) const {
         return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && gpu::exec_gi_tag();
     }

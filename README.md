@@ -327,6 +327,7 @@ current values. Kinds:
 | `HWDER_GI_LOG` | presence | off | 120 fps mode: log its timing and skip reasons periodically. |
 | `HWDER_GI_LOG_MS` | integer | unset | Period of the HWDER_GI_LOG reports in ms (strtoull, base 10). |
 | `HWDER_GI_NO_OBJECTS` | presence | off | 120 fps mode: interpolate the camera only, no object/bone blending (comparison). |
+| `HWDER_GI_OBJ_SYNC` | presence | off | 120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison). |
 | `HWDER_GI_OBJ_TRACE` | presence | off | 120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms. |
 | `HWDER_GPU_TRACE` | string | unset | GPU command trace; "2": raw 3D method stream (first 200000); "3": host methods, class binds and submissions. |
 | `HWDER_HOLD` | presence | off | On a fatal error keep the window up showing the reason instead of exiting. |

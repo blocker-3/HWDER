@@ -8,6 +8,7 @@
 namespace gpu::vk {
 
 Sched g_s;
+void (*g_before_submit)() = nullptr;
 
 Recorder g_rec;
 
@@ -191,6 +192,7 @@ Slice Recorder::stage(u64 size, u64 align) {
 
 void Recorder::flush() {
     if (!g_s.cur) return;
+    if (g_before_submit) g_before_submit();
     end_rendering();
     full_barrier(cb_);
     VK_CHECK(vkEndCommandBuffer(cb_));

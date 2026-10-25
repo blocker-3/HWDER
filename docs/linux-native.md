@@ -175,3 +175,10 @@ and a vertex-format table (63e8180); a cheaper per-draw timer and cached device 
 busy spot is about +-0.2 ms of GPU-thread time per frame, so single changes below that are not measurable.
 Note for measurements: a dev build's pipeline warmup cache is "incompatible" with the play build's, so its
 pipelines compile on demand; compare builds only after the first ~40 s (the harness's battle windows).
+
+Round 5 (2026-10-25): object blending for the in-between frames runs on its own thread ("HWDER objects"),
+in the order the draws were bound, with each queue submit waiting until it has written its staging slices
+(`HWDER_GI_OBJ_SYNC=1` keeps it on the GPU thread). Same binary, interleaved, three runs each at the busy spot:
+GPU thread 8.35-8.45 -> 8.11-8.21 ms per frame, 108-109 -> 111 fps. The GPU thread waits ~0.01 ms per tick for
+it. Blending outcomes, 60 fps runs and thumbnails unchanged. The gain is smaller than the ~1 ms per frame the
+blending costs, presumably because a second busy core shares the handheld's power budget (inferred).

@@ -40,6 +40,7 @@ enum Id {
     GiLog,  // HWDER_GI_LOG
     GiLogMs,  // HWDER_GI_LOG_MS
     GiNoObjects,  // HWDER_GI_NO_OBJECTS
+    GiObjSync,  // HWDER_GI_OBJ_SYNC
     GiObjTrace,  // HWDER_GI_OBJ_TRACE
     GpuTrace,  // HWDER_GPU_TRACE
     Hold,  // HWDER_HOLD
