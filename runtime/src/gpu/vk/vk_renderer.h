@@ -53,6 +53,9 @@ struct Frame {
     u32 dpool_index = 0;
     std::vector<std::function<void()>> deferred;
     u64 serial = 0;
+    // HWDER_GPU_TIMING: timestamp i starts segs[i]; one more ends the last segment.
+    VkQueryPool qpool = VK_NULL_HANDLE;
+    std::vector<gputime::Seg> segs;
 };
 
 struct Sched {

@@ -732,6 +732,24 @@ static void method_i2m(Channel* ch, u32 method, u32 value) {
 }
 
 // ------------------------------------------------------------------ puller
+// Time the GPU thread spends inside that busy time waiting for earlier GPU work: submission wait fences,
+// pushbuffer syncpoint waits and semaphore acquires (logged with the busy figure).
+enum { kGpuWaitFence, kGpuWaitSyncpt, kGpuWaitSem, kGpuWaitKinds };
+static double g_wait_ms[kGpuWaitKinds];
+static u64 g_wait_n[kGpuWaitKinds];
+struct GpuWaitTimer {
+    int kind;
+    host::Counter a;
+    explicit GpuWaitTimer(int k) : kind(k) { host::counter(&a); }
+    ~GpuWaitTimer() {
+        host::Counter b, f;
+        host::counter(&b);
+        host::counter_frequency(&f);
+        g_wait_ms[kind] += (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+        g_wait_n[kind]++;
+    }
+};
+
 static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
     static const char* tr = debug::str(debug::GpuTrace);
     static const bool trace_host = tr && tr[0] == '3';  // host methods + class binds, per channel
@@ -756,6 +774,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                 renderer()->on_gpu_idle([ch, a, payload, short_form] { write_report(ch, a, payload, short_form); });
             } else if (op == 1 || op == 4 || op == 8) {  // acquire (equal / >= / and)
                 renderer()->flush_commands();
+                GpuWaitTimer wt(kGpuWaitSem);
                 u64 t0 = host::ticks_ms();
                 bool logged = false;
                 for (int spin = 0;; spin++) {
@@ -788,6 +807,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                 renderer()->on_gpu_idle([id] { nv::syncpoint_increment(id); });
             } else {
                 renderer()->flush_commands();
+                GpuWaitTimer wt(kGpuWaitSyncpt);
                 if (!nv::syncpoint_wait(id, ch->syncpt_payload, 100 * 1000000)) {
                     hw_log("gpu[sp%u]: pushbuffer syncpoint wait %u >= %u (value %u) >100 ms", ch->syncpt, id, ch->syncpt_payload,
                            nv::syncpoint_read(id));
@@ -873,6 +893,10 @@ static double g_busy_ms;
 double gpu_busy_ms_reset() {
     double v = g_busy_ms;
     g_busy_ms = 0;
+    hw_log("gpu: thread waits for the GPU over the last 120 frames, per frame: fence %.2f ms (%.1f), syncpoint %.2f ms (%.1f), "
+           "semaphore %.2f ms (%.1f)", g_wait_ms[kGpuWaitFence] / 120, g_wait_n[kGpuWaitFence] / 120.0, g_wait_ms[kGpuWaitSyncpt] / 120,
+           g_wait_n[kGpuWaitSyncpt] / 120.0, g_wait_ms[kGpuWaitSem] / 120, g_wait_n[kGpuWaitSem] / 120.0);
+    for (int k = 0; k < kGpuWaitKinds; k++) g_wait_ms[k] = 0, g_wait_n[k] = 0;
     return v;
 }
 static void execute_inner(Channel* ch, Submission& s);
@@ -900,6 +924,7 @@ static void execute_inner(Channel* ch, Submission& s) {
         hw_log("gpu[sp%u]: --- submission: %zu entries, wait %d, increment %d x%u", ch->syncpt, s.entries.size(), (int)s.wait,
                (int)s.increment, s.increment_count);
     if (s.wait) {
+        GpuWaitTimer wt(kGpuWaitFence);
         // Bounded so a fence that can only be produced by later queued work cannot wedge the GPU thread.
         while (!nv::syncpoint_wait(s.wait_fence.id, s.wait_fence.value, 100 * 1000000)) {
             audit::fence_timeouts.fetch_add(1, std::memory_order_relaxed);

@@ -157,6 +157,8 @@ void VkRenderer::begin_rendering(const Framebuffer& fb) {
         ri.pDepthAttachment = &da;
         if (fb.has_stencil) ri.pStencilAttachment = &da;
     }
+    gputime::mark(gputime::kPass, fb.width, fb.height, fb.num_colors ? (u32)fb.color_format[0] : 0, fb.depth_view ? (u32)fb.depth_format : 0,
+                  fb.num_colors);
     vkCmdBeginRendering(cb, &ri);
     g_rec.rendering = true;
     cur_fb_ = fb;

@@ -43,6 +43,7 @@ enum Id {
     GiObjSync,  // HWDER_GI_OBJ_SYNC
     GiObjTrace,  // HWDER_GI_OBJ_TRACE
     GpuTrace,  // HWDER_GPU_TRACE
+    GpuTiming,  // HWDER_GPU_TIMING
     GuestLibc,  // HWDER_GUEST_LIBC
     Hold,  // HWDER_HOLD
     IpcBt,  // HWDER_IPC_BT

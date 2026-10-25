@@ -720,6 +720,7 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
     } else {
         vkCmdDraw(cb, count, 1, first_vertex, p.base_instance);
     }
+    gputime::count_draw(prog->stages[4] ? prog->stages[4]->key : 0);
     for (u32 i = 0; i < fb.num_colors; i++)
         if (fb.color[i] && key.color_mask[i]) tc_.mark_modified(fb.color[i]);
     if (fb.depth && (key.depth_write || key.stencil_enable)) tc_.mark_modified(fb.depth);
@@ -1036,8 +1037,11 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         fb.color[rt]->full_width_frame = g_s.present_count;
         fb.color[rt]->full_width_since_present = true;
     }
+    static const bool exp_nc = getenv("HWDER_EXP_NOCLEAR") != nullptr;  // EXPERIMENT
+    if (exp_nc) return;
     begin_rendering(fb);
     vkCmdClearAttachments(g_rec.cmd_in_pass(), (u32)att.size(), att.data(), 1, &r);
+    gputime::count_clear();
 }
 
 // ------------------------------------------------------------------ compute

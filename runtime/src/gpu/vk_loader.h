@@ -48,7 +48,7 @@ struct SDL_Window;
     X(vkCmdSetPrimitiveTopology) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable)                         \
     X(vkCmdSetDepthCompareOp) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetPrimitiveRestartEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetDepthBiasEnable) X(vkCmdPushDescriptorSetKHR)                   \
-    X(vkCmdPushConstants) X(vkCmdResolveImage)                                                                    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets)       X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateBufferView) X(vkDestroyBufferView)               X(vkFlushMappedMemoryRanges) X(vkInvalidateMappedMemoryRanges) X(vkDestroyPipelineCache) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue)
+    X(vkCmdPushConstants) X(vkCmdResolveImage)                                                                    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets)       X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateBufferView) X(vkDestroyBufferView)               X(vkFlushMappedMemoryRanges) X(vkInvalidateMappedMemoryRanges) X(vkDestroyPipelineCache) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
 
 #define HW_VK_DECLARE(fn) extern PFN_##fn fn;
 HW_VK_GLOBAL_FUNCS(HW_VK_DECLARE)

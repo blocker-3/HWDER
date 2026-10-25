@@ -39,6 +39,7 @@ static const Flag kTable[] = {
     {GiObjSync, "HWDER_GI_OBJ_SYNC", "120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison).", kPresence},
     {GiObjTrace, "HWDER_GI_OBJ_TRACE", "120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms.", kPresence},
     {GpuTrace, "HWDER_GPU_TRACE", "GPU command trace; \"2\": raw 3D method stream (first 200000); \"3\": host methods, class binds and submissions.", kString},
+    {GpuTiming, "HWDER_GPU_TIMING", "Renderer: GPU timestamps around every rendering instance; every that many seconds log the GPU time per frame, the idle time between submissions and the costliest passes (gpu-time:). Adds a timestamp per pass.", kFloat},
     {GuestLibc, "HWDER_GUEST_LIBC", "Run the game's own (translated) memcpy/memmove/memset/bzero/strlen instead of the host C library's.", kPresence},
     {Hold, "HWDER_HOLD", "On a fatal error keep the window up showing the reason instead of exiting.", kPresence},
     {IpcBt, "HWDER_IPC_BT", "Log a backtrace for the IPC command named \"<Service>#<command>\" (e.g. IFile#4).", kString},

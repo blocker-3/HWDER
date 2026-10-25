@@ -119,6 +119,21 @@ using diag::SlowTimer;
 using diag::prof_flush;
 extern float g_res_scale, g_res_scale_y;  // internal resolution scale (x, y) for large render targets
 
+// ------------------------------------------------------------------ GPU timing (HWDER_GPU_TIMING, vk_sched.cpp)
+namespace gputime {
+enum Kind : u32 { kOther, kPass };
+struct Seg {
+    u32 kind = kOther, w = 0, h = 0, fmt = 0, dfmt = 0, ncol = 0;
+    u64 prog = 0;  // fragment shader of the first draw
+    u32 draws = 0, clears = 0;
+};
+bool on();
+// Starts a new segment in the current command buffer (a timestamp after the work recorded so far).
+void mark(u32 kind, u32 w = 0, u32 h = 0, u32 fmt = 0, u32 dfmt = 0, u32 ncol = 0);
+void count_draw(u64 prog);
+void count_clear();
+}  // namespace gputime
+
 // ------------------------------------------------------------------ command recording
 class Recorder {
 public:

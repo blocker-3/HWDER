@@ -12,6 +12,134 @@ void (*g_before_submit)() = nullptr;
 
 Recorder g_rec;
 
+namespace gputime {
+namespace {
+constexpr u32 kMaxQueries = 2048;
+struct Agg {
+    double ns = 0;
+    u64 segs = 0, draws = 0, clears = 0;
+};
+struct GroupKey {
+    u32 kind, w, h, fmt, dfmt, ncol;
+    u64 prog;
+    bool operator==(const GroupKey& o) const { return !memcmp(this, &o, sizeof(*this)); }
+};
+struct GroupKeyHash {
+    size_t operator()(const GroupKey& k) const { return (size_t)hash_bytes(&k, sizeof(k)); }
+};
+struct State {
+    std::unordered_map<GroupKey, Agg, GroupKeyHash> groups;
+    double busy_ns = 0, idle_ns = 0;
+    u64 segs = 0, cbs = 0, last_end = 0, last_present = 0, last_log_ms = 0;
+} g_t;
+
+double period_s() {
+    static const double p = debug::value(debug::GpuTiming, 0.0);
+    return p;
+}
+
+void write(Frame* f) {
+    vkCmdWriteTimestamp(f->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, f->qpool, (u32)f->segs.size());
+}
+
+void frame_begin(Frame* f) {
+    if (!on()) return;
+    if (!f->qpool) {
+        VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        ci.queryCount = kMaxQueries;
+        VK_CHECK(vkCreateQueryPool(dev(), &ci, nullptr, &f->qpool));
+    }
+    vkCmdResetQueryPool(f->cb, f->qpool, 0, kMaxQueries);
+    f->segs.clear();
+    write(f);
+    f->segs.push_back({});
+}
+
+void frame_end(Frame* f) {
+    if (f->qpool && !f->segs.empty()) write(f);
+}
+
+// Waiter thread, after the frame completed: read its timestamps and add them up; log every period.
+void frame_done(Frame* f) {
+    if (!f->qpool || f->segs.empty()) return;
+    const size_t n = f->segs.size();
+    std::vector<u64> ts(n + 1);
+    VkResult r = vkGetQueryPoolResults(dev(), f->qpool, 0, (u32)(n + 1), ts.size() * 8, ts.data(), 8, VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS) return;
+    const double tick_ns = display::device().props.limits.timestampPeriod;
+    if (g_t.last_end && ts[0] > g_t.last_end) g_t.idle_ns += (ts[0] - g_t.last_end) * tick_ns;
+    g_t.last_end = ts[n];
+    g_t.cbs++;
+    for (size_t i = 0; i < n; i++) {
+        const Seg& s = f->segs[i];
+        const double ns = ts[i + 1] >= ts[i] ? (ts[i + 1] - ts[i]) * tick_ns : 0.0;
+        g_t.busy_ns += ns;
+        g_t.segs++;
+        Agg& a = g_t.groups[GroupKey{s.kind, s.w, s.h, s.fmt, s.dfmt, s.ncol, s.prog}];
+        a.ns += ns;
+        a.segs++;
+        a.draws += s.draws;
+        a.clears += s.clears;
+    }
+    const u64 now = host::ticks_ms();
+    if (!g_t.last_log_ms) {
+        g_t.last_log_ms = now;
+        g_t.last_present = g_s.present_count;
+    }
+    if (now - g_t.last_log_ms < (u64)(period_s() * 1000.0)) return;
+    const u64 presents = g_s.present_count - g_t.last_present;
+    if (presents) {
+        const double pf = 1e6 * presents;  // ns -> ms per frame
+        std::vector<std::pair<GroupKey, Agg>> v(g_t.groups.begin(), g_t.groups.end());
+        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+        double passes_ns = 0, other_ns = 0;
+        u64 passes = 0;
+        for (const auto& [k, a] : v) {
+            if (k.kind == kPass) passes_ns += a.ns, passes += a.segs;
+            else other_ns += a.ns;
+        }
+        hw_log("gpu-time: per frame (%llu presents): busy %.2f ms, idle between submissions %.2f ms, %.1f submissions, "
+               "%.1f passes %.2f ms, outside passes %.2f ms", (unsigned long long)presents, g_t.busy_ns / pf, g_t.idle_ns / pf,
+               (double)g_t.cbs / presents, (double)passes / presents, passes_ns / pf, other_ns / pf);
+        for (size_t i = 0; i < v.size() && i < 30; i++) {
+            const auto& [k, a] = v[i];
+            hw_log("gpu-time:   %6.3f ms %5.1f/frame %6.1f draws %4.1f clears | %s %ux%u f%u d%u n%u prog %016llx", a.ns / pf,
+                   (double)a.segs / presents, (double)a.draws / presents, (double)a.clears / presents, k.kind == kPass ? "pass " : "other",
+                   k.w, k.h, k.fmt, k.dfmt, k.ncol, (unsigned long long)k.prog);
+        }
+    }
+    g_t = State{};
+    g_t.last_log_ms = now;
+    g_t.last_present = g_s.present_count;
+}
+}  // namespace
+
+bool on() { return period_s() > 0; }
+
+void mark(u32 kind, u32 w, u32 h, u32 fmt, u32 dfmt, u32 ncol) {
+    if (!on() || !g_s.cur || !g_s.cur->qpool) return;
+    Frame* f = g_s.cur;
+    if (f->segs.size() + 2 >= kMaxQueries) return;
+    write(f);
+    Seg s;
+    s.kind = kind, s.w = w, s.h = h, s.fmt = fmt, s.dfmt = dfmt, s.ncol = ncol;
+    f->segs.push_back(s);
+}
+
+void count_draw(u64 prog) {
+    if (!on() || !g_s.cur || g_s.cur->segs.empty()) return;
+    Seg& s = g_s.cur->segs.back();
+    if (!s.prog) s.prog = prog;
+    s.draws++;
+}
+
+void count_clear() {
+    if (!on() || !g_s.cur || g_s.cur->segs.empty()) return;
+    g_s.cur->segs.back().clears++;
+}
+}  // namespace gputime
+
 namespace {
 // Command buffers in flight (one per flush; a big battle frame flushes several times).
 constexpr size_t kMaxFramesInFlight = 64;
@@ -42,6 +170,7 @@ Frame* new_frame() {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(f->cb, &bi));
+    gputime::frame_begin(f);
     return f;
 }
 }  // namespace
@@ -140,6 +269,7 @@ void waiter_thread() {
             f = g_s.in_flight.front();
         }
         wait_serial(f->serial);
+        gputime::frame_done(f);
         u64 v = 0;
         vkGetSemaphoreCounterValue(dev(), g_s.timeline, &v);
         for (auto& fn : f->deferred) fn();
@@ -193,7 +323,9 @@ void Recorder::end_rendering() {
     if (!rendering) return;
     vkCmdEndRendering(cb_);
     rendering = false;
-    full_barrier(cb_);
+    gputime::mark(gputime::kOther);
+    static const bool exp_nb = getenv("HWDER_EXP_NOBARRIER") != nullptr;  // EXPERIMENT
+    if (!exp_nb) full_barrier(cb_);
 }
 
 void Recorder::barrier() {
@@ -249,6 +381,7 @@ void Recorder::flush() {
     if (g_before_submit) g_before_submit();
     end_rendering();
     full_barrier(cb_);
+    gputime::frame_end(g_s.cur);
     VK_CHECK(vkEndCommandBuffer(cb_));
     Frame* f = g_s.cur;
     g_s.cur = nullptr;
