@@ -164,3 +164,5 @@ game's wait-for-idle methods. Tried and dropped: batching consecutive GPFIFO sub
 semaphore/syncpoint signals (no change, the guest submits one batch at a time), and turning wait-for-idle into a
 barrier (1.6 submits per frame and a 6.3 ms GPU thread, but the game waits on those fences: 120 fps mode fell to
 60). Submit timing is part of the game's frame pacing; the remaining gains are in per-draw CPU cost.
+A flat open-addressing map (`gpu/vk/flat_map.h`) for the per-draw vertex/index slice and index-range caches:
+GPU thread 8.9-9.0 -> 8.7-9.0 ms per frame, busy spot 103 -> 104-106 fps (small, within run-to-run noise).

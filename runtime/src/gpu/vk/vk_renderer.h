@@ -32,6 +32,7 @@
 #include "gpu/vk/pipeline_warmup_cache.h"
 #include "gpu/vk/pipeline_catalog.h"
 #include "vk_common.h"
+#include "flat_map.h"
 #include "debug_flags.h"
 
 namespace gpu::vk {
@@ -723,12 +724,12 @@ private:
         u64 serial, bytes, sample;
         Slice slice;
     };
-    std::unordered_map<u64, SliceEntry> vb_cache_;
+    FlatMap<SliceEntry> vb_cache_;
     struct IdxRange {
         u64 serial, sample;  // valid only within the submission that scanned it (the sample covers 128 bytes)
         u32 vmin, vmax;
     };
-    std::unordered_map<u64, IdxRange> idx_range_cache_;  // index buffer scan results (vmin/vmax)
+    FlatMap<IdxRange> idx_range_cache_;  // index buffer scan results (vmin/vmax)
     static u64 sample_hash(const u8* p, u64 n) {
         if (!p || !n) return n;
         u64 h = hash_bytes(p, std::min<u64>(n, 64), n);
