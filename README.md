@@ -384,6 +384,7 @@ current values. Kinds:
 | `HWDER_VK_VERBOSE` | presence | off | Verbose renderer logging: the first draws, texture handles and clears. |
 | `HWDER_VK_WHITE_TEX` | presence | off | Bind the white dummy texture instead of every sampled texture. |
 | `HWDER_WAIT_TRACE` | presence | off | Kernel: log slow WaitSynchronization calls. |
+| `HWDER_WATCH_PER_SERIAL` | presence | off | Query texture write watch once per recorder serial (every queue submit) instead of once per guest submission (A/B tests). |
 <!-- debug-flags:end -->
 
 Successful graphics pipelines are recorded with their shader code and binding metadata in

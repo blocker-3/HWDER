@@ -97,6 +97,7 @@ enum Id {
     VkVerbose,  // HWDER_VK_VERBOSE
     VkWhiteTex,  // HWDER_VK_WHITE_TEX
     WaitTrace,  // HWDER_WAIT_TRACE
+    WatchPerSerial,  // HWDER_WATCH_PER_SERIAL
     kCount
 };
 

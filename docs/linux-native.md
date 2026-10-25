@@ -228,5 +228,14 @@ Final dev build against the play build (a83c4a8), interleaved, three runs each a
 (7.6-7.8 ms per frame). Autoplay fixture at 120 (two runs each), 60 fps runs on both saves: same ranges as the
 play build, no errors, thumbnails normal. Still short of 120 at the busy spot.
 
-Next: the GPU thread (descriptor sets: ~2500 allocations/updates per frame, RADV 13%, bind_resources 11%,
-command decode 15% of its samples) and the GPU completion latency of real frames.
+GPU thread, same round: the per-phase profile puts descriptor-set allocation and update at only ~0.3 ms per frame
+(desc-alloc 0.17, desc-update 0.13 of the GPU thread's ~8.4 ms with the profiler on), so set caching was not
+attempted. Texture write-watch queries are now keyed by guest GPFIFO submission (~2 per frame) instead of the
+recorder serial (~24 per frame); `HWDER_WATCH_PER_SERIAL=1` restores the old keying. Same binary, three runs
+each: GPU thread 7.68-7.76 -> 7.59-7.61 ms per frame, frame unchanged (8.65-8.72 ms either way).
+At `HWDER_RES_SCALE=0.5` the GPU drops to 59% busy, the cores clock up from ~4.0 to ~4.6 GHz, the GPU thread to
+5.6 ms per frame and MainThread's extra draw to 3.1 ms, and late in the run the busy spot reaches ~120: at the
+busy spot the Ally is limited by the shared ~30 W package budget (CPU clocks against GPU load) more than by any
+one thread. Remaining candidates: less GPU work per frame, and burning less power in MainThread's fence-wait
+spin and the object thread's spin (single runs of blocking variants showed no change; worth a power-aware
+retest with more runs).

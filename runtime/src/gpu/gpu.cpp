@@ -889,9 +889,12 @@ static void execute(Channel* ch, Submission& s) {
 }
 static u64 g_exec_gi_tag = 0;
 u64 exec_gi_tag() { return g_exec_gi_tag; }
+static u64 g_exec_count = 0;
+u64 exec_count() { return g_exec_count; }
 static void execute_inner(Channel* ch, Submission& s) {
     ch->syncpt = s.syncpoint;
     g_exec_gi_tag = s.gi_tag;
+    g_exec_count++;
     static const char* tr = debug::str(debug::GpuTrace);
     if (tr && tr[0] == '3')
         hw_log("gpu[sp%u]: --- submission: %zu entries, wait %d, increment %d x%u", ch->syncpt, s.entries.size(), (int)s.wait,

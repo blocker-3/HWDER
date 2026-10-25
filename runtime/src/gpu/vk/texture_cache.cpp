@@ -1,3 +1,4 @@
+#include "gpu/gpu.h"
 #include "host/timing.h"
 #include "host/platform.h"
 // Texture cache: guest surfaces (block-linear / pitch) <-> VkImages keyed by guest address.
@@ -462,11 +463,15 @@ int TextureCache::written_since_check(Image* img) { return written_since(img->ad
 int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
-    // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
-    // images that share a few blocks, and each GetWriteWatch call cost ~5 us. The batch (recorder serial)
-    // advances after every guest submission, so writes the game made before submitting are still seen.
+    // One query per 2 MiB block and guest submission instead of one per image: a frame validates hundreds of
+    // images that share a few blocks, and each GetWriteWatch call cost ~5 us. Keyed by the guest GPFIFO
+    // submission being executed (about 2 per frame), not the recorder serial, which also advances on every
+    // internal queue submit (~24 per frame at the busy spot, mostly the game's wait-for-idle methods): writes
+    // the game made before submitting are still seen, and the game does not rewrite a texture that work it
+    // has already submitted reads. HWDER_WATCH_PER_SERIAL=1 keys by the serial as before (A/B tests).
     // Reports for pages of other images in the block are kept in written_pages_ like before.
-    const u64 serial = rec().serial();
+    static const bool per_serial = debug::flag(debug::WatchPerSerial);
+    const u64 serial = per_serial ? rec().serial() : gpu::exec_count() | (1ull << 62);
     for (u64 b = start & ~(kWatchBlock - 1); b < end; b += kWatchBlock) {
         u64& queried = watch_blocks_[b];
         if (queried == serial) continue;
