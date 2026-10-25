@@ -774,7 +774,7 @@ private:
         VkImageView view;
         ViewParams vp;
     };
-    std::unordered_map<u64, TicEntry> tic_cache_;
+    FlatMap<TicEntry> tic_cache_;
     Framebuffer fb_cache_;
     u64 fb_cache_key_ = 0, fb_cache_gen_ = 0;
     bool fb_cache_valid_ = false;
