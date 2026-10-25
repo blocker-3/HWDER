@@ -404,7 +404,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             {
                 prof_flush();
                 const double busy = gpu::gpu_busy_ms_reset();
-                hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames", busy / 120.0);
+                u64 submits = 0;
+                double submit_ms = 0;
+                submit_stats_reset(&submits, &submit_ms);
+                hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames; %.1f submits per frame, %.0f us each",
+                       busy / 120.0, submits / 120.0, submits ? submit_ms * 1000.0 / submits : 0.0);
                 diag::prof_window_log(120, busy);
             }
         }

@@ -74,6 +74,8 @@ extern Sched g_s;
 extern Recorder g_rec;
 
 void wait_serial(u64 serial);
+// vkQueueSubmit calls and their total time since the last call (the periodic frame log).
+void submit_stats_reset(u64* submits, double* ms);
 void waiter_thread();
 void full_barrier(VkCommandBuffer cb);
 void run_graveyard();  // present: destroy what the graveyard holds once the GPU and presenter are done with it

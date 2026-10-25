@@ -156,3 +156,11 @@ Still short of 120 there: each tick needs two translated frames (~18 ms of GPU-t
 Next candidates from the profile: driver calls (RADV ~10%, submit/write-watch ioctls ~12%), std::unordered_map
 lookups in the vertex/index/geometry caches (~6%), command decode (~1.6 ms per frame). The changes are portable
 (the TSC part is Linux-only); the branch builds on Windows, where they are not yet measured.
+
+Round 3 (2026-10-25): the periodic `vk: gpu thread busy` log line now also gives vkQueueSubmits per frame and
+their cost. The busy spot makes ~24 submits per frame at ~21 us each (0.5 ms), and each starts a new round of
+texture write-watch queries (~74 PAGEMAP_SCAN calls per frame, ~3.8 us each). Almost all submits come from the
+game's wait-for-idle methods. Tried and dropped: batching consecutive GPFIFO submissions and deferring
+semaphore/syncpoint signals (no change, the guest submits one batch at a time), and turning wait-for-idle into a
+barrier (1.6 submits per frame and a 6.3 ms GPU thread, but the game waits on those fences: 120 fps mode fell to
+60). Submit timing is part of the game's frame pacing; the remaining gains are in per-draw CPU cost.

@@ -45,6 +45,19 @@ Frame* new_frame() {
 }
 }  // namespace
 
+namespace {
+u64 g_submits = 0;
+host::Counter g_submit_ticks{};
+}
+void submit_stats_reset(u64* submits, double* ms) {
+    host::Counter f;
+    host::counter_frequency(&f);
+    *submits = g_submits;
+    *ms = g_submit_ticks.QuadPart * 1000.0 / f.QuadPart;
+    g_submits = 0;
+    g_submit_ticks.QuadPart = 0;
+}
+
 void wait_serial(u64 serial) {
     if (g_s.completed >= serial) return;
     SlowTimer timer("wait_serial", 30.0);
@@ -196,7 +209,12 @@ void Recorder::flush() {
     {
         SlowTimer timer("vkQueueSubmit", 30.0);
         std::lock_guard<std::mutex> q(display::device().queue_lock);
+        host::Counter t0, t1;
+        host::counter(&t0);
         VkResult r = vkQueueSubmit(display::device().queue, 1, &si, VK_NULL_HANDLE);
+        host::counter(&t1);
+        g_submits++;
+        g_submit_ticks.QuadPart += t1.QuadPart - t0.QuadPart;
         if (r != VK_SUCCESS) {
             hw_log("vk: vkQueueSubmit failed %d", (int)r);
             hw_fatal("vk: submit");
