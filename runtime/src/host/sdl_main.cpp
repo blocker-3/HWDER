@@ -18,6 +18,11 @@ void on_main_thread(std::function<void()> action) {
     if (!SDL_RunOnMainThread([](void* opaque) { (*static_cast<std::function<void()>*>(opaque))(); }, &action, true))
         hw_fatal("SDL main-thread dispatch failed");
 }
+void show_message(const std::string& text, bool warning) {
+    on_main_thread([&] {
+        SDL_ShowSimpleMessageBox(warning ? SDL_MESSAGEBOX_WARNING : SDL_MESSAGEBOX_ERROR, "HWDER", text.c_str(), nullptr);
+    });
+}
 int run_main(int argc, char** argv, int (*runtime)(int, char**)) {
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");

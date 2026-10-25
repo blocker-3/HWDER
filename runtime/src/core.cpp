@@ -8,6 +8,7 @@
 #include <timeapi.h>
 #else
 #include <execinfo.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #endif
 #include <filesystem>
@@ -497,20 +498,60 @@ static void start_thread_dumper() {
         }
     }).detach();
 }
+static int g_crash_fd = -1;  // the log's descriptor, for the signal handler
+
+// Async-signal-safe: hexadecimal into `out`, returns the length.
+static int crash_hex(char* out, unsigned long long v) {
+    char tmp[16];
+    int n = 0;
+    do tmp[n++] = "0123456789abcdef"[v & 15]; while ((v >>= 4) && n < 16);
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static void crash_write(const char* text, size_t size) {
+    ssize_t ignored = write(STDERR_FILENO, text, size);
+    if (g_crash_fd >= 0) ignored = write(g_crash_fd, text, size);
+    (void)ignored;
+}
+
 static void install_linux_crash_handlers() {
     std::set_terminate([] {
         hw_log_backtrace("std::terminate");
         std::_Exit(3);
     });
-    // Signal paths only use async-signal-safe writes. The default handler then
-    // produces the distribution's ordinary local core dump, subject to its policy.
+    // The crash report goes into hwder.log (and stderr): signal, faulting address, host thread and a backtrace,
+    // whose names include the recompiled guest functions (f_<address>, the executable exports its symbols).
+    // Only async-signal-safe calls; backtrace() is called once here so its library is loaded before a crash.
+    // The default handler then produces the distribution's ordinary core dump, subject to its policy.
+    if (g_log) {
+        fflush(g_log);
+        g_crash_fd = fileno(g_log);
+    }
+    void* warm[1];
+    backtrace(warm, 1);
     struct sigaction action{};
     sigemptyset(&action.sa_mask);
-    action.sa_flags = SA_RESETHAND;
-    action.sa_handler = [](int signal) {
-        constexpr char text[] = "[hwder] fatal host signal; inspect the local system core dump\n";
-        const auto ignored = write(STDERR_FILENO, text, sizeof(text) - 1);
-        (void)ignored;
+    action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+    action.sa_sigaction = [](int signal, siginfo_t* info, void*) {
+        char line[160];
+        int n = 0;
+        auto put = [&](const char* s) { while (*s && n < (int)sizeof(line) - 1) line[n++] = *s++; };
+        put("\n[hwder] CRASH: signal ");
+        if (signal >= 10) line[n++] = (char)('0' + signal / 10 % 10);
+        line[n++] = (char)('0' + signal % 10);
+        put(" at address 0x");
+        n += crash_hex(line + n, (unsigned long long)(uintptr_t)(info ? info->si_addr : nullptr));
+        put(", host thread ");
+        n += crash_hex(line + n, (unsigned long long)syscall(SYS_gettid));
+        put(" (hex); backtrace:\n");
+        crash_write(line, (size_t)n);
+        void* frames[64];
+        const int count = backtrace(frames, 64);
+        backtrace_symbols_fd(frames, count, STDERR_FILENO);
+        if (g_crash_fd >= 0) backtrace_symbols_fd(frames, count, g_crash_fd);
+        constexpr char tail[] = "[hwder] end of crash report; the system's core dump policy applies\n";
+        crash_write(tail, sizeof(tail) - 1);
         raise(signal);
     };
     for (int signal : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(signal, &action, nullptr);
@@ -591,6 +632,11 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
                             L"was given (for example with or without the game update).\n\n"
                             L"Open HWDER Setup and choose Prepare again with the files you want to play.",
                             L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#else
+            if (!debug::flag(debug::Mute))
+                display::show_message("This HWDER build was prepared for a different version of the game than the files it "
+                                      "was given (for example with or without the game update).\n\n"
+                                      "Run play-local.sh again with the files you want to play.");
 #endif
             hw_fatal("game module does not match the generated code");
         }
@@ -784,6 +830,8 @@ static int runtime_main(int argc, char** argv) {
             hw_log("boot: %s", msg.c_str());
 #ifdef _WIN32
             if (!debug::flag(debug::Mute)) MessageBoxW(nullptr, to_w(msg).c_str(), L"HWDER", MB_ICONERROR | MB_OK);
+#else
+            if (!debug::flag(debug::Mute)) display::show_message(msg);
 #endif
             return 2;
         }

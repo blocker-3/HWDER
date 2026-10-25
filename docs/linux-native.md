@@ -15,9 +15,9 @@ python3 tools/build.py --generated-dir build/link-check-generated --build-dir bu
 
 - Texture/geometry write watch: done (8187ec6). Write-watched guest memory registers with userfaultfd async write-protect and `PAGEMAP_SCAN` reports written pages (kernel 6.7+; older kernels log "no write watch" and keep hashing). Max's Ally playtest 2026-10-24: all 60 fps checks good; at 120 busy areas dipped to ~75 before and ~100 after.
 - `HWDER_THREAD_STATS`: done (cba01eb); the per-thread report reads `/proc/self/task` on Linux.
-- Crash handling: no minidumps; Linux prints a signal message and leaves core dumps to the system.
+- Crash handling: no minidumps. Linux writes a crash report into hwder.log (signal, faulting address, host thread, backtrace with the recompiled guest function names) and leaves core dumps to the system.
 - Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
-- Error dialogs: the "wrong game version" and save-copy failure dialogs are log-only on Linux; the missing-Vulkan dialog uses an SDL message box.
+- Error dialogs: the no-game-data, wrong-game-version, save-copy and missing-Vulkan dialogs use SDL message boxes on Linux.
 - The native Setup window, setup kits and Steam shortcut tooling are Windows-only; Linux uses `tools/first_run.py` / `play-local.sh`.
 - XInput fallback is Windows-only; SDL handles every pad on Linux.
 - The save picker's "choose zmha.bin" file mode and the 60 Hz monitor switch need checking on the device.

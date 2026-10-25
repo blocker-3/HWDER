@@ -34,6 +34,8 @@ void open_path(const std::string& path);
 #ifndef _WIN32
 void validation_report();
 void on_main_thread(std::function<void()> action);
+// A blocking error/warning dialog (an SDL message box on the main thread); MessageBoxW's role on Windows.
+void show_message(const std::string& text, bool warning = false);
 int run_main(int argc, char** argv, int (*runtime)(int, char**));
 void handle_window_event(const SDL_Event& event);
 void toggle_borderless();

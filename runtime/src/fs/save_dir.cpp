@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "fs_internal.h"
+#include "gpu/display.h"
 #include "gpu/settings.h"
 #include "debug_flags.h"
 
@@ -267,6 +268,10 @@ void run_pending_save_copy() {
                                           "\n\nThe game keeps using " + from + ". Choose the folder again in the menu to retry.")
                                  .c_str(),
                     L"HWDER", MB_ICONWARNING | MB_OK);
+#else
+    if (!ok && !debug::flag(debug::Mute))
+        display::show_message("Your saves could not be copied to the new save folder.\n\n" + report +
+                              "\n\nThe game keeps using " + from + ". Choose the folder again in the menu to retry.", true);
 #endif
 }
 
