@@ -196,3 +196,37 @@ change (112 both, same-binary A/B). At the busy spot the tick is now bound by th
 GPU thread: per tick the guest's real frame takes ~8.8 ms, its in-between draw ~4.8 ms and waiting to present it
 ~3.4 ms (16.9 ms against 16.7), while the GPU thread needs 2 x ~7.8 ms. Closing the last ~3% needs faster
 recompiled guest code (the game's own draw submission on MainThread) as well as translator work.
+
+Round 8 (2026-10-25, branch `draw-path-perf`): the game's own draw submission on MainThread.
+`HWDER_SAMPLE_US` now samples MainThread too (from the first battle tick), with each sample tagged by tick phase
+(update, extra draw, extra present, real frame, split again at QueueBuffer) into `<log>.samples-main.txt`.
+`HWDER_TIMELINE=<s>` writes 0.5 s of frame-loop events (MainThread phases, GPU thread busy/idle, GPFIFO
+submissions, syncpoints, vi queue/dequeue, compositor) to `<log>.timeline.txt`.
+
+What they showed at the busy spot: MainThread's ~95% "busy" is mostly a `sched_yield` spin in the SDK's fence
+wait (f_10026c8364): 81% of its extra-present samples and 28% of its real-frame samples. Its real CPU per tick
+is about 12 of 16.7 ms. The game submits each frame as two GPFIFO entries at its end and, before recording the
+next frame, waits until the previous frame's syncpoints are reached (signalled when the GPU finished it). The GPU
+thread takes ~8.4 ms (wall) per frame and idles ~1.7 ms in every real frame, because the real frame's recording
+(~6.4 ms) plus the previous frame's GPU completion (2-4 ms after translation) is longer than one translation.
+The GPU is 84-86% busy at ~1.5 GHz sclk (package ~30 W, cores ~4.0 GHz). Hottest guest code on MainThread: the
+SDK memcpy (f_10027971c4, 7.6% of all samples, 11% of the extra draw), then hw_dispatch/hw_call (4.4%), then a
+flat list of draw-path functions (vtable-call loops at ~1-2% each).
+
+Kept: the SDK's memcpy/memmove/memset/bzero/strlen run as host C library calls (gen_main.py
+`LIBC_INTRINSICS`; `HWDER_GUEST_LIBC=1` runs the translated bodies), and the recompiler keeps guest registers in
+C locals that are written back only at calls and exits (gen.py `regcache_emit`; `--no-regcache` restores the
+old output). Same binary, interleaved, three runs each: host libc cut the extra draw 5.1-5.2 -> 4.7-4.8 ms
+(frame 8.90-8.95 -> 8.70-8.87 ms); register caching then 4.7-4.9 -> 4.5 ms (frame within noise, 8.78 -> 8.73).
+The time saved on MainThread mostly turns into more waiting in present: MainThread is no longer critical.
+Measured neutral and not kept: early syncpoint signalling (the wait moves to vi buffer slots and the 120 Hz
+release grid), blocking waits instead of the guest yield spin and the object worker's spin, an inline per-site
+lookup for indirect calls, batched ConstBufferData writes.
+
+Final dev build against the play build (a83c4a8), interleaved, three runs each at the busy spot at 120: frame
+8.80-8.88 -> 8.71-8.75 ms (113 -> 114-115 fps), extra draw 4.94-5.02 -> 4.35-4.59 ms, GPU thread unchanged
+(7.6-7.8 ms per frame). Autoplay fixture at 120 (two runs each), 60 fps runs on both saves: same ranges as the
+play build, no errors, thumbnails normal. Still short of 120 at the busy spot.
+
+Next: the GPU thread (descriptor sets: ~2500 allocations/updates per frame, RADV 13%, bind_resources 11%,
+command decode 15% of its samples) and the GPU completion latency of real frames.
