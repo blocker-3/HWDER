@@ -166,3 +166,12 @@ barrier (1.6 submits per frame and a 6.3 ms GPU thread, but the game waits on th
 60). Submit timing is part of the game's frame pacing; the remaining gains are in per-draw CPU cost.
 A flat open-addressing map (`gpu/vk/flat_map.h`) for the per-draw vertex/index slice and index-range caches:
 GPU thread 8.9-9.0 -> 8.7-9.0 ms per frame, busy spot 103 -> 104-106 fps (small, within run-to-run noise).
+
+Round 4 (2026-10-25): flat maps for the texture header (TIC) cache (57f18b9) and the geometry cache (cfdc012).
+Play build rebuilt from cfdc012: busy spot at 120, GPU thread 8.36-8.51 ms per frame, 106-109 fps (five runs);
+autoplay at 120 105-120 fps; 60 fps runs 58-60; no errors, thumbnails normal, blending outcomes unchanged.
+Neutral and reverted (interleaved A/B, three runs each): a lock-free pipeline-result check, flat program caches
+and a vertex-format table (63e8180); a cheaper per-draw timer and cached device limits. Run-to-run noise at the
+busy spot is about +-0.2 ms of GPU-thread time per frame, so single changes below that are not measurable.
+Note for measurements: a dev build's pipeline warmup cache is "incompatible" with the play build's, so its
+pipelines compile on demand; compare builds only after the first ~40 s (the harness's battle windows).
