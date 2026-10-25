@@ -189,3 +189,10 @@ signalling submit). `HWDER_VK_SYNC_SUBMIT=1` submits on the GPU thread. Same bin
 at the busy spot: GPU thread 8.26-8.38 -> 7.86-8.01 ms per frame, 109-110 -> 111-113 fps. 60 and 120 runs on both
 saves: no errors, no fence or GPU timeouts, thumbnails normal. Retested properly and still neutral: cached device
 limits and a cheaper per-draw timer.
+
+Round 7 (2026-10-25, not kept): a helper thread that pre-scans the texture write-watch blocks after each submit
+cut the GPU thread's kernel time (ioctl 7.7% -> 5.9%) but only 7.7-7.85 -> 7.6-7.75 ms per frame and no fps
+change (112 both, same-binary A/B). At the busy spot the tick is now bound by the game itself as much as by the
+GPU thread: per tick the guest's real frame takes ~8.8 ms, its in-between draw ~4.8 ms and waiting to present it
+~3.4 ms (16.9 ms against 16.7), while the GPU thread needs 2 x ~7.8 ms. Closing the last ~3% needs faster
+recompiled guest code (the game's own draw submission on MainThread) as well as translator work.
