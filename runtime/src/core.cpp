@@ -50,7 +50,10 @@ extern "C" const unsigned long long hw_resumable[];
 extern "C" const unsigned hw_resumable_count;
 static std::vector<u64> g_starts;  // sorted function starts
 
+extern "C" int hw_guest_libc = 0;
+
 static void build_dispatch() {
+    hw_guest_libc = debug::flag(debug::GuestLibc) ? 1 : 0;
     for (unsigned m = 0; m < hw_module_count; m++) {
         TextTable t{hw_modules[m].text_lo, hw_modules[m].text_hi, {}};
         t.fns.assign((t.hi - t.lo) >> 2, nullptr);

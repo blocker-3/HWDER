@@ -43,6 +43,7 @@ enum Id {
     GiObjSync,  // HWDER_GI_OBJ_SYNC
     GiObjTrace,  // HWDER_GI_OBJ_TRACE
     GpuTrace,  // HWDER_GPU_TRACE
+    GuestLibc,  // HWDER_GUEST_LIBC
     Hold,  // HWDER_HOLD
     IpcBt,  // HWDER_IPC_BT
     IpcDump,  // HWDER_IPC_DUMP
@@ -75,6 +76,7 @@ enum Id {
     SyncTrace,  // HWDER_SYNC_TRACE
     ThreadDump,  // HWDER_THREAD_DUMP
     ThreadStats,  // HWDER_THREAD_STATS
+    Timeline,  // HWDER_TIMELINE
     TotalMemMb,  // HWDER_TOTAL_MEM_MB
     Update,  // HWDER_UPDATE
     UsedMemMb,  // HWDER_USED_MEM_MB

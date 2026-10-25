@@ -1,5 +1,6 @@
 // nvdrv: the NVIDIA driver interface. Devices: nvmap, nvhost-as-gpu, nvhost-ctrl, nvhost-ctrl-gpu,
 // nvhost-gpu (channels). Video devices register themselves through nvdrv_device.h.
+#include "host/sampler.h"
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -64,6 +65,7 @@ u32 syncpoint_increment(u32 id) {
     {
         std::lock_guard<std::mutex> l(g_sp.m);
         v = ++g_sp.value[id];
+        host::timeline("syncpt", id, v);
         if (reached(v, g_sp.max[id])) g_sp.max[id] = v;
         for (size_t i = 0; i < g_sp.actions.size();) {
             if (g_sp.actions[i].id == id && reached(v, g_sp.actions[i].threshold)) {
@@ -496,7 +498,9 @@ public:
             static const bool trace = debug::flag(debug::SyncTrace);
             if (trace && !reached(syncpoint_read(p[0]), p[1]))
                 hw_log("sync: syncpt wait %u >= %u (value %u) timeout %d", p[0], p[1], syncpoint_read(p[0]), timeout);
+            host::timeline("sp wait", p[0], p[1]);
             bool ok = syncpoint_wait(p[0], p[1], timeout < 0 ? -1 : (s64)timeout * 1000000);
+            host::timeline("sp wait done", p[0], p[1]);
             if (trace && !ok) hw_log("sync: syncpt wait %u >= %u timed out", p[0], p[1]);
             if ((cmd & 0xFF) == 0x19) p[3] = syncpoint_read(p[0]);
             return ok ? Success : Timeout;

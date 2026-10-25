@@ -939,9 +939,11 @@ static void gpu_thread() {
         {
             std::unique_lock<std::mutex> l(g_q.m);
             perf::WaitScope ws(perf::kWaitGpuQueue);
+            if (g_q.queue.empty()) host::timeline("gpu idle");
             g_q.cv.wait(l, [] { return !g_q.queue.empty(); });
             item = std::move(g_q.queue.front());
             g_q.queue.pop_front();
+            host::timeline("gpu exec", item.second.entries.size(), g_q.queue.size());
         }
         g_q.drained.notify_all();
         perf::sample_core();
@@ -976,6 +978,7 @@ void channel_submit(Channel* ch, Submission&& s) {
             perf::WaitScope ws(perf::kWaitGpuQueue);
             g_q.drained.wait(l, [] { return g_q.queue.size() < kMaxQueuedSubmissions; });
         }
+        host::timeline("gpfifo", g_q.queue.size(), s.increment ? s.increment_count : 0);
         g_q.queue.emplace_back(ch, std::move(s));
     }
     g_q.cv.notify_one();

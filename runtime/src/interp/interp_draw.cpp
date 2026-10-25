@@ -17,6 +17,7 @@
 //
 // Settings > Display enables it; HWDER_GAME_INTERP=0/1 overrides that request for tests.
 // HWDER_GI_LOG=1 logs a summary every 5 s.
+#include "host/sampler.h"
 #include "host/timing.h"
 
 #include <cmath>
@@ -220,6 +221,7 @@ void extra_frame(const Ctx* c) {
         ok = call(&e, f_GfxDevice_EndFrame, kEndFrameRet);
     }
     g_xdraw = now_ms();
+    host::set_sample_phase(3);
     if (ok) {
         u8 skip_present = game::read<u8>(game::deref(state + game::frame_state::kDevicePtr) + game::frame_state::kSkipPresent);
         if (skip_present) {
@@ -312,11 +314,13 @@ HW_HOOK(GfxDevice_BeginFrame) {
             interp::CamSnap n[1];
             if (interp::snapshots(n, 1) == 1) hw_gi_submit_tag = n[0].tick << 1;
         }
+        host::set_sample_phase(2);
         if (behind) {
             g_st.late++;
         } else {
             extra_frame(c);
         }
+        host::set_sample_phase(4);
         if (g_tick_in > 0) {
             g_st.ticks++;
             g_st.draws += hw_last_frame_draws.load();
@@ -335,10 +339,27 @@ HW_HOOK(Battle_Tick) {
         HW_ORIG(Battle_Tick)(c);
         return;
     }
+    // HWDER_SAMPLE_US: MainThread too, its samples tagged by tick phase.
+    static const bool sample = [] {
+        const int us = debug::value(debug::SampleUs, 0);
+        if (us <= 0) return false;
+        host::name_sample_phase(1, "update (tick entry to BeginFrame)");
+        host::name_sample_phase(2, "extra draw");
+        host::name_sample_phase(3, "extra present");
+        host::name_sample_phase(4, "real frame (draw and present)");
+        host::name_sample_phase(5, "extra present after QueueBuffer");
+        host::name_sample_phase(6, "real frame after QueueBuffer");
+        const char* log = debug::str(debug::Log);
+        host::sample_current_thread(us, std::string(log && *log ? log : "hwder.log") + ".samples-main.txt");
+        return true;
+    }();
+    (void)sample;
+    host::set_sample_phase(1);
     double in = now_ms();
     if (g_tick_out > 0 && in - g_tick_out < 100.0) add(g_st.t_loop, g_st.m_loop, in - g_tick_out);
     g_tick_in = in;
     HW_ORIG(Battle_Tick)(c);
+    host::set_sample_phase(0);
     g_tick_out = now_ms();
     if (g_xpresent > 0 && g_tick_out - g_xpresent < 100.0) add(g_st.t_real, g_st.m_real, g_tick_out - g_xpresent);
 }

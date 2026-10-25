@@ -1,3 +1,4 @@
+#include "host/sampler.h"
 #include "host/timing.h"
 // vi: display service. IHOSBinderDriver speaks android's IGraphicBufferProducer protocol over
 // parcels; queued buffers are composited (presented) by our compositor thread at the swap interval.
@@ -225,6 +226,10 @@ public:
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
             perf::note_present();
+            // Sampler/idle-trace phases: split MainThread's present into before and after QueueBuffer.
+            if (host::g_sample_phase == 3) host::set_sample_phase(5);
+            else if (host::g_sample_phase == 4) host::set_sample_phase(6);
+            host::timeline("queue buffer", (unsigned long long)slot);
             {
                 std::lock_guard<std::mutex> l(m_);
                 if (slot >= 0 && slot < kSlots) {
@@ -322,6 +327,7 @@ private:
     int dequeue() {
         host::Counter t0;
         host::counter(&t0);
+        host::timeline("dequeue");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             // Oldest-presented free slot first (round robin keeps triple buffering in order).
@@ -332,6 +338,7 @@ private:
                     best = i;
             if (best >= 0) {
                 slots_[best].state = SlotState::Dequeued;
+                host::timeline("dequeued", (unsigned long long)best);
                 if (!any_free_locked()) buffer_event->clear();
                 if (pace_trace()) {
                     host::Counter freq, t1;
@@ -381,6 +388,7 @@ private:
                                q.in.fence.fences[i].value, waited, nv::syncpoint_read(q.in.fence.fences[i].id));
                 }
             }
+            host::timeline("comp fence done", (unsigned long long)q.slot);
             gpu::FramebufferInfo fb;
             fb.address = nv::nvmap_address(gb.nvmap_handle) + gb.offset;
             fb.width = (u32)gb.width;
@@ -408,6 +416,7 @@ private:
                     slots_[q.slot].frame = ++frame;
                     slots_[q.slot].state = SlotState::Free;
                     presented = -1;
+                    host::timeline("slot free", (unsigned long long)q.slot);
                 }
                 cv_.notify_all();
                 buffer_event->signal();

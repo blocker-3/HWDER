@@ -15,6 +15,7 @@ import bisect
 import collections
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -601,12 +602,189 @@ def discover(mod, plt_stubs, log, extra=()):
 
 # ------------------------------------------------------------------ emission
 
+# Segment markers in a function's instruction list (Emitter.emit_function).
+EXIT = object()    # control leaves the function here: Ctx must hold every register
+CALL = object()    # a call follows: Ctx must hold every register
+RELOAD = object()  # the call returned: registers may have changed in Ctx
+
+_REG_USE = re.compile(r"c->x\[(\d+)\]|c->sp\b")
+_REG_WRITE = re.compile(r"(?:c->x\[(\d+)\]|c->(sp)) = (?!=)|&c->x\[(\d+)\]")
+
+
+# x9-x15: a callee never reads them (AAPCS64 temporaries), so a BL/BLR need not write them back first.
+_CALL_SCRATCH = sum(1 << r for r in range(9, 16))
+
+
+def _reg_bit(m):
+    """Bit of the register a _REG_USE/_REG_WRITE match names: x0-x30 by number, SP as bit 31."""
+    n = next((g for g in m.groups() if g is not None), "sp")
+    return 1 << (31 if n == "sp" else int(n))
+
+
+def _reg_name(b):
+    return "sp_" if b == 31 else f"x{b}_"
+
+
+def _reg_field(b):
+    return "c->sp" if b == 31 else f"c->x[{b}]"
+
+
+def plain_emit(insns, labels, segs, succ, head, tail):
+    """Registers live in Ctx: every segment's text as is, one line per instruction."""
+    out = ["  " + h for h in head]
+    for (a, _), s in zip(insns, segs):
+        if a in labels:
+            out.append(f"L_{a:x}: ;")
+        text = " ".join(x for x in s if isinstance(x, str))
+        if text:
+            out.append("  " + text)
+    text = " ".join(x for x in tail if isinstance(x, str))
+    if text:
+        out.append("  " + text)
+    return "".join(x + "\n" for x in out)
+
+
+def _reads_writes(text):
+    """(registers read, registers written) by a segment's C text. A register written and then read within the
+    same text counts as read too, which only costs an unneeded load."""
+    w, wpos = 0, set()
+    for m in _REG_WRITE.finditer(text):
+        w |= _reg_bit(m)
+        wpos.add(m.start())
+    r = 0
+    for m in _REG_USE.finditer(text):
+        if m.start() not in wpos:
+            r |= _reg_bit(m)
+    return r, w
+
+
+def regcache_emit(insns, labels, segs, succ, head, tail):
+    """Registers live in C locals (x<n>_, sp_), so the compiler keeps them in host registers: guest stores, which
+    may alias Ctx, no longer force them to be reloaded. Ctx is brought up to date only where the function is
+    left or calls out (EXIT, CALL), with the registers that may have changed since the last such point (a forward
+    may-dataflow over the instructions); after a call (RELOAD) the locals read later are loaded again (a backward
+    liveness pass), as are those read before any write at entry."""
+    n = len(segs)
+    rw = [[_reads_writes(x) if isinstance(x, str) else (0, 0) for x in s] for s in segs]
+    used = 0
+    for s in rw:
+        for r, w in s:
+            used |= r | w
+    if not used:
+        return plain_emit(insns, labels, segs, succ, head, tail)
+
+    # Forward: registers possibly changed since the last sync, before each instruction.
+    def forward(i, dirty):
+        for j, x in enumerate(segs[i]):
+            if x is RELOAD:
+                dirty = 0
+            elif isinstance(x, str):
+                dirty |= rw[i][j][1]
+        return dirty
+
+    # Every instruction starts the walk: code that only a resume (dynamic jump into the function) or nothing
+    # reaches still passes its writes on to the instructions after it.
+    din = [0] * n
+    work = list(range(n - 1, -1, -1))
+    while work:
+        i = work.pop()
+        d = forward(i, din[i])
+        for k in succ[i]:
+            if din[k] | d != din[k]:
+                din[k] |= d
+                work.append(k)
+    last = forward(n - 1, din[n - 1])
+
+    # Backward: registers whose local value is read later (a sync stores its whole dirty set, so it reads it).
+    # Branches inside an instruction: a conditional exit ("if (cond) { <exit> tail }") and a jump table's switch,
+    # which come before the instruction's EXIT, continue at its successors.
+    branchy = {i for i, (a, t) in enumerate(insns) if not isinstance(t, tuple) and t.kind in ("bcond", "br")}
+    # What a CALL writes back: everything for an SVC (the kernel takes any register), no temporaries for BL/BLR.
+    call_mask = [~_CALL_SCRATCH if not isinstance(t, tuple) and t.kind in ("bl", "blr") else ~0 for a, t in insns]
+
+    def backward(i, out_live):
+        dirty_at = []
+        d = din[i]
+        for j, x in enumerate(segs[i]):
+            dirty_at.append(d)
+            if x is RELOAD:
+                d = 0
+            elif isinstance(x, str):
+                d |= rw[i][j][1]
+        live, reload_live = out_live, {}
+        for j in range(len(segs[i]) - 1, -1, -1):
+            x = segs[i][j]
+            if x is EXIT:
+                live = dirty_at[j]  # an exit does not continue here
+            elif x is CALL:
+                live = dirty_at[j] & call_mask[i]  # after a call, what is read again is reloaded
+            elif x is RELOAD:
+                reload_live[j] = live
+                live = 0
+            else:
+                r, w = rw[i][j]
+                live = (live & ~w) | r
+        if i in branchy:
+            live |= out_live  # their segments before the EXIT write nothing
+        return live, reload_live
+
+    def live_out(i):
+        v = 0
+        for k in succ[i]:
+            v |= lin[k]
+        if i == n - 1 and tail:
+            v |= last
+        return v
+
+    lin = [0] * n
+    changed = True
+    while changed:
+        changed = False
+        for i in range(n - 1, -1, -1):
+            live, _ = backward(i, live_out(i))
+            if live != lin[i]:
+                lin[i] = live
+                changed = True
+
+    rename = lambda text: _REG_USE.sub(lambda m: _reg_name(31 if m.group(0) == "c->sp" else int(m.group(1))), text)
+    regs = [b for b in range(32) if used >> b & 1]
+    store = lambda d: " ".join(f"{_reg_field(b)} = {_reg_name(b)};" for b in regs if d >> b & 1)
+    load = lambda d: " ".join(f"{_reg_name(b)} = {_reg_field(b)};" for b in regs if d >> b & 1)
+    # Entry: what the first instruction reads before writing; resumable functions may start at any label.
+    entry = lin[0] if not head else used
+    out = ["  u64 " + ", ".join(_reg_name(b) + (f" = {_reg_field(b)}" if entry >> b & 1 else "") for b in regs) + ";"]
+    out += ["  " + h for h in head]
+    for i, ((a, _), s) in enumerate(zip(insns, segs)):
+        if a in labels:
+            out.append(f"L_{a:x}: ;")
+        _, reload_live = backward(i, live_out(i))
+        parts, dirty = [], din[i]
+        for j, x in enumerate(s):
+            if x is EXIT or x is CALL:
+                if dirty & (call_mask[i] if x is CALL else ~0):
+                    parts.append(store(dirty & (call_mask[i] if x is CALL else ~0)))
+            elif x is RELOAD:
+                dirty = 0
+                parts.append(load(reload_live[j]))
+            else:
+                parts.append(rename(x))
+                dirty |= rw[i][j][1]
+        text = " ".join(p for p in parts if p)
+        if text:
+            out.append("  " + text)
+    if tail:
+        parts = [store(last) if x is EXIT else rename(x) for x in tail]
+        out.append("  " + " ".join(p for p in parts if p))
+    return "".join(x + "\n" for x in out)
+
+
 class Emitter:
-    def __init__(self, mod, funcs, plt_stubs, log):
+    def __init__(self, mod, funcs, plt_stubs, log, regcache=True):
         self.mod = mod
         self.funcs = funcs
         self.plt = plt_stubs
         self.log = log
+        self.regcache = regcache
         self.stats = collections.Counter()
         self.imports_used = set()
 
@@ -662,72 +840,85 @@ class Emitter:
             labels = {a for a, _ in insns}
             self.__dict__.setdefault("resumable", []).append(start)
             self.stats["resumable"] += 1
-        out = [f"void {fn_name(start)}(Ctx* restrict c) {{"]
-        if dynamic_br:
-            cases = " ".join(f"case {hx(x)}: goto L_{x:x};" for x in sorted(labels))
-            out.append(f"  if (c->pc & 1) {{ u64 p_ = c->pc & ~1ull; c->pc = 0; switch (p_) {{ {cases} default: break; }} }}")
-        prev_falls = True
-        for a, t in insns:
-            if a in labels:
-                out.append(f"L_{a:x}: ;")
+        # Each instruction becomes segments: C text, EXIT (write back the registers changed since the last sync,
+        # on a path that leaves the function) or CALL (write back, call, reload: the callee may use and change
+        # any register). succ lists the instructions control may continue at.
+        idx = {a: i for i, (a, _) in enumerate(insns)}
+        segs, succ = [], []
+        for i, (a, t) in enumerate(insns):
+            nxt = [i + 1] if i + 1 < len(insns) else []
             if isinstance(t, tuple):
                 _, w, why = t
                 if w == 0 or (w >> 16) == 0:
-                    out.append(f"  hw_brk(c, {hx(a)}, 0xFFFF); return;")
+                    s = [EXIT, f"hw_brk(c, {hx(a)}, 0xFFFF); return;"]
                 else:
-                    out.append(f"  hw_unimpl(c, {hx(a)}, 0x{w:08X}u); return;")
+                    s = [EXIT, f"hw_unimpl(c, {hx(a)}, 0x{w:08X}u); return;"]
                     self.stats["unimpl"] += 1
+                segs.append(s)
+                succ.append([])
                 continue
             k = t.kind
             if k is None:
-                if t.c:
-                    out.append("  " + t.c)
+                s = [t.c] if t.c else []
             elif k == "b":
                 if start <= t.target < end:
-                    out.append(f"  goto L_{t.target:x};")
+                    s, nxt = [f"goto L_{t.target:x};"], [idx[t.target]]
                 else:
-                    out.append("  " + self.tail_expr(t.target))
+                    s, nxt = [EXIT, self.tail_expr(t.target)], []
             elif k == "bcond":
                 if start <= t.target < end:
-                    out.append(f"  if ({t.cond}) goto L_{t.target:x};")
+                    s = [f"if ({t.cond}) goto L_{t.target:x};"]
+                    nxt = nxt + [idx[t.target]]
                 else:
-                    out.append(f"  if ({t.cond}) {{ {self.tail_expr(t.target)} }}")
+                    s = [f"if ({t.cond}) {{", EXIT, f"{self.tail_expr(t.target)} }}"]
             # After a call, x30 holds the address the callee returned to. If that is not our
             # continuation (PIC "bl to get PC" tricks, longjmp), unwind: return to C frames above
             # until the frame whose call site matches.
             elif k == "bl":
-                out.append(f"  c->x[30] = {hx(a + 4)}; " + self.call_expr(t.target)
-                           + f" if (c->x[30] != {hx(a + 4)}) return;")
+                s = [f"c->x[30] = {hx(a + 4)};", CALL, self.call_expr(t.target), RELOAD,
+                     f"if (c->x[30] != {hx(a + 4)}) return;"]
             elif k == "blr":
                 reg = f"c->x[{t.reg}]" if t.reg != 31 else "0"
-                out.append(f"  {{ u64 t_ = {reg}; c->x[30] = {hx(a + 4)}; hw_call(c, t_); }}"
-                           f" if (c->x[30] != {hx(a + 4)}) return;")
+                s = [f"{{ u64 t_ = {reg}; c->x[30] = {hx(a + 4)};", CALL, "hw_call(c, t_); }", RELOAD,
+                     f"if (c->x[30] != {hx(a + 4)}) return;"]
             elif k == "br":
                 reg = f"c->x[{t.reg}]" if t.reg != 31 else "0"
+                s = []
                 if a in jtables:
                     cases = " ".join(f"case {hx(x)}: goto L_{x:x};" for x in sorted(set(jtables[a])))
-                    out.append(f"  switch ({reg}) {{ {cases} default: break; }}")
-                out.append(f"  c->pc = {reg}; HW_MUSTTAIL return hw_dispatch(c);")
+                    s.append(f"switch ({reg}) {{ {cases} default: break; }}")
+                    nxt = sorted({idx[x] for x in jtables[a]})
+                else:
+                    nxt = []
+                s += [f"c->pc = {reg};", EXIT, "HW_MUSTTAIL return hw_dispatch(c);"]
                 self.stats["br_dynamic" if a not in jtables else "br_table"] += 1
             elif k == "ret":
+                nxt = []
                 if t.reg == 30:
-                    out.append("  return;")
+                    s = [EXIT, "return;"]
                 else:
-                    out.append(f"  c->pc = c->x[{t.reg}]; HW_MUSTTAIL return hw_dispatch(c);")
+                    s = [f"c->pc = c->x[{t.reg}];", EXIT, "HW_MUSTTAIL return hw_dispatch(c);"]
             elif k == "svc":
-                out.append("  " + t.c)
+                s = [CALL, t.c, RELOAD]
             elif k in ("brk", "udf"):
-                out.append(f"  {t.c or f'hw_brk(c, {hx(a)}, 0);'} return;")
+                s, nxt = [EXIT, f"{t.c or f'hw_brk(c, {hx(a)}, 0);'} return;"], []
             else:
                 raise RuntimeError(k)
+            segs.append(s)
+            succ.append(nxt)
         # fallthrough off the end of the function
         last_t = insns[-1][1] if insns else None
         terminal = (not isinstance(last_t, tuple) and last_t is not None and
                     last_t.kind in ("b", "br", "ret", "brk", "udf"))
+        tail = []
         if not terminal:
-            out.append("  " + self.tail_expr(end))
+            tail = [EXIT, self.tail_expr(end)]
             self.stats["fallthrough"] += 1
-        out.append("}")
-        return "\n".join(out) + "\n"
+        head = []
+        if dynamic_br:
+            cases = " ".join(f"case {hx(x)}: goto L_{x:x};" for x in sorted(labels))
+            head.append(f"if (c->pc & 1) {{ u64 p_ = c->pc & ~1ull; c->pc = 0; switch (p_) {{ {cases} default: break; }} }}")
+        body = (regcache_emit if self.regcache else plain_emit)(insns, labels, segs, succ, head, tail)
+        return f"void {fn_name(start)}(Ctx* restrict c) {{\n" + body + "}\n"
 
 
