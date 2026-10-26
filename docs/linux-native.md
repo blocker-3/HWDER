@@ -276,3 +276,32 @@ record the next in-between frame (~7 ms with its waits); the GPU thread idles ~3
 Regression: autoplay at 120 8.36-8.80 ms (before 8.35-9.09), 60 fps on both saves 58-60 fps, no errors,
 thumbnails as before, host tests pass. The 60 fps runs' one long frame entering the battle (~44 s) was
 170-183 ms against 154-161 ms before.
+
+Round 11 (2026-10-26): the in-between frame chain and more GPU-thread cuts. With `HWDER_GPU_TIMING` the GPU is
+busy 6.45 ms per frame with 2.1 ms idle between submissions; its biggest pass is the 1920x1080 G-buffer pass
+(~830 draws, 2.8 ms), one rendering instance, so the GPU starts it only after the GPU thread has translated all
+of it. Measured and dropped (same binary, interleaved, three runs each):
+- submitting at render-pass boundaries once 100/300 draws were recorded: no change (the game's wait-for-idle
+  methods already split each frame into ~24 short command buffers; the kick hardly fired);
+- also splitting inside a pass every 150/300 draws (ending and resuming rendering): frame 8.52-8.59 ->
+  8.46-8.47 ms, but one of the six runs hit a GPU hang ("GPU timeout waiting for serial", then 61 fps). The only
+  GPU timeout in this work; not worth ~0.08 ms.
+Kept:
+- FlatMap marks empty slots with key 0 instead of a separate occupancy array (one cache line per probe; the
+  geometry cache holds up to 200k entries), GeomEntry without padding (80-byte slots), macro writes inlined into
+  the interpreter loop: GPU thread 7.05-7.08 -> 6.96-7.00 ms against ddfed10.
+  A second run of the FlatMap change alone: 7.00-7.06 -> 6.94-7.02 ms. Small, but both A/Bs point the same way.
+Also dropped: skipping TextureCache::validate on a texture-header cache hit within the same guest submission
+(6.96-7.01 -> 6.89-6.99 ms against the same build without it: noise). A first measurement had looked better
+because the build also contained the write-watch run queries dropped in round 10 by mistake; ddfed10 itself
+only carried those two unused members in a header, its write-watch code is the measured one.
+Frame time is unchanged by these (8.48-8.57 ms either way): at the busy spot the GPU thread no longer
+sets the pace; the chain of game recording, translation and the GPU's own work does, near the 120 Hz grid
+(~117-118 fps, most frames on time).
+The battle-load frame of the 60 fps runs is the first battle submission compiling pipelines synchronously
+(empty shader cache in every test run). Side by side the same day: autoplay save 61c2571 168-169 ms, round-11
+builds 167-179 ms; busy-spot save 61c2571 172-178 ms, this build 180-187 ms (the submission 125-130 -> 129-137 ms).
+So round 10's 154-161 ms was a different session; what remains is a few ms (~5%) on a one-time hitch, within the
+spread of the compiles but in one direction in both pairs, not investigated further.
+Regression on the final build: busy spot at 120 8.40-8.74 ms windows (GPU thread 6.91 ms), autoplay at 120
+8.38-9.05 ms, 60 fps on both saves 58-60 fps, no errors or GPU timeouts, thumbnails normal, host tests pass.

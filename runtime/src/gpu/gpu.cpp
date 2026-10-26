@@ -72,9 +72,8 @@ public:
     u32 start[0x80] = {};
     u32 code_ptr = 0, start_ptr = 0;
 
-    using Send = void (*)(void* ctx, u32 method, u32 value);
-
-    // Execute macro `index` with parameters; writes go to send(method, value).
+    // Execute macro `index` with parameters; writes go to send(ctx, method, value) (a callable: inlined into the loop).
+    template <class Send>
     void run(u32 index, const std::vector<u32>& params, void* ctx, Send send) {
         u32 regs[8] = {};
         u32 pc = start[index & 0x7F];
@@ -453,7 +452,7 @@ static void flush_macro(Engine3D& e) {
     e.mme.ctx_read_ = macro_read;
     std::vector<u32> params;
     params.swap(e.macro_params);
-    e.mme.run(index, params, &e, macro_send);
+    e.mme.run(index, params, &e, [](void* ctx, u32 method, u32 value) { macro_send(ctx, method, value); });
     // Hand the buffer back (keeps its capacity: no allocation per macro call) unless the macro started another one.
     if (e.macro_params.empty()) {
         params.clear();

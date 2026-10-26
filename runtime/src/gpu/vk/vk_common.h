@@ -287,8 +287,7 @@ private:
     // reports are kept here for every image sharing the page; entries older than watch_pruned_ are dropped.
     std::map<u64, u64> written_pages_;
     std::vector<void*> watch_buf_;
-    static constexpr u64 kWatchBlock = 2ull << 20, kNotWatched = ~0ull, kWatchRun = 32;  // blocks per query at most
-    bool single_block_ = false;  // written_since: retry the next query without extending it over a run
+    static constexpr u64 kWatchBlock = 2ull << 20, kNotWatched = ~0ull;
     std::unordered_map<u64, u64> watch_blocks_;  // 2 MiB block -> recorder serial of its last query (kNotWatched: query per image)
     std::unordered_map<u64, u64> watch_written_;  // 2 MiB block -> latest epoch any of its pages was reported written
     u64 watch_pruned_ = 0;

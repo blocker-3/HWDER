@@ -786,12 +786,12 @@ private:
     };
     struct GeomEntry {
         u64 watch_epoch = 0, checked_serial = 0, sample = 0, last_epoch = 0;
+        u64 off = 0, bytes = 0;  // resident copy: offset in `chunk`
         u32 clean = 0;           // consecutive clean submissions
+        int chunk = -1;          // resident copy: chunk
+        u32 vmin = 0, vmax = 0;  // index scan result (has_range)
         bool clean_now = false;  // this submission's check
-        int chunk = -1;          // resident copy: chunk and offset
-        u64 off = 0, bytes = 0;
-        bool has_range = false;  // index scan result
-        u32 vmin = 0, vmax = 0;
+        bool has_range = false;  // (fields ordered without padding: a FlatMap slot is 80 bytes)
     };
     std::vector<GeomChunk> geom_chunks_;
     int geom_cur_ = -1;
