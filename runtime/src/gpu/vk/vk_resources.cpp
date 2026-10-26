@@ -144,32 +144,45 @@ Framebuffer VkRenderer::resolve_framebuffer(const u32* regs, bool for_clear, u32
 void VkRenderer::begin_rendering(const Framebuffer& fb) {
     SlowTimer timer("begin_rendering", 30.0);
     if (g_rec.rendering && cur_fb_ == fb) return;
-    VkCommandBuffer cb = g_rec.cmd();  // ends a previous rendering instance
-    VkRenderingAttachmentInfo ca[8];
-    for (u32 i = 0; i < fb.num_colors; i++) {
-        ca[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        ca[i].imageView = fb.color_view[i];
-        ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    }
-    VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    da.imageView = fb.depth_view;
-    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {fb.width, fb.height}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = fb.num_colors;
-    ri.pColorAttachments = ca;
-    if (fb.depth_view) {
-        ri.pDepthAttachment = &da;
-        if (fb.has_stencil) ri.pStencilAttachment = &da;
-    }
+    g_rec.cmd();  // ends a previous rendering instance
+    struct {
+        VkImageView color[8], depth;
+        u32 ncolor, width, height;
+        bool stencil;
+    } r;
+    for (u32 i = 0; i < fb.num_colors; i++) r.color[i] = fb.color_view[i];
+    r.depth = fb.depth_view;
+    r.ncolor = fb.num_colors;
+    r.width = fb.width;
+    r.height = fb.height;
+    r.stencil = fb.has_stencil;
     gputime::mark(gputime::kPass, fb.width, fb.height, fb.num_colors ? (u32)fb.color_format[0] : 0, fb.depth_view ? (u32)fb.depth_format : 0,
                   fb.num_colors);
-    vkCmdBeginRendering(cb, &ri);
+    g_rec.record([r](VkCommandBuffer cb) {
+        VkRenderingAttachmentInfo ca[8];
+        for (u32 i = 0; i < r.ncolor; i++) {
+            ca[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            ca[i].imageView = r.color[i];
+            ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        da.imageView = r.depth;
+        da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, {r.width, r.height}};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = r.ncolor;
+        ri.pColorAttachments = ca;
+        if (r.depth) {
+            ri.pDepthAttachment = &da;
+            if (r.stencil) ri.pStencilAttachment = &da;
+        }
+        vkCmdBeginRendering(cb, &ri);
+    });
     g_rec.rendering = true;
     cur_fb_ = fb;
 }

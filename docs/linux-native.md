@@ -370,3 +370,15 @@ halfway for the extra frame (Camera_Update rebuilds proj from it); larger change
 are still cuts. Heavy save fighting, two runs each: in-between frames drawn during the attack 106-112 ->
 283-285 per 5 s, attack windows 10.87-13.37 -> 8.51-8.88 ms; busy spot unchanged (120 fps); thumbnails of the
 zoom normal.
+Max's session on 1e4ad64 ("better, some dips to 89"): the attack's zoom frames were blended (110-210 per 5 s),
+no field-of-view cuts left; the remaining dips were in his heaviest moments (2,100-3,700 draws per frame), where
+the GPU thread needed 8.2-9.4 ms per frame and extra frames were skipped "behind the 60 Hz grid" (30-67 per 5 s).
+Vulkan command recording now runs on a worker thread ("HWDER vk record", vk_sched.cpp): the GPU thread queues each
+command, or a draw's whole changed state and the draw itself (vk_draw.cpp `DrawRec`), as a closure in 64 KiB
+chunks; the worker records them in order and ends and submits the command buffers (it replaces the submit
+thread). Descriptor updates and staging writes still happen on the GPU thread before the commands that use them
+are queued. `HWDER_VK_SYNC_SUBMIT=1` records and submits on the GPU thread (fallback, A/B). Interleaved against
+1e4ad64, three runs each: GPU thread 6.18-6.31 -> 5.76-5.91 ms per frame on the heavy-fight save (fighting,
+special attack), 6.78-6.85 -> 6.01-6.21 ms at the busy spot; frame times unchanged there (both builds at or near
+120). Autoplay at 120 8.33-8.43 ms windows, 60 fps on both saves, no errors or GPU timeouts, thumbnails normal,
+host tests pass; the synchronous fallback runs (GPU thread 7.36 ms at the busy spot).

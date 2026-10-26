@@ -6,6 +6,8 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <new>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -136,10 +138,32 @@ void count_clear();
 }  // namespace gputime
 
 // ------------------------------------------------------------------ command recording
+// Vulkan commands are recorded on a worker thread ("HWDER vk record"): the GPU thread queues each command (or a
+// draw's whole state) as a closure called with the command buffer, in order, and the worker records, ends and
+// submits the command buffers. Everything a closure uses is captured by value. HWDER_VK_SYNC_SUBMIT=1 records
+// and submits on the GPU thread instead (as before).
+struct CmdChunk;
 class Recorder {
 public:
-    VkCommandBuffer cmd();          // current command buffer (outside any rendering instance)
-    VkCommandBuffer cmd_in_pass();  // current command buffer, whatever the rendering state
+    void cmd();          // a command buffer outside any rendering instance (ends one)
+    void cmd_in_pass();  // a command buffer, whatever the rendering state
+    // Queue f(VkCommandBuffer) for the current command buffer.
+    template <class F>
+    void record(F&& f) {
+        if (sync_record()) {
+            f(sync_cb());
+            return;
+        }
+        using Fn = std::decay_t<F>;
+        static_assert(alignof(Fn) <= 16, "command closure alignment");
+        void* body = alloc_cmd(sizeof(Fn), [](void* p, VkCommandBuffer cb) {
+            Fn* fn = static_cast<Fn*>(p);
+            (*fn)(cb);
+            fn->~Fn();
+        });
+        new (body) Fn(std::forward<F>(f));
+    }
+    static bool sync_record();  // HWDER_VK_SYNC_SUBMIT=1
     void end_rendering();
     void barrier();                 // full memory barrier (also ends rendering)
     Slice stage(u64 size, u64 align = 256);
@@ -150,9 +174,13 @@ public:
     void wait_idle();
     bool rendering = false;
 
-    // set by the renderer
-    VkCommandBuffer cb_ = VK_NULL_HANDLE;
     u64 serial_ = 1;
+    CmdChunk* chunk_ = nullptr;  // chunk being filled for the current command buffer
+
+private:
+    using Exec = void (*)(void* body, VkCommandBuffer cb);
+    void* alloc_cmd(size_t size, Exec exec);  // storage for a closure of `size` bytes in the current chunk
+    VkCommandBuffer sync_cb();                // synchronous recording: the current command buffer
 };
 Recorder& rec();
 // Destroy after the GPU finished the current work and a few frames were presented.

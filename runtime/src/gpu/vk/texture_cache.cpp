@@ -218,7 +218,9 @@ static void transfer_image(Image* src, Image* dst, u32 layers) {
         c.dstSubresource = {dst->aspect, 0, 0, layers};
         c.extent = {std::min(src->level_width(0), dst->level_width(0)), std::min(src->level_height(0), dst->level_height(0)),
                     std::min(src->info.depth, dst->info.depth)};
-        vkCmdCopyImage(rec().cmd(), src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        rec().cmd();
+        const VkImage si = src->image, di = dst->image;
+        rec().record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
     } else {
         VkImageBlit b{};
         b.srcSubresource = {src->aspect, 0, 0, layers};
@@ -226,8 +228,12 @@ static void transfer_image(Image* src, Image* dst, u32 layers) {
         b.srcOffsets[1] = {(s32)src->level_width(0), (s32)src->level_height(0), 1};
         b.dstOffsets[1] = {(s32)dst->level_width(0), (s32)dst->level_height(0), 1};
         bool depth = src->aspect != VK_IMAGE_ASPECT_COLOR_BIT;
-        vkCmdBlitImage(rec().cmd(), src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                       depth ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+        rec().cmd();
+        const VkImage si = src->image, di = dst->image;
+        const VkFilter filter = depth ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        rec().record([si, di, b, filter](VkCommandBuffer cb) {
+            vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &b, filter);
+        });
     }
     rec().barrier();
 }
@@ -383,7 +389,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             bool done = false;
             if (match_subresource(img, o->addr, o->info, &s) && !o->info.fmt.compressed && !img->info.fmt.compressed &&
                 o->scale == img->scale && o->scale_y == img->scale_y) {
-                VkCommandBuffer cb = rec().cmd();
+                rec().cmd();
                 std::vector<VkImageCopy> regions;
                 for (u32 l = 0; l < o->info.levels && s.level + l < img->info.levels; l++) {
                     VkImageCopy c{};
@@ -395,8 +401,10 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
                 }
                 if (o->aspect == img->aspect && !regions.empty()) {
                     rec().barrier();
-                    vkCmdCopyImage(cb, o->image, VK_IMAGE_LAYOUT_GENERAL, img->image, VK_IMAGE_LAYOUT_GENERAL,
-                                   (u32)regions.size(), regions.data());
+                    const VkImage si = o->image, di = img->image;
+                    rec().record([si, di, regions](VkCommandBuffer cb) {
+                        vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+                    });
                     rec().barrier();
                     img->gpu_modified = true;
                     done = true;
@@ -560,7 +568,7 @@ void TextureCache::alloc_image(Image* img) {
     g_allocs[(u64)img->image] = a;
     ps.reset();
     // initial layout transition to GENERAL
-    VkCommandBuffer cb = rec().cmd();
+    rec().cmd();
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = img->image;
@@ -568,8 +576,9 @@ void TextureCache::alloc_image(Image* img) {
     b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                         nullptr, 1, &b);
+    rec().record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
     // Fresh VRAM holds whatever the previous owner left there. Depth images are never uploaded, and
     // colour images only receive the committed part of guest memory, so define every texel first:
     // render targets the game draws before clearing (first battle frames) otherwise show garbage.
@@ -578,10 +587,12 @@ void TextureCache::alloc_image(Image* img) {
         if (img->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
             static const float init_depth = (float)debug::value(debug::VkInitDepth, 1.0);
             VkClearDepthStencilValue ds{init_depth, 0};
-            vkCmdClearDepthStencilImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all);
+            const VkImage im = img->image;
+            rec().record([im, ds, all](VkCommandBuffer cb) { vkCmdClearDepthStencilImage(cb, im, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all); });
         } else {
             VkClearColorValue zero{};
-            vkCmdClearColorImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+            const VkImage im = img->image;
+            rec().record([im, zero, all](VkCommandBuffer cb) { vkCmdClearColorImage(cb, im, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all); });
         }
         rec().barrier();
     }
@@ -714,7 +725,10 @@ static ScratchImage make_scratch(Image* img) {
     b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(rec().cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    rec().cmd();
+    rec().record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
     return t;
 }
 static void blit_scratch(VkImage src, u32 sw, u32 sh, VkImage dst, u32 dw, u32 dh, VkImageAspectFlags aspect, u32 layers) {
@@ -724,8 +738,11 @@ static void blit_scratch(VkImage src, u32 sw, u32 sh, VkImage dst, u32 dw, u32 d
     b.dstSubresource = {aspect, 0, 0, layers};
     b.srcOffsets[1] = {(s32)sw, (s32)sh, 1};
     b.dstOffsets[1] = {(s32)dw, (s32)dh, 1};
-    vkCmdBlitImage(rec().cmd(), src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                   aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    rec().cmd();
+    const VkFilter filter = aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    rec().record([src, dst, b, filter](VkCommandBuffer cb) {
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &b, filter);
+    });
     rec().barrier();
 }
 static void free_scratch(ScratchImage t) {
@@ -825,17 +842,23 @@ void TextureCache::upload(Image* img) {
         }
     }
     if (regions.empty()) return;
-    VkCommandBuffer cb = rec().cmd();
     rec().barrier();
+    const VkBuffer sbuf = st.buf;
     if (img->scale != 1.0f || img->scale_y != 1.0f) {
         ScratchImage t = make_scratch(img);
         if (t.image) {
-            vkCmdCopyBufferToImage(cb, st.buf, t.image, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+            const VkImage ti = t.image;
+            rec().record([sbuf, ti, regions](VkCommandBuffer cb) {
+                vkCmdCopyBufferToImage(cb, sbuf, ti, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+            });
             blit_scratch(t.image, img->info.width, img->info.height, img->image, img->phys_w(), img->phys_h(), img->aspect, img->info.layers);
             free_scratch(t);
         }
     } else {
-        vkCmdCopyBufferToImage(cb, st.buf, img->image, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+        const VkImage di = img->image;
+        rec().record([sbuf, di, regions](VkCommandBuffer cb) {
+            vkCmdCopyBufferToImage(cb, sbuf, di, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+        });
     }
     rec().barrier();
 }
@@ -893,8 +916,10 @@ void TextureCache::download(Image* img) {
         }
     }
     rec().barrier();
-    vkCmdCopyImageToBuffer(rec().cmd(), src_image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, (u32)regions.size(),
-                           regions.data());
+    const VkBuffer rbuf = rb.buf;
+    rec().record([src_image, rbuf, regions](VkCommandBuffer cb) {
+        vkCmdCopyImageToBuffer(cb, src_image, VK_IMAGE_LAYOUT_GENERAL, rbuf, (u32)regions.size(), regions.data());
+    });
     rec().barrier();
     host::counter(&dl_t1);
     rec().wait_idle();

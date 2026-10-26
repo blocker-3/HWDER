@@ -39,7 +39,9 @@ double period_s() {
 }
 
 void write(Frame* f) {
-    vkCmdWriteTimestamp(f->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, f->qpool, (u32)f->segs.size());
+    const VkQueryPool q = f->qpool;
+    const u32 i = (u32)f->segs.size();
+    g_rec.record([q, i](VkCommandBuffer cb) { vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, q, i); });
 }
 
 void frame_begin(Frame* f) {
@@ -50,7 +52,8 @@ void frame_begin(Frame* f) {
         ci.queryCount = kMaxQueries;
         VK_CHECK(vkCreateQueryPool(dev(), &ci, nullptr, &f->qpool));
     }
-    vkCmdResetQueryPool(f->cb, f->qpool, 0, kMaxQueries);
+    const VkQueryPool q = f->qpool;
+    g_rec.record([q](VkCommandBuffer cb) { vkCmdResetQueryPool(cb, q, 0, kMaxQueries); });
     f->segs.clear();
     write(f);
     f->segs.push_back({});
@@ -167,26 +170,33 @@ Frame* new_frame() {
     }  // a recycled frame's pools were reset by the waiter thread when it retired
     f->dpool_index = 0;
     f->serial = g_rec.serial_;
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(f->cb, &bi));
-    gputime::frame_begin(f);
     return f;
 }
 }  // namespace
 
-namespace {
-std::atomic<u64> g_submits{0}, g_submit_ticks{0};
+// ------------------------------------------------------------------ command chunks and the record worker
+// The GPU thread fills a chunk with closures for the current frame's command buffer and hands full chunks to
+// the worker, which records them in order; the frame's last chunk also ends and submits it. vkQueueSubmit
+// (~20 us of kernel time each, ~24 per busy battle frame) runs on the worker too. The frame is in_flight and its
+// serial counts as submitted as soon as the GPU thread flushes it, which is safe with a timeline semaphore
+// (waits may start before the signalling submit).
+struct CmdChunk {
+    static constexpr size_t kBytes = 64 << 10;
+    Frame* frame = nullptr;
+    bool submit = false;  // the frame's last chunk: end the command buffer and submit it
+    size_t used = 0;
+    alignas(16) u8 data[kBytes];
+};
 
-// vkQueueSubmit runs on its own thread, in order (~20 us of kernel time each, ~24 per busy battle frame). The GPU
-// thread hands the frame over and moves on; the frame is already in_flight and its serial counts as submitted,
-// which is safe with a timeline semaphore (waits may start before the signalling submit). HWDER_VK_SYNC_SUBMIT=1
-// submits on the GPU thread as before.
-struct SubmitQueue {
-    std::mutex m;
-    std::condition_variable cv;
-    std::deque<Frame*> frames;
-} g_sq;
+namespace {
+struct CmdHeader {
+    void (*exec)(void* body, VkCommandBuffer cb);
+    u32 size;  // header + body, 16-byte aligned
+    u32 pad;
+};
+static_assert(sizeof(CmdHeader) == 16, "command header size");
+
+std::atomic<u64> g_submits{0}, g_submit_ticks{0};
 
 void queue_submit(Frame* f) {
     u64 serial = f->serial;
@@ -212,34 +222,110 @@ void queue_submit(Frame* f) {
     }
 }
 
-void submit_thread() {
-    host::name_thread(L"HWDER vk submit");
+void end_and_submit(Frame* f) {
+    VK_CHECK(vkEndCommandBuffer(f->cb));
+    queue_submit(f);
+}
+
+struct RecordQueue {
+    std::mutex m;
+    std::condition_variable cv, free_cv;
+    std::deque<CmdChunk*> chunks;  // for the worker, in order
+    std::vector<CmdChunk*> free;   // recycled
+    size_t total = 0;
+} g_rq;
+constexpr size_t kMaxChunks = 64;  // 4 MiB of queued commands at most
+
+void run_chunk(CmdChunk* c) {
+    for (size_t off = 0; off < c->used;) {
+        CmdHeader* h = reinterpret_cast<CmdHeader*>(c->data + off);
+        h->exec(c->data + off + sizeof(CmdHeader), c->frame->cb);
+        off += h->size;
+    }
+    if (c->submit) end_and_submit(c->frame);
+}
+
+void record_thread() {
+    host::name_thread(L"HWDER vk record");
     for (;;) {
-        Frame* f;
+        CmdChunk* c;
         {
-            std::unique_lock<std::mutex> l(g_sq.m);
-            g_sq.cv.wait(l, [] { return !g_sq.frames.empty(); });
-            f = g_sq.frames.front();
-            g_sq.frames.pop_front();
+            std::unique_lock<std::mutex> l(g_rq.m);
+            g_rq.cv.wait(l, [] { return !g_rq.chunks.empty(); });
+            c = g_rq.chunks.front();
+            g_rq.chunks.pop_front();
         }
-        queue_submit(f);
+        run_chunk(c);
+        {
+            std::lock_guard<std::mutex> l(g_rq.m);
+            g_rq.free.push_back(c);
+        }
+        g_rq.free_cv.notify_one();
     }
 }
 
-bool async_submit() {
-    static const bool on = [] {
-        if (debug::flag(debug::VkSyncSubmit)) return false;
-        std::thread(submit_thread).detach();
-        return true;
-    }();
-    return on;
+CmdChunk* get_chunk(Frame* f) {
+    static std::once_flag once;
+    std::call_once(once, [] { std::thread(record_thread).detach(); });
+    CmdChunk* c = nullptr;
+    {
+        std::unique_lock<std::mutex> l(g_rq.m);
+        if (g_rq.free.empty() && g_rq.total >= kMaxChunks) {
+            g_rq.free_cv.wait(l, [] { return !g_rq.free.empty(); });
+        }
+        if (!g_rq.free.empty()) {
+            c = g_rq.free.back();
+            g_rq.free.pop_back();
+        } else {
+            g_rq.total++;
+        }
+    }
+    if (!c) c = new CmdChunk;
+    c->frame = f;
+    c->submit = false;
+    c->used = 0;
+    return c;
+}
+
+void push_chunk(CmdChunk* c) {
+    {
+        std::lock_guard<std::mutex> l(g_rq.m);
+        g_rq.chunks.push_back(c);
+    }
+    g_rq.cv.notify_one();
 }
 }  // namespace
+
 void submit_stats_reset(u64* submits, double* ms) {
     host::Counter f;
     host::counter_frequency(&f);
     *submits = g_submits.exchange(0);
     *ms = g_submit_ticks.exchange(0) * 1000.0 / f.QuadPart;
+}
+
+bool Recorder::sync_record() {
+    static const bool sync = debug::flag(debug::VkSyncSubmit);
+    return sync;
+}
+
+VkCommandBuffer Recorder::sync_cb() {
+    cmd_in_pass();
+    return g_s.cur->cb;
+}
+
+void* Recorder::alloc_cmd(size_t size, Exec exec) {
+    cmd_in_pass();
+    const u32 need = (u32)((sizeof(CmdHeader) + size + 15) & ~size_t(15));
+    if (need > CmdChunk::kBytes) hw_fatal("vk: command closure too large");
+    if (chunk_->used + need > CmdChunk::kBytes) {  // hand the full chunk to the worker
+        push_chunk(chunk_);
+        chunk_ = get_chunk(g_s.cur);
+    }
+    CmdHeader* h = reinterpret_cast<CmdHeader*>(chunk_->data + chunk_->used);
+    h->exec = exec;
+    h->size = need;
+    chunk_->used += need;
+    return h + 1;
 }
 
 void wait_serial(u64 serial) {
@@ -296,19 +382,23 @@ void waiter_thread() {
 
 Recorder& rec() { return g_rec; }
 
-VkCommandBuffer Recorder::cmd_in_pass() {
-    if (!g_s.cur) {
-        ProfScope ps(kProfFrameBegin);
-        g_s.cur = new_frame();
-        cb_ = g_s.cur->cb;
-    }
-    return cb_;
+void Recorder::cmd_in_pass() {
+    if (g_s.cur) return;
+    ProfScope ps(kProfFrameBegin);
+    Frame* f = new_frame();
+    g_s.cur = f;
+    if (!sync_record()) chunk_ = get_chunk(f);
+    record([](VkCommandBuffer cb) {
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VK_CHECK(vkBeginCommandBuffer(cb, &bi));
+    });
+    gputime::frame_begin(f);
 }
 
-VkCommandBuffer Recorder::cmd() {
-    VkCommandBuffer cb = cmd_in_pass();
+void Recorder::cmd() {
+    cmd_in_pass();
     if (rendering) end_rendering();
-    return cb;
 }
 
 void full_barrier(VkCommandBuffer cb) {
@@ -321,15 +411,15 @@ void full_barrier(VkCommandBuffer cb) {
 
 void Recorder::end_rendering() {
     if (!rendering) return;
-    vkCmdEndRendering(cb_);
+    record([](VkCommandBuffer cb) { vkCmdEndRendering(cb); });
     rendering = false;
     gputime::mark(gputime::kOther);
-    full_barrier(cb_);
+    record([](VkCommandBuffer cb) { full_barrier(cb); });
 }
 
 void Recorder::barrier() {
-    VkCommandBuffer cb = cmd();
-    full_barrier(cb);
+    cmd();
+    record([](VkCommandBuffer cb) { full_barrier(cb); });
 }
 
 u64 Recorder::completed() const { return g_s.completed; }
@@ -379,23 +469,19 @@ void Recorder::flush() {
     if (!g_s.cur) return;
     if (g_before_submit) g_before_submit();
     end_rendering();
-    full_barrier(cb_);
+    record([](VkCommandBuffer cb) { full_barrier(cb); });
     gputime::frame_end(g_s.cur);
-    VK_CHECK(vkEndCommandBuffer(cb_));
     Frame* f = g_s.cur;
-    g_s.cur = nullptr;
-    cb_ = VK_NULL_HANDLE;
     u64 serial = serial_++;
     f->serial = serial;
-    if (async_submit()) {
-        {
-            std::lock_guard<std::mutex> l(g_sq.m);
-            g_sq.frames.push_back(f);
-        }
-        g_sq.cv.notify_one();
+    if (sync_record()) {
+        end_and_submit(f);
     } else {
-        queue_submit(f);
+        chunk_->submit = true;
+        push_chunk(chunk_);
+        chunk_ = nullptr;
     }
+    g_s.cur = nullptr;
     {
         std::lock_guard<std::mutex> l(g_s.m);
         g_s.in_flight.push_back(f);
