@@ -305,6 +305,11 @@ void push_chunk(CmdChunk* c) {
 }
 }  // namespace
 
+u64 submitted_serial() {
+    std::lock_guard<std::mutex> l(g_queued_m);
+    return g_queued;
+}
+
 void wait_submitted(u64 serial) {
     std::unique_lock<std::mutex> l(g_queued_m);
     g_queued_cv.wait(l, [serial] { return g_queued >= serial; });

@@ -494,8 +494,14 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     }
     // The present waits for this serial on the same queue: it must not go in before the serial's own submit
     // (the queue would wait for a signal queued behind it, a GPU hang).
-    wait_submitted(g_rec.serial() - 1);
-    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, g_rec.serial() - 1, fb.release_hz);
+    // Read once: the GPU thread may flush (advance the serial) meanwhile.
+    const u64 wait_for = g_rec.serial() - 1;
+    wait_submitted(wait_for);
+    if (submitted_serial() < wait_for) {  // cannot happen after wait_submitted: catches a broken ordering
+        static int n = 0;
+        if (n++ < 5) hw_log("vk: ERROR: present queued before serial %llu was submitted", (unsigned long long)wait_for);
+    }
+    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, wait_for, fb.release_hz);
     if (hold >= 0) hold_[hold].ticket = display::last_present_ticket();
 }
 

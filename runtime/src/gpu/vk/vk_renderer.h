@@ -83,6 +83,7 @@ void wait_serial(u64 serial);
 // Blocks until the command buffer of `serial` has been submitted to the queue (the record worker submits after
 // recording). Another submission on the same queue that waits for the timeline must not be queued before it.
 void wait_submitted(u64 serial);
+u64 submitted_serial();  // highest serial submitted to the queue so far
 // vkQueueSubmit calls and their total time since the last call (the periodic frame log).
 void submit_stats_reset(u64* submits, double* ms);
 void waiter_thread();

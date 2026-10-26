@@ -1,5 +1,6 @@
 // Shared declarations of the Vulkan renderer (runtime/src/gpu/vk/*).
 #pragma once
+#include <atomic>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -174,7 +175,7 @@ public:
     void wait_idle();
     bool rendering = false;
 
-    u64 serial_ = 1;
+    std::atomic<u64> serial_{1};  // written by the GPU thread, read by the presenter
     CmdChunk* chunk_ = nullptr;  // chunk being filled for the current command buffer
 
 private:

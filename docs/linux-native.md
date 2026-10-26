@@ -389,3 +389,7 @@ present now waits until the worker has submitted the serial (`wait_submitted`). 
 interleaved: 1 hang in 8 runs without the fix, 0 in 16 with it. The previous submit thread had the same race
 with a much smaller window (likely the one hang in the round-11 mid-pass split experiment). The Play build was
 rolled back to 1e4ad64 at once.
+That fix still read the recorder serial three times in present() while the GPU thread could advance it; a check
+in present() (an error is logged when the serial waited for is not yet submitted) fired 5 times in each of 5
+heavy-fight runs. The serial is now read once (and atomic): 10 heavy-fight runs with 0 check firings and 0
+hangs; regression runs and host tests pass.
