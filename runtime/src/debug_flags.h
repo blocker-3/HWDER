@@ -38,6 +38,7 @@ enum Id {
     FsSelftest,  // HWDER_FS_SELFTEST
     FsTrace,  // HWDER_FS_TRACE
     GameInterp,  // HWDER_GAME_INTERP
+    GiKeep30,  // HWDER_GI_KEEP_30
     GiLog,  // HWDER_GI_LOG
     GiLogMs,  // HWDER_GI_LOG_MS
     GiNoObjects,  // HWDER_GI_NO_OBJECTS

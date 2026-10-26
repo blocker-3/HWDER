@@ -16,7 +16,8 @@
 // rate, while unpaired frames and menus carry native 60 Hz pacing. HWDER_FPS is ignored in this mode.
 //
 // Settings > Display enables it; HWDER_GAME_INTERP=0/1 overrides that request for tests.
-// HWDER_GI_LOG=1 logs a summary every 5 s.
+// HWDER_GI_LOG=1 logs a summary every 5 s. While the game ticks at 30 fps (video cutscenes) no extra frames are drawn;
+// HWDER_GI_KEEP_30=1 keeps them for comparison.
 #include "host/sampler.h"
 #include "host/timing.h"
 
@@ -86,6 +87,7 @@ u64 g_tick = 0;           // newest published tick when the current frame began
 struct Stats {
     u64 extra = 0, begin_failed = 0, no_pair = 0, cut = 0, mismatch = 0, no_present = 0;
     u64 zoom = 0;                                  // extra frames with a blended field of view
+    u64 half_rate = 0;                             // skipped: the game runs at a 30 fps base
     u64 cut_move = 0, cut_fov = 0, cut_other = 0;  // cut reasons: eye/at jump, field of view, other projection state
     float cut_fov_max = 0, cut_fov_at = 0;         // largest per-tick field-of-view change seen, and the fov there
     u64 pair_ticks = 0, pair_gap = 0;  // why no pair: tick not consecutive, > 250 ms apart
@@ -116,6 +118,7 @@ void report() {
                g_st.extra, g_st.extra ? g_st.ms / g_st.extra : 0.0, g_st.no_present, g_st.begin_failed, g_st.no_pair,
                g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
     if (on && g_st.zoom) hw_log("gi: %llu extra frames with a blended field of view (zoom)", g_st.zoom);
+    if (on && g_st.half_rate) hw_log("gi: %llu extra frames skipped at a 30 fps game frame rate", g_st.half_rate);
     if (on && g_st.cut)
         hw_log("gi: cuts: %llu camera jump, %llu field of view (largest change %.4f at fov %.4f), %llu other projection state",
                g_st.cut_move, g_st.cut_fov, g_st.cut_fov_max, g_st.cut_fov_at, g_st.cut_other);
@@ -158,6 +161,25 @@ void extra_frame(const Ctx* c) {
         if (s[0].tick != s[1].tick + 1) g_st.pair_ticks++;
         else g_st.pair_gap++;
         return;
+    }
+    // At a 30 fps base (ticks ~33 ms apart, e.g. scenes the game runs at half rate) the extra frame would blend
+    // twice as much motion: skip it and show the game's own frames. Smoothed tick interval with hysteresis
+    // (on above 26 ms, off below 21 ms) so a single slow tick does not switch it.
+    {
+        static const bool keep = debug::flag(debug::GiKeep30);
+        static double tick_ms = 16.7;
+        static bool half_rate = false;
+        tick_ms += (s[0].t_ms - s[1].t_ms - tick_ms) * 0.2;
+        const bool was = half_rate;
+        if (!half_rate && tick_ms > 26.0) half_rate = true;
+        else if (half_rate && tick_ms < 21.0) half_rate = false;
+        if (half_rate != was)
+            hw_log("gi: game frame rate %s (ticks %.1f ms apart): extra frames %s", half_rate ? "30 fps" : "back to 60 fps",
+                   tick_ms, half_rate ? "off" : "on");
+        if (half_rate && !keep) {
+            g_st.half_rate++;
+            return;
+        }
     }
     if (s[0].addr != s[1].addr) g_st.pair_addr++;
     const interp::CamSnap &a = s[1], &b = s[0];

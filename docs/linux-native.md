@@ -393,3 +393,13 @@ That fix still read the recorder serial three times in present() while the GPU t
 in present() (an error is logged when the serial waited for is not yet submitted) fired 5 times in each of 5
 heavy-fight runs. The serial is now read once (and atomic): 10 heavy-fight runs with 0 check firings and 0
 hangs; regression runs and host tests pass.
+
+## No extra frames while the game runs at 30 fps (2026-10-26)
+
+Max saw a flashing text box during cutscenes. His 34deaf1 play log shows the video cutscene (nvdec/vic active,
+226-288 s) ticking at 30 fps: only every other tick drew an extra frame (75 drawn, 75 "behind the 60 Hz grid"
+per 5 s), so the screen got 2 real + 1 extra image per two ticks at uneven gaps (22 ms average, 45 ms worst).
+Extra frames are now off while the smoothed tick interval is above 26 ms and back on below 21 ms (logged as
+"gi: game frame rate ..."); `HWDER_GI_KEEP_30=1` keeps them for comparison. Busy-spot and heavy-fight runs
+against 34deaf1: same extra-frame counts and frame time (8.36 / 8.40 ms), the rule never switched on in battle.
+Not yet confirmed in the cutscene itself (autoplay cannot reach it): needs a playtest.

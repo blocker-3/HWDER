@@ -34,6 +34,7 @@ static const Flag kTable[] = {
     {FsSelftest, "HWDER_FS_SELFTEST", "RomFS: run the image self test after mounting.", kNonzero},
     {FsTrace, "HWDER_FS_TRACE", "File system service trace.", kNonzero},
     {GameInterp, "HWDER_GAME_INTERP", "0/1: override the 120 fps (game-drawn in-between frame) setting for tests.", kInt},
+    {GiKeep30, "HWDER_GI_KEEP_30", "120 fps mode: keep drawing extra frames while the game runs at 30 fps (comparison; they are off there by default).", kPresence},
     {GiLog, "HWDER_GI_LOG", "120 fps mode: log its timing and skip reasons periodically.", kPresence},
     {GiLogMs, "HWDER_GI_LOG_MS", "Period of the HWDER_GI_LOG reports in ms (strtoull, base 10).", kInt},
     {GiNoObjects, "HWDER_GI_NO_OBJECTS", "120 fps mode: interpolate the camera only, no object/bone blending (comparison).", kPresence},
