@@ -714,6 +714,7 @@ private:
     void record_draw(const u32* regs, const DrawParams& p, const Framebuffer& fb, GfxProgram* prog, VkPipeline pipe,
                      const VkDescriptorSet* sets, std::vector<std::function<void()>>& post, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
+    void fast_clear_color(Image* img, VkImageView view, const VkClearColorValue& color);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
 
@@ -810,6 +811,7 @@ private:
         Image* img;
         VkImageView view;
         ViewParams vp;
+        u64 validated_gen = 0, validated_exec = ~0ull;  // tc_.validate_gen() and guest submission of the last validate
     };
     FlatMap<TicEntry> tic_cache_;
     static constexpr u32 kTicFast = 1024, kSamplerFast = 256;

@@ -305,3 +305,16 @@ So round 10's 154-161 ms was a different session; what remains is a few ms (~5%)
 spread of the compiles but in one direction in both pairs, not investigated further.
 Regression on the final build: busy spot at 120 8.40-8.74 ms windows (GPU thread 6.91 ms), autoplay at 120
 8.38-9.05 ms, 60 fps on both saves 58-60 fps, no errors or GPU timeouts, thumbnails normal, host tests pass.
+
+Round 12 (2026-10-26): GPU work. Probes with `HWDER_GPU_TIMING` (same binary, two or three runs each):
+translating Maxwell's FMZ multiplies (0 times anything is 0) as plain multiplies changed nothing (GPU busy
+6.43-6.52 against 6.47-6.48 ms per frame), so shader ALU is not the limit; `RADV_DEBUG=nodcc,nohiz` raised GPU
+time 6.46 -> 7.2 ms, so colour/depth compression is in use. The full-screen clears were not fast clears: images
+live in GENERAL layout, where RADV never fast-clears, and the game's colour clears cost ~0.6 ms of GPU time per
+frame at the busy spot (four G-buffer targets 0.36 ms, three effect targets 0.25 ms), depth clears 0.34 ms.
+Kept: a colour clear of a whole single-level, single-layer image is a load-op clear in COLOR_ATTACHMENT_OPTIMAL
+layout, between two layout barriers (vk_draw.cpp `fast_clear_color`). Busy spot at 120, interleaved, three
+runs each against f3496cd: GPU busy 80-81% -> 73%, GPU thread 7.01-7.10 -> 6.66-6.78 ms, frame 8.50-8.56 ->
+8.47-8.50 ms. Depth clears done the same way stayed at 0.34 ms (these depth images cannot fast-clear) and were
+left as they are. Regression: autoplay 120 8.39-9.14 ms windows, 60 fps on both saves, no errors or GPU
+timeouts, thumbnails as before.

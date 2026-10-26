@@ -1031,9 +1031,55 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         fb.color[rt]->full_width_frame = g_s.present_count;
         fb.color[rt]->full_width_since_present = true;
     }
+    // A colour clear of a whole single-level, single-layer image is a load-op clear in COLOR_ATTACHMENT_OPTIMAL
+    // layout: the driver's fast clear (metadata only), which images in GENERAL layout never get. The game's full-
+    // screen G-buffer and effect clears were ~0.6 ms of GPU time per frame at the busy spot. (Depth clears gained
+    // nothing this way and stay as they are.)
+    if (att.size() == 1 && att[0].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
+        const Image* img = fb.color[rt];
+        if (img && img->info.levels == 1 && img->info.layers == 1 && img->info.type == ImageType::e2D && r.rect.offset.x == 0 &&
+            r.rect.offset.y == 0 && r.rect.extent.width == img->level_width(0) && r.rect.extent.height == img->level_height(0)) {
+            fast_clear_color(fb.color[rt], fb.color_view[rt], att[0].clearValue.color);
+            gputime::count_clear();
+            return;
+        }
+    }
     begin_rendering(fb);
     vkCmdClearAttachments(g_rec.cmd_in_pass(), (u32)att.size(), att.data(), 1, &r);
     gputime::count_clear();
+}
+
+void VkRenderer::fast_clear_color(Image* img, VkImageView view, const VkClearColorValue& color) {
+    VkCommandBuffer cb = g_rec.cmd();  // ends any rendering instance (with its barrier)
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img->image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    VkRenderingAttachmentInfo ai{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ai.imageView = view;
+    ai.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ai.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ai.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    ai.clearValue.color = color;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {img->level_width(0), img->level_height(0)}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ai;
+    gputime::mark(gputime::kPass, ri.renderArea.extent.width, ri.renderArea.extent.height, (u32)img->info.fmt.vk, 0, 1);
+    vkCmdBeginRendering(cb, &ri);
+    vkCmdEndRendering(cb);
+    gputime::mark(gputime::kOther);
+    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
 // ------------------------------------------------------------------ compute
