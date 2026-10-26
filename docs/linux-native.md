@@ -382,3 +382,10 @@ are queued. `HWDER_VK_SYNC_SUBMIT=1` records and submits on the GPU thread (fall
 special attack), 6.78-6.85 -> 6.01-6.21 ms at the busy spot; frame times unchanged there (both builds at or near
 120). Autoplay at 120 8.33-8.43 ms windows, 60 fps on both saves, no errors or GPU timeouts, thumbnails normal,
 host tests pass; the synchronous fallback runs (GPU thread 7.36 ms at the busy spot).
+The first Play install of c216e45 froze ~45 s into a headless heavy-fight check ("GPU timeout waiting for
+serial"): the present, which waits on the render timeline for the last flushed serial on the same queue, could
+be queued before the worker had submitted that serial, so the queue waited for a signal queued behind it. The
+present now waits until the worker has submitted the serial (`wait_submitted`). Heavy-fight save fighting,
+interleaved: 1 hang in 8 runs without the fix, 0 in 16 with it. The previous submit thread had the same race
+with a much smaller window (likely the one hang in the round-11 mid-pass split experiment). The Play build was
+rolled back to 1e4ad64 at once.

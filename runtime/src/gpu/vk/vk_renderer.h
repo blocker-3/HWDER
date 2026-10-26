@@ -80,6 +80,9 @@ extern void (*g_before_submit)();
 extern Recorder g_rec;
 
 void wait_serial(u64 serial);
+// Blocks until the command buffer of `serial` has been submitted to the queue (the record worker submits after
+// recording). Another submission on the same queue that waits for the timeline must not be queued before it.
+void wait_submitted(u64 serial);
 // vkQueueSubmit calls and their total time since the last call (the periodic frame log).
 void submit_stats_reset(u64* submits, double* ms);
 void waiter_thread();

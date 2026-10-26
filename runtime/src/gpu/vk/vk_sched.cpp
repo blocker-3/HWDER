@@ -222,9 +222,18 @@ void queue_submit(Frame* f) {
     }
 }
 
+std::mutex g_queued_m;
+std::condition_variable g_queued_cv;
+u64 g_queued = 0;  // highest serial submitted to the queue
+
 void end_and_submit(Frame* f) {
     VK_CHECK(vkEndCommandBuffer(f->cb));
     queue_submit(f);
+    {
+        std::lock_guard<std::mutex> l(g_queued_m);
+        if (f->serial > g_queued) g_queued = f->serial;
+    }
+    g_queued_cv.notify_all();
 }
 
 struct RecordQueue {
@@ -295,6 +304,11 @@ void push_chunk(CmdChunk* c) {
     g_rq.cv.notify_one();
 }
 }  // namespace
+
+void wait_submitted(u64 serial) {
+    std::unique_lock<std::mutex> l(g_queued_m);
+    g_queued_cv.wait(l, [serial] { return g_queued >= serial; });
+}
 
 void submit_stats_reset(u64* submits, double* ms) {
     host::Counter f;

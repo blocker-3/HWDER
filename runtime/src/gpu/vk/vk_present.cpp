@@ -492,6 +492,9 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         wait_serial(capture_serial);  // the copy has run: the guest buffer is no longer needed
         fb.on_captured();
     }
+    // The present waits for this serial on the same queue: it must not go in before the serial's own submit
+    // (the queue would wait for a signal queued behind it, a GPU hang).
+    wait_submitted(g_rec.serial() - 1);
     display::present_image(image, w, h, fb.swap_interval, g_s.timeline, g_rec.serial() - 1, fb.release_hz);
     if (hold >= 0) hold_[hold].ticket = display::last_present_ticket();
 }
