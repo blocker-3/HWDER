@@ -28,6 +28,7 @@ SAVE_LEAF = Path("0100AE00096EA000/48574445525F55530000000000000001")
 FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
     "autoplay": "9038321106d28444dc26864749274c8403ef3222b741008f60349a21dc07bfbe",
     "busy-spot": "38e73f2680b232572ba4a2548645ab8ca8f52825512133f080dedf6d6a33467a",
+    "heavy-fight": "8eec90e953a32ecc9ce08ae1afd8f654ae9bff94877f3797599b8a76f464cba5",
 }
 
 
@@ -81,6 +82,8 @@ def environment(args, run):
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
     if args.fixture == "busy-spot":
         flags["HWDER_AUTOPLAY_IDLE"] = "1"  # mid-battle save: stand still so every run sees the same scene
+    if args.fixture == "heavy-fight":  # mid-battle save; X once starts the special mode with the heavy frames
+        flags.update(HWDER_AUTOPLAY_IDLE="1", HWDER_AUTOPLAY_X="1")
     if args.stats:
         flags["HWDER_THREAD_STATS"] = str(args.stats)
     if args.filmstrip:

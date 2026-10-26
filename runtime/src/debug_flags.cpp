@@ -13,6 +13,7 @@ static const Flag kTable[] = {
     {AutoplayCam, "HWDER_AUTOPLAY_CAM", "Autoplay: also turn the camera with the right stick (2 s right, 2 s left, 2 s still).", kPresence},
     {AutoplayCircle, "HWDER_AUTOPLAY_CIRCLE", "Autoplay: run in a slow circle (one turn every 8 s) so the view covers every direction.", kPresence},
     {AutoplayIdle, "HWDER_AUTOPLAY_IDLE", "Autoplay: no input once in battle (experiments).", kPresence},
+    {AutoplayX, "HWDER_AUTOPLAY_X", "Autoplay: press X once, 1 s into the battle (the heavy-fight save: starts the special mode).", kPresence},
     {AutoplayPlus, "HWDER_AUTOPLAY_PLUS", "Test: tap + five times a second for the first 30 s (players who press + through the startup and title screens).", kPresence},
     {AutoplaySkip, "HWDER_AUTOPLAY_SKIP", "Autoplay: the 6 s cutscene-skip cycle for a save that starts with the story cutscenes.", kPresence},
     {CacheProfile, "HWDER_CACHE_PROFILE", "Pipeline cache / warmup save: log retrieval, snapshot, validation, serialization and disk timings (cache-save:). Read on every save.", kPresence},

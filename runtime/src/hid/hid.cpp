@@ -358,6 +358,14 @@ void update_thread() {
                 if (c >= 1500 && c < 1620) in.pads[0].buttons |= hid::kBtnA;
             }
             if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pads[0].buttons |= hid::kBtnPlus;  // loading tips
+            // HWDER_AUTOPLAY_X=1: X once, 1 s into the battle (the heavy-fight save starts its special mode with it).
+            static const bool x_once = debug::flag(debug::AutoplayX);
+            static u64 x_at = 0;
+            if (x_once && in_battle && !x_at) {
+                x_at = t + 1000;
+                hw_log("autoplay: X at +1 s");
+            }
+            if (x_once && x_at && t >= x_at && t < x_at + 150) in.pads[0].buttons |= hid::kBtnX;
             static const bool idle_in_battle = debug::flag(debug::AutoplayIdle);  // experiments: no input in battle
             if (in_battle && !idle_in_battle) {
                 if ((t % 800) < 100) in.pads[0].buttons |= hid::kBtnY;

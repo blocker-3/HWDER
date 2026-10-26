@@ -17,6 +17,7 @@ enum Id {
     AutoplayCam,  // HWDER_AUTOPLAY_CAM
     AutoplayCircle,  // HWDER_AUTOPLAY_CIRCLE
     AutoplayIdle,  // HWDER_AUTOPLAY_IDLE
+    AutoplayX,  // HWDER_AUTOPLAY_X
     AutoplayPlus,  // HWDER_AUTOPLAY_PLUS
     AutoplaySkip,  // HWDER_AUTOPLAY_SKIP
     CacheProfile,  // HWDER_CACHE_PROFILE
