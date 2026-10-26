@@ -55,9 +55,10 @@ def prepare(args, run):
     run.mkdir(parents=True)
     exe = owned(Path(args.exe)) if args.exe else PLAY / "hwder"
     os.link(exe, run / "hwder")  # exe_dir() is the run folder: settings, saves and caches stay here
+    caches = owned(Path(args.caches_from)) if args.caches_from else PLAY
     for name in ("pipeline_cache.bin", "pipeline_warmup.bin"):
-        if (PLAY / name).exists():
-            shutil.copy2(PLAY / name, run / name)
+        if (caches / name).exists():
+            shutil.copy2(caches / name, run / name)
     settings = (PLAY / "hwder_settings.ini").read_text().splitlines()
     forced = {"save_dir": "", "save_copy_from": "", "debug_env": "", "skip_prelaunch": "1", "show_fps": "0"}
     lines = [l for l in settings if l.partition("=")[0] not in forced] + [f"{k}={v}" for k, v in forced.items()]
@@ -183,6 +184,7 @@ def main():
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--env", action="append", default=[], help="extra NAME=VALUE for the game")
     ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
+    ap.add_argument("--caches-from", help="folder inside the project to copy the pipeline caches from (default: the play build's)")
     args = ap.parse_args()
     if running_games():
         raise SystemExit("hwder is already running; not starting a test")

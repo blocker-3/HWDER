@@ -35,11 +35,13 @@ static bool prewarm_enabled() {
     return !value || strcmp(value, "0") != 0;
 }
 static u64 warmup_compatibility() {
-    // Bump the renderer ABI epoch for changes to translation/layout semantics not
-    // already separated by the compiled build identity. No guest path is trusted.
-    constexpr char epoch[] = "HWDER graphics warmup ABI 1";
+    // Recipes stay valid across builds: a stored program is used only when its whole record (SPIR-V and
+    // resources of every stage) equals what this build translates (prepare_program cancels the others), a stored
+    // pipeline only for an equal key, and prewarm compiles it with this build's own pipeline code. Keyed by the
+    // build commit, every rebuild started cold and compiled ~180 pipelines during the first battles. Bump the
+    // epoch when the recipe format or what a key or record means changes. No guest path is trusted.
+    constexpr char epoch[] = "HWDER graphics warmup ABI 2";
     u64 tag = hash_bytes(epoch, sizeof(epoch));
-    tag = hash_bytes(HWDER_COMMIT, sizeof(HWDER_COMMIT), tag);
     const auto& p = display::device().props;
     const u32 host[] = {p.vendorID, p.deviceID, p.driverVersion, sizeof(shader::PushConstants)};
     tag = hash_bytes(host, sizeof(host), tag);

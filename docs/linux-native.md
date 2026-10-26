@@ -330,3 +330,18 @@ on both saves 58-60 fps with per-window worst frames 19-22 ms (32-47 ms in round
 timeouts, thumbnails normal, host tests pass. Also seen: `save_pipeline_cache` (every 600 presents) takes 5-6 ms
 on the present path when there are new pipelines or warmup records (early in a session), mostly the warmup
 snapshot copy; left as it is.
+
+Round 13 (2026-10-26): Max's playtest of f207fc9 (no bugs; "still some dips to 60 fps"). Its log: menus and loading
+at 60 Hz by design, the first battle frame compiling shaders (184 ms), then dips in stretches where the pipeline
+count grew (103 -> 183 pipelines during the session, one synchronous compile of 46 ms) and in heavy scenes where
+the GPU thread needed 8.4-9.6 ms per frame (1400-1750 draws, ~2500 descriptor sets, 18% reused, against ~1300
+draws and 40% at the busy spot). The session started with "prewarm early load: incompatible, 0 recipes": the
+warmup cache's compatibility tag included the build commit, so every rebuild started cold and also replaced the
+accumulated recipes with that session's. The tag no longer includes the commit (epoch "ABI 2"): a stored program
+is adopted only when its whole record equals this build's translation, a pipeline only for an equal key, and
+prewarm compiles it with this build's code, so the commit added no protection. `tools/linux_autoplay.py
+--caches-from <run>` seeds a test run's pipeline caches from another run. Busy spot, a cold run then a warm run
+from its caches, twice: 112-115 recipes loaded and adopted, 0 mismatched, draws skipped for a missing pipeline
+174-186 -> 0-4, battle-load frame 161-170 -> 147-160 ms; steady frame rate the same (8.33-8.37 ms windows).
+Autoplay warm run: 134 of 136 adopted, 119-120 fps, thumbnails normal. The next build after this one still
+starts cold once (the tag format changed); later rebuilds keep their recipes.
