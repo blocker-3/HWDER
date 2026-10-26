@@ -318,3 +318,15 @@ runs each against f3496cd: GPU busy 80-81% -> 73%, GPU thread 7.01-7.10 -> 6.66-
 8.47-8.50 ms. Depth clears done the same way stayed at 0.34 ms (these depth images cannot fast-clear) and were
 left as they are. Regression: autoplay 120 8.39-9.14 ms windows, 60 fps on both saves, no errors or GPU
 timeouts, thumbnails as before.
+The remaining gap to 120 was not average speed but a hitch: one frame every 300 was 20-39 ms late. Logging every
+frame over 20 ms put each one at the geometry cache's sweep, which rebuilt the whole table every 300 frames to
+drop ranges not drawn for 300 frames: 17-22 ms on the GPU thread for ~40k entries (also present before this
+work). The sweep now deletes stale entries in place (backward-shift deletion, `FlatMap::sweep`), a 32nd of the
+table per frame; the eviction rule is unchanged. FlatMap passes a randomized test against std::unordered_map
+under ASan/UBSan (`runs/drawperf/flatmap_test.cpp`, 40 rounds of 200k operations). Busy spot at 120,
+interleaved against 61f2661, three runs each: frame 8.47-8.50 -> 8.36-8.38 ms (118 -> 119-120 fps), worst frame
+per 300-frame window 18-39 -> 12-18 ms. Autoplay at 120 8.32-8.40 ms windows (119-120 fps, worst 18 ms); 60 fps
+on both saves 58-60 fps with per-window worst frames 19-22 ms (32-47 ms in round 8's build). No errors or GPU
+timeouts, thumbnails normal, host tests pass. Also seen: `save_pipeline_cache` (every 600 presents) takes 5-6 ms
+on the present path when there are new pipelines or warmup records (early in a session), mostly the warmup
+snapshot copy; left as it is.

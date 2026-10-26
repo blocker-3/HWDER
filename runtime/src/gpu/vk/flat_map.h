@@ -55,11 +55,43 @@ public:
         for (Slot& s : slots_) s.first = 0;
         size_ = 0;
     }
+    std::size_t capacity() const { return slots_.size(); }
+    // Removes the entries for which pred(key, value) is true among `count` slots from `start`, in place (no
+    // rebuild; pointers to other entries may move), and returns the slot to continue from. Spreading a sweep over
+    // calls keeps each one short: rebuilding a 40k-entry table took ~20 ms.
+    template <class Pred>
+    std::size_t sweep(std::size_t start, std::size_t count, Pred pred) {
+        if (slots_.empty()) return 0;
+        std::size_t i = start & mask_;
+        for (std::size_t n = 0; n < count && n <= mask_; n++) {
+            while (slots_[i].first && pred(slots_[i].first, slots_[i].second)) erase_at(i);  // re-check what moved in
+            i = (i + 1) & mask_;
+        }
+        return i;
+    }
 
 private:
     static constexpr std::uint64_t kZeroKey = 0x9E3779B97F4A7C15ull;
     static std::uint64_t stored(std::uint64_t key) { return key ? key : kZeroKey; }
     std::size_t index(std::uint64_t key) const { return (std::size_t)((key * 0x9E3779B97F4A7C15ull) >> shift_); }
+    // Backward-shift deletion: later entries of the probe cluster move up so lookups never meet a hole early.
+    void erase_at(std::size_t i) {
+        std::size_t j = i;
+        for (;;) {
+            j = (j + 1) & mask_;
+            if (!slots_[j].first) break;
+            const std::size_t home = index(slots_[j].first);
+            // slots_[j] may fill the hole at i unless its home lies cyclically in (i, j]
+            const bool home_between = i <= j ? (home > i && home <= j) : (home > i || home <= j);
+            if (!home_between) {
+                slots_[i] = slots_[j];
+                i = j;
+            }
+        }
+        slots_[i].first = 0;
+        slots_[i].second = V{};
+        size_--;
+    }
     void insert_stored(std::uint64_t key, const V& v) {  // key already in stored form
         if ((size_ + 1) * 2 > slots_.size()) grow();
         std::size_t i = index(key);

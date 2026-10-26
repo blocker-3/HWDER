@@ -798,6 +798,7 @@ private:
     int geom_cur_ = -1;
     FlatMap<GeomEntry> geom_;
     u64 geom_swept_ = 0;
+    size_t geom_cursor_ = 0;  // next slot of geom_ to sweep
     bool geom_check(GeomEntry& e, const u8* src, u64 bytes);
     bool geom_slice(u64 key, const u8* src, u64 bytes, Slice& out);  // true: a resident copy of these bytes
     void geom_release(GeomEntry& e);
@@ -811,7 +812,6 @@ private:
         Image* img;
         VkImageView view;
         ViewParams vp;
-        u64 validated_gen = 0, validated_exec = ~0ull;  // tc_.validate_gen() and guest submission of the last validate
     };
     FlatMap<TicEntry> tic_cache_;
     static constexpr u32 kTicFast = 1024, kSamplerFast = 256;
