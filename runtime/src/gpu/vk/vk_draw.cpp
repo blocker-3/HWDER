@@ -173,8 +173,9 @@ void VkRenderer::geom_release(GeomEntry& e) {
 }
 
 bool VkRenderer::geom_slice(u64 key, const u8* src, u64 bytes, Slice& out) {
-    {   // drop ranges not drawn for 300 frames: a 32nd of the table per frame, in place (a whole-table rebuild every
-        // 300 frames took ~20 ms on this thread and made one frame in every 300 late)
+    {   // drop ranges not drawn for 300 frames: a 256th of the table per frame, in place (a whole-table rebuild every
+        // 300 frames took ~20 ms on this thread and made one frame in every 300 late; a 32nd per frame still cost
+        // ~4% of the thread in a heavy battle)
         const u64 epoch = tc_.epoch();
         auto stale = [&](u64, GeomEntry& g) {
             if (epoch - g.last_epoch <= 300) return false;
@@ -189,7 +190,7 @@ bool VkRenderer::geom_slice(u64 key, const u8* src, u64 bytes, Slice& out) {
             geom_cursor_ = 0;
         } else if (epoch != geom_swept_) {
             geom_swept_ = epoch;
-            geom_cursor_ = geom_.sweep(geom_cursor_, geom_.capacity() / 32 + 1, stale);
+            geom_cursor_ = geom_.sweep(geom_cursor_, geom_.capacity() / 256 + 1, stale);
         }
     }
     GeomEntry& e = geom_[key];
