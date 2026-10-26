@@ -345,3 +345,17 @@ from its caches, twice: 112-115 recipes loaded and adopted, 0 mismatched, draws 
 174-186 -> 0-4, battle-load frame 161-170 -> 147-160 ms; steady frame rate the same (8.33-8.37 ms windows).
 Autoplay warm run: 134 of 136 adopted, 119-120 fps, thumbnails normal. The next build after this one still
 starts cold once (the tag format changed); later rebuilds keep their recipes.
+
+Round 14 (2026-10-26): a heavy test case and the real play setup. Max's mid-battle save from 2026-10-26 is the
+`heavy-fight` fixture (`linux_autoplay.py --fixture heavy-fight`; `HWDER_AUTOPLAY_X=1` presses X once 1 s into the
+battle, which starts the special attack whose frames dropped). Max plays in Game Mode (TDP setting 25 W, Steam frame
+limit 120, VRR on, tearing off). Headless runs are not slowed by Game Mode running in the background (only a run
+during the switch itself was). A run launched outside Steam into Game Mode's gamescope got a small window
+(rendered at 0.667x) and is not comparable; `Test HWDER heavy.sh` (in the project folder, added to Steam as a
+non-Steam game and started by Max) runs an on-screen A/B the way Steam launches the game: 1920x1080, VRR, the
+120 limit, 21-26 W. On screen, e7bb3ff and 3f32766 alike: the special attack 8.5-9.2 ms per 300-frame window
+(109-118 fps) for ~10 s, then 8.32-8.40 ms (120); headless gives nearly the same (8.4-8.95 ms). An earlier visible
+run on the GNOME desktop (Xwayland) ran the attack at 10.3-12.0 ms. The dips to 60 in Max's sessions were mostly
+the first session of each new build compiling the attack's pipelines (cold warmup cache, fixed in e7bb3ff).
+Sweeping a 256th of the geometry cache per frame (a 32nd cost ~4% of the GPU thread in this battle): GPU thread
+6.75-6.82 -> 6.57-6.74 ms per frame headless, no visible difference on screen.
