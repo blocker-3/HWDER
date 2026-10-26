@@ -85,6 +85,9 @@ u64 g_tick = 0;           // newest published tick when the current frame began
 
 struct Stats {
     u64 extra = 0, begin_failed = 0, no_pair = 0, cut = 0, mismatch = 0, no_present = 0;
+    u64 zoom = 0;                                  // extra frames with a blended field of view
+    u64 cut_move = 0, cut_fov = 0, cut_other = 0;  // cut reasons: eye/at jump, field of view, other projection state
+    float cut_fov_max = 0, cut_fov_at = 0;         // largest per-tick field-of-view change seen, and the fov there
     u64 pair_ticks = 0, pair_gap = 0;  // why no pair: tick not consecutive, > 250 ms apart
     u64 pair_addr = 0;                 // pairs whose ticks used different render buffer slots (blended anyway)
     u64 late = 0;                      // skipped: the previous tick ran late
@@ -112,6 +115,10 @@ void report() {
                "%llu camera moved since its tick, %llu behind the 60 Hz grid; %llu pairs across buffer slots",
                g_st.extra, g_st.extra ? g_st.ms / g_st.extra : 0.0, g_st.no_present, g_st.begin_failed, g_st.no_pair,
                g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
+    if (on && g_st.zoom) hw_log("gi: %llu extra frames with a blended field of view (zoom)", g_st.zoom);
+    if (on && g_st.cut)
+        hw_log("gi: cuts: %llu camera jump, %llu field of view (largest change %.4f at fov %.4f), %llu other projection state",
+               g_st.cut_move, g_st.cut_fov, g_st.cut_fov_max, g_st.cut_fov_at, g_st.cut_other);
     if (on && g_st.ticks)
         hw_log("gi: per tick (mean/max ms): update %.2f/%.1f, extra draw %.2f/%.1f, extra present %.2f/%.1f, "
                "real frame %.2f/%.1f, loop %.2f/%.1f; %.0f draws per frame", g_st.t_update / g_st.ticks, g_st.m_update,
@@ -154,9 +161,21 @@ void extra_frame(const Ctx* c) {
     }
     if (s[0].addr != s[1].addr) g_st.pair_addr++;
     const interp::CamSnap &a = s[1], &b = s[0];
-    if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f || a.fov != b.fov || a.aspect != b.aspect ||
+    // A smooth zoom (only the field of view changing, by up to 20% per tick: the special attacks animate it every
+    // tick) is blended like the camera position instead of being treated as a cut, which showed those attacks at
+    // 60 fps. A larger change is still a cut.
+    const bool zoom = a.fov != b.fov && std::fabs(a.fov - b.fov) <= 0.2f * std::max(std::fabs(a.fov), std::fabs(b.fov));
+    if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f || (a.fov != b.fov && !zoom) || a.aspect != b.aspect ||
         a.near_ != b.near_ || a.far_ != b.far_ || a.proj_extra != b.proj_extra || a.proj_flags != b.proj_flags) {
         g_st.cut++;
+        if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f) g_st.cut_move++;
+        else if (a.aspect != b.aspect || a.near_ != b.near_ || a.far_ != b.far_ || a.proj_extra != b.proj_extra ||
+                 a.proj_flags != b.proj_flags) g_st.cut_other++;
+        else {
+            g_st.cut_fov++;
+            const float d = std::fabs(a.fov - b.fov);
+            if (d > g_st.cut_fov_max) g_st.cut_fov_max = d, g_st.cut_fov_at = b.fov;
+        }
         return;
     }
     game::Camera* cam = game::at<game::Camera>(b.addr);
@@ -185,6 +204,10 @@ void extra_frame(const Ctx* c) {
     memcpy(cam->at, at, 12);
     memcpy(cam->up, up, 12);
     cam->roll = roll;
+    if (zoom) {
+        cam->fov = a.fov + (b.fov - a.fov) * 0.5f;  // Camera_Update below rebuilds proj from it (proj dirty)
+        g_st.zoom++;
+    }
     Ctx u = *c;
     u.x[0] = b.addr;
     u.x[1] = 1;

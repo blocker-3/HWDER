@@ -359,3 +359,14 @@ run on the GNOME desktop (Xwayland) ran the attack at 10.3-12.0 ms. The dips to 
 the first session of each new build compiling the attack's pipelines (cold warmup cache, fixed in e7bb3ff).
 Sweeping a 256th of the geometry cache per frame (a 32nd cost ~4% of the GPU thread in this battle): GPU thread
 6.75-6.82 -> 6.57-6.74 ms per frame headless, no visible difference on screen.
+The special attack's dip to 60-70 (Max saw 69 on Steam's counter in an on-screen run, and in his own play):
+the extra frame was skipped as a camera cut whenever the projection changed, and the attack animates the field
+of view every tick (a zoom; up to 0.13 rad per tick at fov 0.88, ~15%), so for ~10 s every in-between frame
+was dropped and the attack ran at 60 Hz. It shows when the attack starts after fighting (`linux_autoplay.py
+--fixture heavy-fight --fight`), rarely when it starts standing still (1-4 skips), which is why the idle tests
+missed it. The gi log now splits cuts into camera jumps, field of view (largest change) and other projection
+state. A field-of-view change of up to 20% per tick with nothing else in the projection changing is blended
+halfway for the extra frame (Camera_Update rebuilds proj from it); larger changes and other projection changes
+are still cuts. Heavy save fighting, two runs each: in-between frames drawn during the attack 106-112 ->
+283-285 per 5 s, attack windows 10.87-13.37 -> 8.51-8.88 ms; busy spot unchanged (120 fps); thumbnails of the
+zoom normal.

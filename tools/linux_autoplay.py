@@ -82,8 +82,10 @@ def environment(args, run):
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
     if args.fixture == "busy-spot":
         flags["HWDER_AUTOPLAY_IDLE"] = "1"  # mid-battle save: stand still so every run sees the same scene
-    if args.fixture == "heavy-fight":  # mid-battle save; X once starts the special mode with the heavy frames
-        flags.update(HWDER_AUTOPLAY_IDLE="1", HWDER_AUTOPLAY_X="1")
+    if args.fixture == "heavy-fight":  # mid-battle save; X once starts the special attack with the heavy frames
+        flags["HWDER_AUTOPLAY_X"] = "1"
+        if not args.fight:  # standing still: the attack mostly keeps its camera; fighting first brings its zoom
+            flags["HWDER_AUTOPLAY_IDLE"] = "1"
     if args.stats:
         flags["HWDER_THREAD_STATS"] = str(args.stats)
     if args.filmstrip:
@@ -187,6 +189,7 @@ def main():
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--env", action="append", default=[], help="extra NAME=VALUE for the game")
     ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
+    ap.add_argument("--fight", action="store_true", help="heavy-fight: run and attack instead of standing still")
     ap.add_argument("--caches-from", help="folder inside the project to copy the pipeline caches from (default: the play build's)")
     args = ap.parse_args()
     if running_games():
