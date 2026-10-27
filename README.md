@@ -81,6 +81,13 @@ its `zmha.bin` on the startup screen or in the menu's Gameplay tab (Choose save 
 layout is used where it is; any other (an emulator export, a backup) is imported into the current save folder
 after asking, with the save it replaces backed up first. Nothing is moved or deleted.
 
+**Mods** (translations, texture or data mods): put each mod in its own folder inside `mods\` beside
+`hwder.exe` (on Linux `~/.local/share/HWDER/mods`). Mods made for the Switch work as they are: the
+folder may hold the game's file tree itself, a `romfs` folder or the `atmosphere/contents/0100AE00096EA000/romfs`
+layout. They are laid over the game's files at startup in name order (the later one wins), and your game
+file is never changed. The menu's **Mods** tab lists them, turns each on or off for the next start and opens
+the folder; a folder whose name starts with `_` is off. More: [mods](docs/mods.md).
+
 ## Reporting a bug
 
 `hwder.log` is written beside `hwder.exe` (or wherever `HWDER_LOG` points) and is rewritten on
@@ -304,6 +311,7 @@ current values. Kinds:
 | `HWDER_AUTOPLAY_CAM` | presence | off | Autoplay: also turn the camera with the right stick (2 s right, 2 s left, 2 s still). |
 | `HWDER_AUTOPLAY_CIRCLE` | presence | off | Autoplay: run in a slow circle (one turn every 8 s) so the view covers every direction. |
 | `HWDER_AUTOPLAY_IDLE` | presence | off | Autoplay: no input once in battle (experiments). |
+| `HWDER_AUTOPLAY_X` | presence | off | Autoplay: press X once, 1 s into the battle (the heavy-fight save: starts the special mode). |
 | `HWDER_AUTOPLAY_PLUS` | presence | off | Test: tap + five times a second for the first 30 s (players who press + through the startup and title screens). |
 | `HWDER_AUTOPLAY_SKIP` | presence | off | Autoplay: the 6 s cutscene-skip cycle for a save that starts with the story cutscenes. |
 | `HWDER_CACHE_PROFILE` | presence | off | Pipeline cache / warmup save: log retrieval, snapshot, validation, serialization and disk timings (cache-save:). Read on every save. |
@@ -324,12 +332,14 @@ current values. Kinds:
 | `HWDER_FS_SELFTEST` | nonzero | off | RomFS: run the image self test after mounting. |
 | `HWDER_FS_TRACE` | nonzero | off | File system service trace. |
 | `HWDER_GAME_INTERP` | integer | unset | 0/1: override the 120 fps (game-drawn in-between frame) setting for tests. |
+| `HWDER_GI_KEEP_30` | presence | off | 120 fps mode: keep drawing extra frames while the game runs at 30 fps (comparison; they are off there by default). |
 | `HWDER_GI_LOG` | presence | off | 120 fps mode: log its timing and skip reasons periodically. |
 | `HWDER_GI_LOG_MS` | integer | unset | Period of the HWDER_GI_LOG reports in ms (strtoull, base 10). |
 | `HWDER_GI_NO_OBJECTS` | presence | off | 120 fps mode: interpolate the camera only, no object/bone blending (comparison). |
 | `HWDER_GI_OBJ_SYNC` | presence | off | 120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison). |
 | `HWDER_GI_OBJ_TRACE` | presence | off | 120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms. |
 | `HWDER_GPU_TRACE` | string | unset | GPU command trace; "2": raw 3D method stream (first 200000); "3": host methods, class binds and submissions. |
+| `HWDER_GPU_TIMING` | number | unset | Renderer: GPU timestamps around every rendering instance; every that many seconds log the GPU time per frame, the idle time between submissions and the costliest passes (gpu-time:). Adds a timestamp per pass. |
 | `HWDER_GUEST_LIBC` | presence | off | Run the game's own (translated) memcpy/memmove/memset/bzero/strlen instead of the host C library's. |
 | `HWDER_HOLD` | presence | off | On a fatal error keep the window up showing the reason instead of exiting. |
 | `HWDER_IPC_BT` | string | unset | Log a backtrace for the IPC command named "<Service>#<command>" (e.g. IFile#4). |
@@ -337,7 +347,9 @@ current values. Kinds:
 | `HWDER_IPC_TRACE` | presence | off | Service call (IPC) trace, including Control requests. |
 | `HWDER_KEYS` | presence | off | prod.keys path (the loader reads it as a wide string; the startup screen only notes that it is set). |
 | `HWDER_LOG` | presence | off | Log file path (set by test launchers); when set the window opens minimized unless HWDER_SHOW is set. |
+| `HWDER_MODS` | string | unset | Mods folder to use instead of the one in the settings or the default (read as a path; see fs/mods.h). |
 | `HWDER_MUTE` | presence | off | No audio output; also: no message boxes, and with HWDER_OFFSCREEN marks an automated run. |
+| `HWDER_NO_MODS` | nonzero | off | Load no mods from the mods folder (the game RomFS is passed through untouched). |
 | `HWDER_NO_PRELAUNCH` | presence | off | Skip the startup screen. |
 | `HWDER_NSP` | presence | off | Game NSP path (read as a wide string by the loader; the startup screen only notes that it is set). |
 | `HWDER_NV_TRACE` | presence | off | nvdrv ioctl trace. |

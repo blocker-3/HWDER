@@ -141,6 +141,18 @@ void load() {
              : k == "update_path" ? g_launch.update_path
                                 : g_launch.save_copy_from) = path;
         }
+        else if (k == "mods_dir" || k == "mods_off") {
+            std::string value = v;  // UTF-8; folder names cannot contain '/', so it separates the off list
+            while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) value.pop_back();
+            if (k == "mods_dir") g_launch.mods_dir = value;
+            else
+                for (size_t i = 0; i < value.size();) {
+                    size_t j = value.find('/', i);
+                    if (j == std::string::npos) j = value.size();
+                    if (j > i) g_launch.mods_off.insert(value.substr(i, j - i));
+                    i = j + 1;
+                }
+        }
         else if (k == "skip_prelaunch") g_launch.skip_prelaunch = atoi(v) != 0;
         else if (k == "game_memory_mb") g_launch.game_memory_mb = std::clamp(atoi(v), 0, 8192);
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
@@ -185,6 +197,12 @@ void save() {
     fprintf(f, "game_memory_mb=%d\n", g_launch.game_memory_mb);
     if (!g_launch.update_path.empty()) fprintf(f, "update_path=%s\n", g_launch.update_path.c_str());
     if (!g_launch.save_copy_from.empty()) fprintf(f, "save_copy_from=%s\n", g_launch.save_copy_from.c_str());
+    if (!g_launch.mods_dir.empty()) fprintf(f, "mods_dir=%s\n", g_launch.mods_dir.c_str());
+    if (!g_launch.mods_off.empty()) {
+        std::string off;
+        for (const std::string& name : g_launch.mods_off) off += (off.empty() ? "" : "/") + name;
+        fprintf(f, "mods_off=%s\n", off.c_str());
+    }
     fclose(f);
 }
 

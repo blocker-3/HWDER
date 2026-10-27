@@ -1,6 +1,7 @@
 #include "gpu/overlay.h"
 #include "gpu/overlay_ui.h"
 
+#include "fs/mods.h"
 #include "fs/save_dir.h"
 #include "gpu/settings.h"
 #include "hid/host_input.h"
@@ -886,6 +887,73 @@ static void tab_gameplay(bool& changed) {
     if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
 }
 
+// Mods (fs/mods.h): what the mods folder holds, which ones this run loaded, and on/off for the next launch.
+static void tab_mods(bool& changed) {
+    // The folder listing is read again every two seconds, so mods dropped in while the menu is open show up.
+    static std::vector<hwfs::mods::Mod> found;
+    static double scanned = -1.0;
+    if (scanned < 0.0 || ImGui::GetTime() - scanned > 2.0) {
+        found = hwfs::mods::scan();
+        scanned = ImGui::GetTime();
+    }
+    const std::vector<hwfs::mods::Mod>& loaded = hwfs::mods::loaded();
+    settings::Launch& l = settings::launch();
+
+    section("Mods folder");
+    ImGui::TextWrapped("Put each mod in its own folder here, holding the game files it changes. Mods made for the "
+                       "Switch work as they are (a romfs folder or the atmosphere/contents/0100AE00096EA000/romfs layout). "
+                       "Mods load in name order and a later one wins where two change the same file. Your game files are "
+                       "never changed.");
+    static std::string folder;
+    folder = hwfs::mods::folder();
+    ImGui::TextDisabled("%s", folder.c_str());
+    if (ImGui::Button("Open mods folder")) {
+        if (hwfs::mods::ensure_folder()) display::open_path(folder);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copy path")) ImGui::SetClipboardText(folder.c_str());
+    if (hwfs::mods::disabled_by_env())
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.25f, 1.0f), "HWDER_NO_MODS is set: no mods load.");
+
+    section("Installed mods");
+    if (found.empty()) {
+        ImGui::TextDisabled("No mods found. Changes take effect when the game starts.");
+        return;
+    }
+    ImGui::TextDisabled("Turning a mod on or off takes effect at the next start.");
+    for (const hwfs::mods::Mod& m : found) {
+        ImGui::PushID(m.name.c_str());
+        size_t index = loaded.size();
+        for (size_t i = 0; i < loaded.size(); i++)
+            if (loaded[i].name == m.name) index = i;
+        const bool running = index < loaded.size();
+        if (m.off_by_name) {
+            ImGui::BeginDisabled();
+            bool on = false;
+            ImGui::Checkbox(m.name.c_str(), &on);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("off: the folder name starts with '%c'", m.name.empty() ? '_' : m.name[0]);
+        } else {
+            bool on = !m.off_in_menu;
+            if (ImGui::Checkbox(m.name.c_str(), &on)) {
+                if (on) l.mods_off.erase(m.name);
+                else l.mods_off.insert(m.name);
+                scanned = -1.0;
+                changed = true;
+            }
+            ImGui::SameLine();
+            const hwfs::mods::Stats st = running ? hwfs::mods::stats(index) : hwfs::mods::Stats{};
+            if (on != running) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.25f, 1.0f), on ? "loads at the next start" : "off at the next start");
+            else if (running && st.built) ImGui::TextDisabled("loaded: %zu files replaced, %zu added", st.replaced, st.added);
+            else if (running) ImGui::TextDisabled("loaded");
+            else ImGui::TextDisabled("off");
+        }
+        if (!m.layout.empty()) ImGui::SetItemTooltip("Files are read from its %s folder", m.layout == "romfs" ? "romfs" : "atmosphere");
+        ImGui::PopID();
+    }
+}
+
 static void tab_tools(bool& changed) {
     section("Files");
     if (ImGui::Button("Open hwder.log")) display::open_path("hwder.log");
@@ -1055,8 +1123,8 @@ static void build_ui(VkExtent2D extent) {
     const float footer = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2.0f + st.SeparatorSize + 2.0f * s;
 
     // LB / RB (and Q / E, Page Up / Page Down) switch tabs, like Dusklight's menu.
-    enum { kDisplay, kGraphics, kAudio, kInput, kGameplay, kTools, kTabs };
-    static const char* names[kTabs] = {"Display", "Graphics", "Audio", "Input", "Gameplay", "Tools"};
+    enum { kDisplay, kGraphics, kAudio, kInput, kGameplay, kMods, kTools, kTabs };
+    static const char* names[kTabs] = {"Display", "Graphics", "Audio", "Input", "Gameplay", "Mods", "Tools"};
     int select = -1;
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1) || ImGui::IsKeyPressed(ImGuiKey_Q) || ImGui::IsKeyPressed(ImGuiKey_PageUp))
         select = (g_tab + kTabs - 1) % kTabs;
@@ -1083,6 +1151,7 @@ static void build_ui(VkExtent2D extent) {
             case kAudio: tab_audio(changed); break;
             case kInput: tab_input(changed); break;
             case kGameplay: tab_gameplay(changed); break;
+            case kMods: tab_mods(changed); break;
             case kTools: tab_tools(changed); break;
             }
             ImGui::PopItemWidth();
