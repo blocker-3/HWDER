@@ -305,7 +305,8 @@ def write_launcher(exe, container=""):
     script = exe.parent / LAUNCHER
     run = "./" + shlex.quote(exe.name)
     if container:
-        run = "distrobox-enter -n " + shlex.quote(container) + " -- " + shlex.quote(str(exe))
+        # Steam's overlay preload is a host library; it is kept out of the container as for every other run there.
+        run = "env -u LD_PRELOAD distrobox-enter -n " + shlex.quote(container) + " -- " + shlex.quote(str(exe))
     text = ("#!/bin/sh\n"
             "# Written by tools/steam_shortcut.py; Steam's \"" + STEAM_NAME + "\" entry starts this.\n"
             "cd \"$(dirname -- \"$0\")\" || exit 1\n"
@@ -319,14 +320,9 @@ def write_launcher(exe, container=""):
 
 
 def installed_game(cache):
-    """The published play executable of a successful first-run build in `cache`, and its recorded inputs."""
-    import first_run
-    cache = Path(cache)
-    exe = cache / "play" / "hwder"
-    marker = first_run.read_json(cache / "last-success.json")
-    if not exe.is_file() or not marker.get("exe_sha256") or first_run.file_hash(exe) != marker["exe_sha256"]:
-        return None
-    return exe
+    """The play executable in `cache` (published by first_run, or put there by hand), or None."""
+    exe = Path(cache) / "play" / "hwder"
+    return exe if exe.is_file() else None
 
 
 def store_game_paths(cache, exe, nsp, keys):

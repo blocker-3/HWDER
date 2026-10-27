@@ -289,7 +289,7 @@ class Folders(unittest.TestCase):
         play = self.home / "play"
         play.mkdir()
         script = steam.write_launcher(play / "hwder", "hwder-dev").read_text()
-        self.assertIn("exec distrobox-enter -n hwder-dev -- ", script)
+        self.assertIn("exec env -u LD_PRELOAD distrobox-enter -n hwder-dev -- ", script)
 
 
 if __name__ == "__main__":
