@@ -1,4 +1,5 @@
-// Where save data lives on the host: <exe dir>\save by default, or the folder picked on the startup screen or in
+// Where save data lives on the host: <exe dir>\save by default on Windows, $XDG_DATA_HOME/HWDER/save (else
+// ~/.local/share/HWDER/save) on Linux, or the folder picked on the startup screen or in
 // the in-game menu (settings::launch().save_dir). Paths here are UTF-8 without the \\?\ prefix.
 #pragma once
 #include <string>
@@ -6,7 +7,7 @@
 
 namespace hwfs {
 
-std::string default_save_dir();  // <exe dir>\save
+std::string default_save_dir();  // <exe dir>\save; Linux: $XDG_DATA_HOME/HWDER/save or ~/.local/share/HWDER/save
 std::string chosen_save_dir();   // the setting, else the default
 // Accept a save root or this game's recognized account leaf; reads file metadata only.
 // On failure root is empty and report explains why the picker must keep the previous setting.

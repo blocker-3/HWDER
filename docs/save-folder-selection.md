@@ -12,7 +12,7 @@ Picking a folder confused players: the title folder, the account folder and the 
 - the pair anywhere else (an emulator export, a backup): after a question, only those two files are imported into the current save folder's account leaf; a save they replace is first backed up beside it (`hwfs::import_save`). On the startup screen this happens at once; in the game at the next start (`save_copy_from` then names the source folder), so the running game cannot save over it.
 - no `zmhasd.bin` next to it, or another file name: refused, nothing changes.
 
-"Use default" switches back to the save folder next to hwder.exe. Saved folder preferences from the old picker keep working (below).
+"Use default" switches back to the default save folder: next to hwder.exe on Windows, `$XDG_DATA_HOME/HWDER/save` (else `~/.local/share/HWDER/save`) on Linux. Saved folder preferences from the old picker keep working (below).
 
 ## Folder preferences (before 2026-10-23)
 

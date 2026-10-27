@@ -6,6 +6,7 @@
 #include "fs/save_dir.h"
 #include "fs/save_folder_selection.h"
 
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <mutex>
@@ -80,7 +81,19 @@ HostPath g_active;  // set when the game first opens a save
 
 }  // namespace
 
-std::string default_save_dir() { return display_path(exe_dir() / "save"); }
+std::string default_save_dir() {
+#ifdef _WIN32
+    return display_path(exe_dir() / "save");
+#else
+    // User data, not next to the exe: Setup builds the Linux exe under ~/.cache, which cleaners may empty.
+    // XDG base directories: a relative XDG_DATA_HOME is invalid and ignored.
+    if (const char* data = std::getenv("XDG_DATA_HOME"); data && data[0] == '/')
+        return display_path(fsys::u8path(data) / "HWDER" / "save");
+    if (const char* home = std::getenv("HOME"); home && home[0])
+        return display_path(fsys::u8path(home) / ".local" / "share" / "HWDER" / "save");
+    return display_path(exe_dir() / "save");
+#endif
+}
 
 std::string chosen_save_dir() {
     const std::string& s = settings::launch().save_dir;

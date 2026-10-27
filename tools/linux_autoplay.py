@@ -61,7 +61,8 @@ def prepare(args, run):
         if (caches / name).exists():
             shutil.copy2(caches / name, run / name)
     settings = (PLAY / "hwder_settings.ini").read_text().splitlines()
-    forced = {"save_dir": "", "save_copy_from": "", "debug_env": "", "skip_prelaunch": "1", "show_fps": "0"}
+    # save_dir: the run's own copy of the fixture, so the default (~/.local/share/HWDER/save) is never used
+    forced = {"save_dir": str(run / "save"), "save_copy_from": "", "debug_env": "", "skip_prelaunch": "1", "show_fps": "0"}
     lines = [l for l in settings if l.partition("=")[0] not in forced] + [f"{k}={v}" for k, v in forced.items()]
     (run / "hwder_settings.ini").write_text("\n".join(lines) + "\n")
     shutil.copytree(fixture, run / "save" / SAVE_LEAF)

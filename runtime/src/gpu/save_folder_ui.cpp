@@ -234,7 +234,11 @@ void opt_save_folder(bool in_game, bool& changed) {
         std::thread(pick_thread, chosen).detach();
     }
     ImGui::EndDisabled();
+#ifdef _WIN32
     help("Where your saves are kept. The default is the save folder next to hwder.exe.\n"
+#else
+    help("Where your saves are kept. The default is ~/.local/share/HWDER/save.\n"
+#endif
          "Choose your save file, zmha.bin (zmhasd.bin must be next to it). A save kept by HWDER, or copied from a\n"
          "console in the same layout, is used where it is; any other (an emulator export, a backup) is imported\n"
          "into the current save folder. Nothing is moved or deleted, and a save an import replaces is backed up first.");
