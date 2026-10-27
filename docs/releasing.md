@@ -29,5 +29,8 @@ a test build. Keep `--work` short on Windows (the toolset nests deep paths).
 It uses only `GITHUB_TOKEN`. Settings > Actions > General > Workflow permissions can stay
 read-only, since the job asks for `contents: write` itself.
 
+A second job on `ubuntu-22.04` builds the Linux tarball (`tools/linux/package_release.py`, see
+`docs/linux-release.md`) and the draft release gets both.
+
 The CI `HWDER Setup.exe` is not byte-identical to a local build, but the
 source and third-party files in the zip are the same as a local package of the same commit.

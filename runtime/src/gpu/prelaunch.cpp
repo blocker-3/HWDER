@@ -23,7 +23,9 @@
 #include <cstring>
 #include "debug_flags.h"
 
-#pragma comment(lib, "ole32.lib")
+#ifdef _WIN32
+#pragma comment(lib, "ole32.lib")  // lld honours these on Linux too (Zig toolchain): Windows only
+#endif
 
 namespace prelaunch {
 

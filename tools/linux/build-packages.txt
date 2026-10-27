@@ -1,0 +1,34 @@
+# Ubuntu 22.04 (glibc 2.35) packages for building the Linux release's prebuilt parts (tools/linux/build_deps.sh):
+# static SDL3, minimal FFmpeg and libcrypto, and the HWDER Setup window. The GitHub workflow and a local
+# podman/distrobox container install the same list. None of these are needed on a player's machine.
+build-essential
+ca-certificates
+curl
+git
+python3
+cmake
+ninja-build
+nasm
+pkg-config
+xz-utils
+file
+libasound2-dev
+libpulse-dev
+libpipewire-0.3-dev
+libdbus-1-dev
+libudev-dev
+libx11-dev
+libxext-dev
+libxrandr-dev
+libxcursor-dev
+libxfixes-dev
+libxi-dev
+libxss-dev
+libxtst-dev
+libxkbcommon-dev
+libwayland-dev
+wayland-protocols
+libdecor-0-dev
+libegl-dev
+libgl-dev
+libgles-dev

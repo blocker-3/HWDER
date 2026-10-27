@@ -1,9 +1,12 @@
 """Unattended autoplay run of the Linux build on the Ally (Bazzite), run on the host, outside the container.
 
-Each run gets its own folder under runs/autoplay/: a hard link of the play build's hwder, copies of its
+Each run gets its own folder under <root>/runs/autoplay/: a hard link of the play build's hwder, copies of its
 settings and pipeline caches, and a copy of a fixed save. The play folder, its save and the fixtures are never
-written. The game runs in the hwder-dev container, by default inside a headless gamescope (an invisible
-virtual display), and is stopped after --seconds. A summary of the frame-time, 120 fps and thread lines of
+written. The game runs natively (the release build needs no container; --container NAME runs an old dev build in
+its distrobox), by default inside a headless gamescope (an invisible virtual display), and is stopped after
+--seconds. Root: --root or $HWDER_TEST_ROOT (fixtures in <root>/runs/autoplay/fixtures); play build: --play, by
+default the installed release (~/.local/share/HWDER/build/play); game and keys: --nsp/--keys, else the play
+settings' nsp_path/keys_path. A summary of the frame-time, 120 fps and thread lines of
 hwder.log goes to summary.txt, and --filmstrip writes a contact sheet of battle thumbnails (filmstrip.png).
 
     python3 hwder/tools/linux_autoplay.py --fixture autoplay --mode 120 --seconds 90 --name base120
@@ -21,9 +24,10 @@ import sys
 import time
 import zlib
 
-ROOT = Path("/var/home/bazzite/Documents/HWDER-linux-native")
-PLAY = ROOT / "cache/local-build/play"
+ROOT = Path(os.environ.get("HWDER_TEST_ROOT", "/var/home/bazzite/Documents/HWDER-test"))
+PLAY = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "HWDER/build/play"
 RUNS = ROOT / "runs/autoplay"
+GAME_FILES = {}  # HWDER_NSP / HWDER_KEYS for the run
 SAVE_LEAF = Path("0100AE00096EA000/48574445525F55530000000000000001")
 FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
     "autoplay": "9038321106d28444dc26864749274c8403ef3222b741008f60349a21dc07bfbe",
@@ -34,7 +38,7 @@ FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
 
 def owned(path):
     path = Path(path)
-    if not path.resolve().is_relative_to(ROOT):
+    if not path.resolve().is_relative_to(ROOT) and not path.resolve().is_relative_to(PLAY):
         raise SystemExit(f"refusing a path outside {ROOT}: {path}")
     return path
 
@@ -78,7 +82,7 @@ def environment(args, run):
     game = {"HOME": str(run / "home"), "TMPDIR": str(run / "tmp"), "XDG_CACHE_HOME": str(run / "home/.cache"),
             "XDG_CONFIG_HOME": str(run / "home/.config"), "XDG_DATA_HOME": str(run / "home/.local/share"),
             "MESA_SHADER_CACHE_DIR": str(RUNS / "mesa-cache")}
-    flags = {"HWDER_NSP": str(ROOT / "Hyrule Warriors Definitive Edition.nsp"), "HWDER_KEYS": str(ROOT / "prod.keys"),
+    flags = {**GAME_FILES,
              "HWDER_LOG": str(run / "hwder.log"), "HWDER_MUTE": "1", "HWDER_NO_PRELAUNCH": "1", "HWDER_NO_DUMP": "1",
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
     if args.fixture == "busy-spot":
@@ -92,6 +96,8 @@ def environment(args, run):
     if args.filmstrip:
         flags.update(HWDER_FILMSTRIP=str(run / "filmstrip"), HWDER_FILMSTRIP_BATTLE="10", HWDER_FILMSTRIP_FOR="3")
         (run / "filmstrip").mkdir()
+    if args.audio or args.record_audio:
+        del flags["HWDER_MUTE"]
     for kv in args.env:
         k, _, v = kv.partition("=")
         flags[k] = v
@@ -121,6 +127,60 @@ def stop(proc, run, deadline):
             return "stopped with SIGTERM"
     os.kill(pid, signal.SIGKILL)
     return "stopped with SIGKILL"
+
+
+class SilentRecorder:
+    """Switches the default output to a temporary null sink (so the game's stream never reaches the speakers) and
+    records that sink's monitor; close() restores the previous default and removes the sink."""
+
+    def __init__(self, path, env):
+        self.env = dict(env, XDG_RUNTIME_DIR=env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+        pactl = lambda *a: subprocess.run(["pactl", *a], env=self.env, capture_output=True, text=True, check=True).stdout.strip()
+        self.pactl = pactl
+        self.previous = pactl("get-default-sink")
+        self.module = pactl("load-module", "module-null-sink", "sink_name=hwder_test",
+                            "sink_properties=device.description=hwder_test")
+        try:
+            pactl("set-default-sink", "hwder_test")
+            time.sleep(1)
+            self.out = open(path, "wb")
+            self.proc = subprocess.Popen(["parec", "-d", "hwder_test.monitor", "--format=s16le", "--rate=48000",
+                                          "--channels=2", "--raw"], stdout=self.out, env=self.env)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        if getattr(self, "proc", None):
+            self.proc.terminate()
+            self.proc.wait(timeout=10)
+            self.out.close()
+            self.proc = None
+        try:
+            self.pactl("set-default-sink", self.previous)
+        finally:
+            subprocess.run(["pactl", "unload-module", self.module], env=self.env, capture_output=True)
+
+
+def audio_gaps(path, seconds=30):
+    """Silent gaps of 1 ms or more between sound in the last `seconds` of a s16le stereo 48 kHz recording. A clean run
+    has none; the buzzing PipeWire output of 2026-10-27 had many."""
+    import array
+    a = array.array("h", Path(path).read_bytes())
+    frames = len(a) // 2
+    start = max(0, frames - seconds * 48000)
+    gaps = longest = run = loud = 0
+    seen_sound = False
+    for i in range(start, frames):
+        if a[2 * i] == 0 and a[2 * i + 1] == 0:
+            run += 1
+            continue
+        if seen_sound and run >= 48:
+            gaps, longest = gaps + 1, max(longest, run)
+        run, seen_sound, loud = 0, True, loud + 1
+    verdict = "OK" if gaps == 0 and loud else "NO SOUND" if not loud else "GAPS (buzzing)"
+    return (f"{verdict}: last {seconds} s {100 * loud / max(1, frames - start):.0f}% with sound, {gaps} silent gaps of 1 ms "
+            f"or more (longest {longest / 48:.1f} ms), {frames / 48000:.0f} s recorded")
 
 
 def summarize(run, args, flags, outcome):
@@ -179,6 +239,7 @@ def contact_sheet(run, columns=8, rows=6):
 
 
 def main():
+    global ROOT, PLAY, RUNS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fixture", choices=sorted(FIXTURES), default="autoplay")
     ap.add_argument("--mode", type=int, choices=(60, 120), default=120)
@@ -192,32 +253,69 @@ def main():
     ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
     ap.add_argument("--fight", action="store_true", help="heavy-fight: run and attack instead of standing still")
     ap.add_argument("--caches-from", help="folder inside the project to copy the pipeline caches from (default: the play build's)")
+    ap.add_argument("--root", type=Path, help="test folder with runs/autoplay/fixtures (default: $HWDER_TEST_ROOT or %s)" % ROOT)
+    ap.add_argument("--play", type=Path, help="play build folder (default: %s)" % PLAY)
+    ap.add_argument("--nsp", help="game .nsp (default: the play settings' nsp_path)")
+    ap.add_argument("--keys", help="prod.keys (default: the play settings' keys_path)")
+    ap.add_argument("--container", help="run inside this distrobox (old dev builds); default: natively")
+    ap.add_argument("--audio", action="store_true", help="keep audio output on (default: HWDER_MUTE); it plays on the default output")
+    ap.add_argument("--record-audio", action="store_true",
+                    help="audio on, but the default output is switched to a temporary silent sink for the run (restored "
+                         "afterwards; nothing reaches the speakers); its recording goes to audio.raw and the summary "
+                         "counts silent gaps inside the sound (the buzzing-audio check)")
     args = ap.parse_args()
+    ROOT = (args.root or ROOT).resolve()
+    PLAY = (args.play or PLAY).resolve()
+    RUNS = ROOT / "runs/autoplay"
+    settings = dict(l.partition("=")[::2] for l in (PLAY / "hwder_settings.ini").read_text().splitlines() if "=" in l)
+    GAME_FILES.update(HWDER_NSP=args.nsp or settings.get("nsp_path", ""), HWDER_KEYS=args.keys or settings.get("keys_path", ""))
+    if not all(Path(v).is_file() for v in GAME_FILES.values()):
+        raise SystemExit("name the game and keys with --nsp/--keys (the play settings have none)")
     if running_games():
         raise SystemExit("hwder is already running; not starting a test")
     run = owned(RUNS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{args.name}")
     prepare(args, run)
     env, game_env, flags = environment(args, run)
-    listed = subprocess.run(["/usr/bin/distrobox", "list", "--no-color"], capture_output=True, text=True, env=env).stdout
-    if not re.search(r"\|\s*hwder-dev\s*\|", listed):
-        raise SystemExit("the hwder-dev container is missing; not creating one")
-    game = (["/usr/bin/distrobox", "enter", "-n", "hwder-dev", "--", "env", "-u", "LD_PRELOAD"]
-            + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")])
+    if args.container:
+        listed = subprocess.run(["/usr/bin/distrobox", "list", "--no-color"], capture_output=True, text=True, env=env).stdout
+        if not re.search(r"\|\s*%s\s*\|" % re.escape(args.container), listed):
+            raise SystemExit(f"the {args.container} container is missing; not creating one")
+        game = (["/usr/bin/distrobox", "enter", "-n", args.container, "--", "env", "-u", "LD_PRELOAD"]
+                + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")])
+    else:
+        game = ["/usr/bin/env", "-u", "LD_PRELOAD"] + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")]
     if not args.visible:
         w, h = args.size.split("x")
         game = ["/usr/bin/gamescope", "--backend", "headless", "-W", w, "-H", h, "-w", w, "-h", h, "-r", "120", "--"] + game
-    with open(run / "console.log", "wb") as console:
-        proc = subprocess.Popen(game, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                start_new_session=True)
-        outcome = stop(proc, run, time.time() + args.seconds)
-        try:
-            proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=10)
+    recorder = SilentRecorder(run / "audio.raw", env) if args.record_audio else None
+    try:
+        with open(run / "console.log", "wb") as console:
+            proc = subprocess.Popen(game, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+            outcome = stop(proc, run, time.time() + args.seconds)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+    finally:
+        if recorder:
+            recorder.close()
     if sha256(run / "save" / SAVE_LEAF / "zmha.bin") != FIXTURES[args.fixture]:
         outcome += "; the run wrote its save copy"
     summarize(run, args, flags, outcome)
+    if recorder:
+        # The recording alone missed the 2026-10-27 buzz (a null sink keeps its own timing); the game's own counters
+        # are the reliable part: any dry run or dropped mixer audio fails the check.
+        log = (run / "hwder.log").read_text(errors="replace") if (run / "hwder.log").exists() else ""
+        dry = sum(int(m) for m in re.findall(r"output ran dry (\d+) times", log))
+        dropped = sum(int(m) for m in re.findall(r"mixer chunks dropped (\d+) ms", log))
+        line = audio_gaps(run / "audio.raw") + f"; game log: output ran dry {dry} times, mixer audio dropped {dropped} ms"
+        if dry or dropped:
+            line = "FAIL (" + ("ran dry" if dry else "dropped audio") + "): " + line
+        with open(run / "summary.txt", "a") as f:
+            f.write("\naudio: " + line + "\n")
+        print("audio:", line)
     if args.filmstrip:
         contact_sheet(run)
     os.remove(run / "hwder")  # the hard link only; the play build is unchanged

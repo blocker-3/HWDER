@@ -1,6 +1,7 @@
 name: Release setup zip
 
-# Builds the player setup zip (source + the code-free HWDER Setup.exe) on a clean runner.
+# Builds the player setup zip (source + the code-free HWDER Setup.exe) and the Linux release tarball
+# (source + prebuilt SDL3/FFmpeg/libcrypto + the HWDER Setup window) on clean runners.
 # No game files, keys or secrets: Prepare builds the game on the player's own PC.
 # A v* tag push attaches the zip to a DRAFT release; publishing it stays a manual step.
 # Run it by hand (Actions > Release setup zip > Run workflow) to get a test zip as a
@@ -47,9 +48,34 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  package-linux:
+    # Ubuntu 22.04 = glibc 2.35, the oldest system the Linux release supports (SteamOS 3 and Bazzite are newer).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: true
+      - name: Build packages
+        run: |
+          sudo apt-get update -qq
+          grep -v '^#' tools/linux/build-packages.txt | xargs sudo apt-get install -y -qq --no-install-recommends
+      - name: Build Linux tarball
+        run: |
+          extra=""
+          if [ "${{ github.ref_type }}" != "tag" ]; then extra="--allow-untagged"; fi
+          python3 tools/linux/package_release.py --work "$RUNNER_TEMP/linux-release" --out dist $extra
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hwder-linux
+          path: dist/*
+          if-no-files-found: error
+
   draft-release:
     if: github.ref_type == 'tag'
-    needs: package
+    needs: [package, package-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -58,6 +84,10 @@ jobs:
         with:
           name: hwder-setup
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hwder-linux
+          path: dist
       - name: Attach to a draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,8 +95,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.zip dist/*.sha256
+            gh release upload "$TAG" dist/*.zip dist/*.tar.gz dist/*.sha256
           else
-            gh release create "$TAG" dist/*.zip dist/*.sha256 --draft --verify-tag \
+            gh release create "$TAG" dist/*.zip dist/*.tar.gz dist/*.sha256 --draft --verify-tag \
               --title "HWDER $TAG" --notes "Draft built by GitHub Actions. SHA-256: $(cat dist/*.sha256)"
           fi

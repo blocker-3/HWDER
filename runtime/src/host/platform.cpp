@@ -83,6 +83,9 @@ bool contains(void* address, std::size_t size) {
 // Write watch: write-watched reservations are registered with one userfaultfd in async write-protect mode, so
 // a write just clears the page's protection (no fault reaches us) and PAGEMAP_SCAN reports and re-protects
 // written pages in one call. Needs kernel 6.7+; anything missing leaves the texture cache's hash fallback.
+#if defined(HWDER_REQUIRE_WRITE_WATCH) && !(defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC) && defined(UFFD_USER_MODE_ONLY))
+#error "Release toolchain's Linux headers lack PAGEMAP_SCAN/userfaultfd write protection (need 6.7+ headers)"
+#endif
 #if defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC) && defined(UFFD_USER_MODE_ONLY)
 #define HWDER_WRITE_WATCH 1
 int g_uffd = -2;  // -2 not tried, -1 unavailable

@@ -106,9 +106,29 @@ if(HWDER_GAME_ONLY)
     return()
 endif()
 
+# ---------------------------------------------------------------- Linux release: prebuilt static libraries
+# The player-ready Linux release links SDL3, libavcodec/libavutil (H.264 only) and libcrypto from the archives that
+# tools/linux/build_deps.sh made on glibc 2.35, so hwder needs only glibc and the Vulkan loader on the system.
+set(HWDER_LINUX_DEPS "" CACHE PATH "Linux release: prebuilt static SDL3/FFmpeg/libcrypto (tools/linux/build_deps.sh)")
+if(HWDER_LINUX_DEPS)
+    if(WIN32)
+        message(FATAL_ERROR "HWDER_LINUX_DEPS is for Linux builds")
+    endif()
+    find_package(SDL3 CONFIG REQUIRED PATHS ${HWDER_LINUX_DEPS} NO_DEFAULT_PATH)
+    foreach(lib crypto avcodec avutil)
+        if(NOT EXISTS ${HWDER_LINUX_DEPS}/lib/lib${lib}.a)
+            message(FATAL_ERROR "Missing ${HWDER_LINUX_DEPS}/lib/lib${lib}.a")
+        endif()
+        add_library(hwder_dep_${lib} STATIC IMPORTED)
+        set_target_properties(hwder_dep_${lib} PROPERTIES IMPORTED_LOCATION ${HWDER_LINUX_DEPS}/lib/lib${lib}.a
+            INTERFACE_INCLUDE_DIRECTORIES ${HWDER_LINUX_DEPS}/include)
+    endforeach()
+endif()
+
 # ---------------------------------------------------------------- SDL3: host gamepads only
 # Static, with only what controllers need (joystick/gamepad, haptic, sensors, HIDAPI drivers for
 # DualSense / DualShock 4 / Switch Pro). No window, renderer or audio: HWDER has its own.
+if(NOT HWDER_LINUX_DEPS)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -128,6 +148,7 @@ foreach(sub JOYSTICK HAPTIC HIDAPI SENSOR)
     set(SDL_${sub} ON CACHE BOOL "" FORCE)
 endforeach()
 add_subdirectory(${TP}/SDL ${CMAKE_BINARY_DIR}/SDL EXCLUDE_FROM_ALL)
+endif()
 
 # ---------------------------------------------------------------- runtime: HOS kernel, services, GPU
 # Explicit lists: the checkout path may contain [ ] which CMake globs treat as patterns.
@@ -183,6 +204,13 @@ if(WIN32)
 endif()
 if(MINGW)
     target_link_libraries(hwder PRIVATE mfplat mfuuid wmcodecdspuuid ole32 shell32 uuid dwmapi)
+elseif(HWDER_LINUX_DEPS)
+    find_package(Threads REQUIRED)
+    target_link_libraries(hwder PRIVATE Threads::Threads hwder_dep_avcodec hwder_dep_avutil hwder_dep_crypto m ${CMAKE_DL_LIBS})
+    # -rdynamic exports symbols for named backtraces; build_deps.sh builds these libraries with hidden visibility so
+    # Vulkan layers loaded into the game (with their own libcrypto, SDL or FFmpeg) never bind to ours.
+    # The release must keep the texture write watch (kernel 6.7 PAGEMAP_SCAN): fail the build, never drop it silently.
+    target_compile_definitions(hwder PRIVATE HWDER_REQUIRE_WRITE_WATCH)
 elseif(NOT WIN32)
     find_package(Threads REQUIRED)
     find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)

@@ -50,11 +50,20 @@ struct SDL_Window;
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetDepthBiasEnable) X(vkCmdPushDescriptorSetKHR)                   \
     X(vkCmdPushConstants) X(vkCmdResolveImage)                                                                    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets)       X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateBufferView) X(vkDestroyBufferView)               X(vkFlushMappedMemoryRanges) X(vkInvalidateMappedMemoryRanges) X(vkDestroyPipelineCache) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
 
-#define HW_VK_DECLARE(fn) extern PFN_##fn fn;
+// The pointers carry Vulkan's own function names. On Linux the game is linked with -rdynamic (named backtraces), so
+// they must stay out of its dynamic symbol table: otherwise Vulkan layers loaded into the game (gamescope's WSI
+// layer, MangoHud, the Steam overlay) bind their calls of e.g. vkEnumerateInstanceExtensionProperties to these
+// variables instead of the loader's functions and jump into data.
+#ifdef _WIN32
+#define HW_VK_HIDDEN
+#else
+#define HW_VK_HIDDEN __attribute__((visibility("hidden")))
+#endif
+#define HW_VK_DECLARE(fn) extern HW_VK_HIDDEN PFN_##fn fn;
 HW_VK_GLOBAL_FUNCS(HW_VK_DECLARE)
 HW_VK_INSTANCE_FUNCS(HW_VK_DECLARE)
 HW_VK_DEVICE_FUNCS(HW_VK_DECLARE)
-extern PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
+extern HW_VK_HIDDEN PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 
 bool hw_vk_load_global();
 void hw_vk_load_instance(VkInstance inst);
