@@ -584,7 +584,15 @@ def main(argv=None):
         say(f"no finished build in {cache}. Run play-local.sh (tools/first_run.py) first.")
         return 1
     inputs = first_run.read_json(cache / "setup-inputs.json")
-    nsp, keys = a.nsp or inputs.get("nsp"), a.keys or inputs.get("keys")
+    current = {}
+    try:
+        for line in (exe.parent / "hwder_settings.ini").read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            current[key] = value
+    except OSError:
+        pass
+    nsp = a.nsp or inputs.get("nsp") or current.get("nsp_path")
+    keys = a.keys or inputs.get("keys") or current.get("keys_path")
     if not nsp or not keys or not Path(nsp).is_file() or not Path(keys).is_file():
         say("Steam starts the game without --nsp/--keys, so name them once: --nsp <game.nsp> --keys <prod.keys> "
             "(or set HWDER_NSP and HWDER_KEYS).")
