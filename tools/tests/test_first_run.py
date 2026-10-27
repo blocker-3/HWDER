@@ -291,6 +291,40 @@ class Fixture(unittest.TestCase):
         self.assertEqual(save.read_bytes(), b"precious save")
         self.assertEqual((exe.parent / "pipeline_cache.bin").read_bytes(), b"private cache")
 
+    def test_prune_keeps_only_the_published_build_and_play_state(self):
+        exe = self.prepare()
+        save = exe.parent / "save" / "player.bin"
+        save.parent.mkdir()
+        save.write_bytes(b"precious save")
+        (self.root / "runtime/source.cpp").write_text("new runtime")
+        exe = setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain, self.run_stage,
+                            lambda nsp, keys: self.modules, prune=True)
+        builds = [p.name for p in (self.cache / "builds").iterdir()]
+        self.assertEqual(len(builds), 1)
+        marker = setup.read_json(self.cache / "last-success.json")
+        self.assertTrue(builds[0] == marker["key"][:24])
+        self.assertEqual(len(list((self.cache / "generated").iterdir())), 1)
+        self.assertEqual(len(list((self.cache / "exefs").iterdir())), 1)
+        self.assertEqual(save.read_bytes(), b"precious save")
+        self.assertTrue(exe.is_file())
+        # A second run with nothing changed keeps everything it uses.
+        self.calls.clear()
+        setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain, self.run_stage,
+                      lambda nsp, keys: self.modules, prune=True)
+        self.assertEqual(self.calls, [])
+        self.assertEqual([p.name for p in (self.cache / "builds").iterdir()], builds)
+
+    def test_prune_removes_interrupted_and_damaged_entries(self):
+        self.prepare()
+        for category in ("builds", "generated", "exefs"):
+            (self.cache / category / "deadbeef.partial-1234").mkdir(parents=True)
+            (self.cache / category / "deadbeef.partial-1234" / "x").write_bytes(b"12345")
+        before = {c: len(list((self.cache / c).iterdir())) for c in ("builds", "generated", "exefs")}
+        self.assertTrue(all(n == 2 for n in before.values()))
+        setup.prepare(self.root, self.cache, self.nsp, self.keys, 2, self.toolchain, self.run_stage,
+                      lambda nsp, keys: self.modules, prune=True)
+        self.assertTrue(all(len(list((self.cache / c).iterdir())) == 1 for c in before))
+
     def test_generator_game_and_toolchain_changes_invalidate(self):
         self.prepare()
         (self.root / "tools/recomp/gen_main.py").write_text("changed generator")

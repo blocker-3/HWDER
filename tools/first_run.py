@@ -179,14 +179,27 @@ def check_prerequisites(root, managed=None):
     else:
         versions["target_platform"] = "linux-x86_64"
         tools["compiler_cxx"] = cxx
-        pkg_config = shutil.which("pkg-config", path=env["PATH"])
-        if not pkg_config:
+        deps = env.get("HWDER_LINUX_DEPS")
+        pkg_config = None if deps else shutil.which("pkg-config", path=env["PATH"])
+        if deps:
+            # Linux release: prebuilt static SDL3/FFmpeg/libcrypto (tools/linux/build_deps.sh) instead of system packages.
+            info = Path(deps) / "BUILD-INFO.json"
+            missing = [n for n in ("libSDL3.a", "libavcodec.a", "libavutil.a", "libcrypto.a")
+                       if not (Path(deps) / "lib" / n).is_file()]
+            if not info.is_file() or missing:
+                raise ValueError("The release's prebuilt libraries are incomplete (linux-deps); unpack the release again")
+            versions["linux_deps"] = {"path": str(Path(deps).resolve()), "build_info": file_hash(info),
+                                      "libraries": {n: file_hash(Path(deps) / "lib" / n) for n in
+                                                    ("libSDL3.a", "libavcodec.a", "libavutil.a", "libcrypto.a")}}
+            versions["archiver"] = {n: file_hash(env[n]) for n in ("HWDER_AR", "HWDER_RANLIB") if env.get(n)}
+        elif not pkg_config:
             raise ValueError("Linux runtime development prerequisites require pkg-config")
-        for package in ("openssl >= 3.0", "libavcodec", "libavutil"):
-            result = subprocess.run([pkg_config, "--modversion", package], env=env, capture_output=True, text=True)
-            if result.returncode:
-                raise ValueError(f"Missing Linux development dependency: {package}")
-            versions[package] = result.stdout.strip()
+        else:
+            for package in ("openssl >= 3.0", "libavcodec", "libavutil"):
+                result = subprocess.run([pkg_config, "--modversion", package], env=env, capture_output=True, text=True)
+                if result.returncode:
+                    raise ValueError(f"Missing Linux development dependency: {package}")
+                versions[package] = result.stdout.strip()
     for name, path in tools.items():
         r = subprocess.run([path, "--version"], env=env, capture_output=True, text=True, check=True)
         versions[name] = {"path": path, "version": r.stdout.strip()}
@@ -264,7 +277,7 @@ def unpack_update(cache, update, keys):
 
 
 def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None,
-            update=None):
+            update=None, prune=False):
     """Injectable stage boundary permits meaningful synthetic orchestration/failure tests."""
     from local_game import read_program, supported_profile, profile as profile_entry
     root, cache, nsp, keys = map(Path, (root, cache, nsp, keys))
@@ -421,8 +434,33 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
                 previous.unlink(missing_ok=True)
     else:
         atomic_json(cache / "last-success.json", marker)
+    if prune:
+        keep = {"exefs": exefs.parent.name, "generated": generated.parent.name, "builds": bdir.name,
+                "update": update_dir.parent.name if update_dir else None}
+        freed = prune_cache(cache, keep)
+        if freed:
+            log(f"removed older builds from the cache ({freed / 1e9:.1f} GB)")
     log(f"ready: {target}")
     return target
+
+
+def prune_cache(cache, keep):
+    """Keeps only the stages of the build just published (and its unpacked update); older builds, interrupted
+    attempts and damaged entries go. The play folder (game, settings, saves, caches) is never touched.
+    Returns the bytes freed."""
+    freed = 0
+    for category, name in keep.items():
+        folder = Path(cache) / category
+        if not folder.is_dir():
+            continue
+        for entry in folder.iterdir():
+            if entry.name == name or not entry.is_dir() or entry.is_symlink():
+                continue
+            size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file() and not f.is_symlink())
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                freed += size
+    return freed
 
 
 def record_update_path(exe, update_dir):
@@ -475,6 +513,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, min(8, os.cpu_count() or 1)))
     ap.add_argument("--check", action="store_true", help="check installed prerequisites only")
     ap.add_argument("--launch", action="store_true", help="launch only after successful verification/build")
+    ap.add_argument("--keep-old-builds", action="store_true",
+                    help="keep earlier builds in the cache (by default only the one just published is kept)")
     steam = ap.add_mutually_exclusive_group()
     steam.add_argument("--add-to-steam", action="store_true",
                        help="Linux: add the game to Steam without asking (closes and restarts a running Steam)")
@@ -490,7 +530,7 @@ def main():
             raise ValueError("Supply --nsp and --keys, or set HWDER_NSP and HWDER_KEYS")
         nsp, keys, cache = Path(a.nsp).resolve(), Path(a.keys).resolve(), a.cache.resolve()
         with setup_lock(cache):
-            exe = prepare(ROOT, cache, nsp, keys, a.jobs, toolchain,
+            exe = prepare(ROOT, cache, nsp, keys, a.jobs, toolchain, prune=not a.keep_old_builds,
                           **({"update": a.update.resolve()} if a.update else {}))
             record_update_path(exe, read_json(cache / "last-success.json").get("update_dir"))
             if os.name != "nt" and not a.no_steam:

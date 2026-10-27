@@ -137,6 +137,11 @@ def build(a):
         import managed_tools
         args += [f"-DPython3_EXECUTABLE={managed_tools.paths(managed)['python']}",
                  "-DPython3_FIND_REGISTRY=NEVER"]
+    if sys.platform.startswith("linux") and not (a.synthetic_tests or a.host_tests):
+        # Linux release toolchain (tools/linux_setup.py): Zig's archiver and the prebuilt static libraries.
+        # Empty values clear what an earlier configure of the same build directory set.
+        args += [f"-DHWDER_LINUX_DEPS={env.get('HWDER_LINUX_DEPS', '')}"]
+        args += [f"-DCMAKE_{name}={env[f'HWDER_{name}']}" for name in ("AR", "RANLIB") if env.get(f"HWDER_{name}")]
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
