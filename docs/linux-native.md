@@ -18,7 +18,7 @@ python3 tools/build.py --generated-dir build/link-check-generated --build-dir bu
 - Crash handling: no minidumps. Linux writes a crash report into hwder.log (signal, faulting address, host thread, backtrace with the recompiled guest function names) and leaves core dumps to the system.
 - Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
 - Error dialogs: the no-game-data, wrong-game-version, save-copy and missing-Vulkan dialogs use SDL message boxes on Linux.
-- The native Setup window, setup kits and Steam shortcut tooling are Windows-only; Linux uses `tools/first_run.py` / `play-local.sh`.
+- The native Setup window and setup kits are Windows-only; Linux uses `tools/first_run.py` / `play-local.sh`. Add to Steam has a Linux equivalent (see [Add to Steam](#add-to-steam-linux)).
 - XInput fallback is Windows-only; SDL handles every pad on Linux.
 - The save picker's "choose zmha.bin" file mode and the 60 Hz monitor switch need checking on the device.
 
@@ -93,6 +93,22 @@ bash play-local.sh --nsp "/private/path/own-game.nsp" --keys "/private/path/prod
 ~~~
 
 These are source-candidate commands, not evidence of a successful Linux build. Setup validates the supported game version, extracts local ExeFS, generates C and compiles the complete runtime. Interrupted-build recovery, input quarantine, cache hashing and last-success rollback apply. Default private cache: $XDG_CACHE_HOME/hwder/local-build-v1, falling back to $HOME/.cache/hwder/local-build-v1. Its stable play directory contains the native hwder ELF executable, settings, saves and private caches. New cache roots are private. Generated outputs are never distributable artifacts. Use --cache only for a private user-owned directory. Identity includes target platform, source, compiler and dependency versions. ELF64/little-endian/x86-64 identity and execute mode are checked; publication preserves execute permissions.
+
+## Add to Steam (Linux)
+
+After a successful build, `tools/first_run.py` (and so `play-local.sh`) asks once on a terminal whether to add the game to Steam as a non-Steam game, so it starts from the library and from Game Mode. `--add-to-steam` adds it without asking, `--no-steam` skips the step; a "no" is remembered in the cache (`steam-offer.json`). Later, or again after moving the cache:
+
+~~~sh
+python3 tools/steam_shortcut.py --add [--nsp ... --keys ...] [--yes] [--no-artwork] [--steamgriddb-key KEY]
+~~~
+
+- It writes the same entry as the Windows Setup (`tools/steam_shortcut.py` is a port of `tools/setup_ui/steam_shortcut.h`): name "Hyrule Warriors: Definitive Edition", the same appid formula, an earlier entry for the same launcher is updated instead of duplicated, every other entry is kept byte for byte. The previous `shortcuts.vdf` is kept as `shortcuts.vdf.bak-<timestamp>`.
+- The entry starts `<cache>/play/hwder-steam.sh`, a small script written next to the game that runs `./hwder` from its own folder (where `hwder_settings.ini` is read). When the build ran inside a distrobox (`CONTAINER_ID` set), the script runs the game with `distrobox-enter -n <container> --`, because the build only finds its shared libraries in that container.
+- Steam starts the game without `HWDER_NSP`/`HWDER_KEYS`, so the step stores the game and keys paths in `play/hwder_settings.ini` (`nsp_path`, `keys_path`, as the Windows Setup does). The keys file itself is not copied.
+- Steam folders checked: `~/.local/share/Steam`, `~/.steam/steam`, the Flatpak (`~/.var/app/com.valvesoftware.Steam/...`); `--steam-dir` picks one. Account: the most recent login in `config/loginusers.vdf`, else the only `userdata/<id>`; `--account` overrides.
+- Artwork, as on Windows: the player's own SteamGridDB key if given (kept in `<cache>/steamgriddb-key.txt`), then Nintendo's store key art for anything missing. Existing pictures in `config/grid` are kept.
+- **Steam restarts.** Steam keeps its game list in memory and overwrites `shortcuts.vdf` when it exits, so a running Steam (found by scanning `/proc` for a `steam` process) has to close first. The step explains this and asks (`--yes`/`--add-to-steam`: without asking), runs `steam -shutdown`, waits up to 30 s, writes the file and starts Steam again. In Bazzite/SteamOS **Game Mode**, Steam restarts by itself; HWDER appears in the library once it is back.
+- Not yet tested on a real device (2026-10-27): the Steam restart and Game Mode, the distrobox launcher started from Steam (environment Steam passes, overlay), and the Flatpak Steam (its sandbox cannot run `distrobox-enter`).
 
 ## On-device acceptance
 
