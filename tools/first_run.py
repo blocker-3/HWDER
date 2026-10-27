@@ -425,10 +425,35 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
     return target
 
 
+def record_update_path(exe, update_dir):
+    """The game reads the prepared update from update_path in its settings (on Windows Setup writes it in
+    setup_bridge.installed_paths). An empty value switches a previously prepared update off. Other bytes stay."""
+    settings = Path(exe).parent / "hwder_settings.ini"
+    line = ("update_path=" + (str(Path(update_dir).resolve()) if update_dir else "")).encode("utf-8")
+    # A new file carries the game's first-run defaults (without face_labels the game keeps buttons by position).
+    original = settings.read_bytes() if settings.exists() else b"version=2\nface_labels=1\n"
+    lines = original.splitlines(keepends=True)
+    found = False
+    for i, old in enumerate(lines):
+        if old.split(b"=", 1)[0] == b"update_path":
+            lines[i] = b"" if found else line + (b"\r\n" if old.endswith(b"\r\n") else b"\n")
+            found = True
+    if not found:
+        if lines and not lines[-1].endswith(b"\n"):
+            lines[-1] += b"\n"
+        lines.append(line + b"\n")
+    result = b"".join(lines)
+    if result != original:
+        temp = settings.with_name(settings.name + ".new")
+        temp.write_bytes(result)
+        os.replace(temp, settings)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--nsp", default=os.environ.get("HWDER_NSP"))
     ap.add_argument("--keys", default=os.environ.get("HWDER_KEYS"))
+    ap.add_argument("--update", type=Path, help="your own game update (.nsp or .nsz, 1.0.1); without it the base game is built")
     ap.add_argument("--cache", type=Path, default=default_cache())
     ap.add_argument("--jobs", type=int, default=max(1, min(8, os.cpu_count() or 1)))
     ap.add_argument("--check", action="store_true", help="check installed prerequisites only")
@@ -444,7 +469,9 @@ def main():
             raise ValueError("Supply --nsp and --keys, or set HWDER_NSP and HWDER_KEYS")
         nsp, keys, cache = Path(a.nsp).resolve(), Path(a.keys).resolve(), a.cache.resolve()
         with setup_lock(cache):
-            exe = prepare(ROOT, cache, nsp, keys, a.jobs, toolchain)
+            exe = prepare(ROOT, cache, nsp, keys, a.jobs, toolchain,
+                          **({"update": a.update.resolve()} if a.update else {}))
+            record_update_path(exe, read_json(cache / "last-success.json").get("update_dir"))
             if a.launch:
                 env = dict(os.environ, HWDER_NSP=str(nsp), HWDER_KEYS=str(keys))
                 env.pop("HWDER_EXEFS", None)

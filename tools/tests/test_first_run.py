@@ -708,6 +708,23 @@ class Parsers(unittest.TestCase):
                 local_game.program_exefs(SimpleNamespace(sections=sections))
 
 
+class UpdatePath(unittest.TestCase):
+    def test_update_path_written_replaced_and_switched_off_keeping_other_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe, ini = Path(d) / "hwder", Path(d) / "hwder_settings.ini"
+            update = Path(d) / "update"
+            setup.record_update_path(exe, update)  # new file: first-run defaults plus the path
+            self.assertEqual(ini.read_bytes(), b"version=2\nface_labels=1\nupdate_path=" + str(update.resolve()).encode() + b"\n")
+            ini.write_bytes(b"save_dir=/saves\r\nupdate_path=/old\r\nupdate_path=/dup\r\nfps120=1")
+            setup.record_update_path(exe, update)
+            self.assertEqual(ini.read_bytes(), b"save_dir=/saves\r\nupdate_path=" + str(update.resolve()).encode() + b"\r\nfps120=1")
+            setup.record_update_path(exe, None)  # base game build: the update is switched off
+            self.assertEqual(ini.read_bytes(), b"save_dir=/saves\r\nupdate_path=\r\nfps120=1")
+            ini.write_bytes(b"save_dir=/saves")
+            setup.record_update_path(exe, None)
+            self.assertEqual(ini.read_bytes(), b"save_dir=/saves\nupdate_path=\n")
+
+
 class Packaging(unittest.TestCase):
     def test_source_kit_omits_private_artifacts_even_if_present(self):
         with temporary_directory() as tmp:
