@@ -1,2 +1,3 @@
 *.bat text eol=crlf
 *.sh text eol=lf
+tools/linux/hwder-setup text eol=lf

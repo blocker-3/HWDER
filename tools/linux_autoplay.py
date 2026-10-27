@@ -1,9 +1,12 @@
 """Unattended autoplay run of the Linux build on the Ally (Bazzite), run on the host, outside the container.
 
-Each run gets its own folder under runs/autoplay/: a hard link of the play build's hwder, copies of its
+Each run gets its own folder under <root>/runs/autoplay/: a hard link of the play build's hwder, copies of its
 settings and pipeline caches, and a copy of a fixed save. The play folder, its save and the fixtures are never
-written. The game runs in the hwder-dev container, by default inside a headless gamescope (an invisible
-virtual display), and is stopped after --seconds. A summary of the frame-time, 120 fps and thread lines of
+written. The game runs natively (the release build needs no container; --container NAME runs an old dev build in
+its distrobox), by default inside a headless gamescope (an invisible virtual display), and is stopped after
+--seconds. Root: --root or $HWDER_TEST_ROOT (fixtures in <root>/runs/autoplay/fixtures); play build: --play, by
+default the installed release (~/.local/share/HWDER/build/play); game and keys: --nsp/--keys, else the play
+settings' nsp_path/keys_path. A summary of the frame-time, 120 fps and thread lines of
 hwder.log goes to summary.txt, and --filmstrip writes a contact sheet of battle thumbnails (filmstrip.png).
 
     python3 hwder/tools/linux_autoplay.py --fixture autoplay --mode 120 --seconds 90 --name base120
@@ -21,9 +24,10 @@ import sys
 import time
 import zlib
 
-ROOT = Path("/var/home/bazzite/Documents/HWDER-linux-native")
-PLAY = ROOT / "cache/local-build/play"
+ROOT = Path(os.environ.get("HWDER_TEST_ROOT", "/var/home/bazzite/Documents/HWDER-test"))
+PLAY = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "HWDER/build/play"
 RUNS = ROOT / "runs/autoplay"
+GAME_FILES = {}  # HWDER_NSP / HWDER_KEYS for the run
 SAVE_LEAF = Path("0100AE00096EA000/48574445525F55530000000000000001")
 FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
     "autoplay": "9038321106d28444dc26864749274c8403ef3222b741008f60349a21dc07bfbe",
@@ -34,7 +38,7 @@ FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
 
 def owned(path):
     path = Path(path)
-    if not path.resolve().is_relative_to(ROOT):
+    if not path.resolve().is_relative_to(ROOT) and not path.resolve().is_relative_to(PLAY):
         raise SystemExit(f"refusing a path outside {ROOT}: {path}")
     return path
 
@@ -78,7 +82,7 @@ def environment(args, run):
     game = {"HOME": str(run / "home"), "TMPDIR": str(run / "tmp"), "XDG_CACHE_HOME": str(run / "home/.cache"),
             "XDG_CONFIG_HOME": str(run / "home/.config"), "XDG_DATA_HOME": str(run / "home/.local/share"),
             "MESA_SHADER_CACHE_DIR": str(RUNS / "mesa-cache")}
-    flags = {"HWDER_NSP": str(ROOT / "Hyrule Warriors Definitive Edition.nsp"), "HWDER_KEYS": str(ROOT / "prod.keys"),
+    flags = {**GAME_FILES,
              "HWDER_LOG": str(run / "hwder.log"), "HWDER_MUTE": "1", "HWDER_NO_PRELAUNCH": "1", "HWDER_NO_DUMP": "1",
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
     if args.fixture == "busy-spot":
@@ -179,6 +183,7 @@ def contact_sheet(run, columns=8, rows=6):
 
 
 def main():
+    global ROOT, PLAY, RUNS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fixture", choices=sorted(FIXTURES), default="autoplay")
     ap.add_argument("--mode", type=int, choices=(60, 120), default=120)
@@ -192,17 +197,32 @@ def main():
     ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
     ap.add_argument("--fight", action="store_true", help="heavy-fight: run and attack instead of standing still")
     ap.add_argument("--caches-from", help="folder inside the project to copy the pipeline caches from (default: the play build's)")
+    ap.add_argument("--root", type=Path, help="test folder with runs/autoplay/fixtures (default: $HWDER_TEST_ROOT or %s)" % ROOT)
+    ap.add_argument("--play", type=Path, help="play build folder (default: %s)" % PLAY)
+    ap.add_argument("--nsp", help="game .nsp (default: the play settings' nsp_path)")
+    ap.add_argument("--keys", help="prod.keys (default: the play settings' keys_path)")
+    ap.add_argument("--container", help="run inside this distrobox (old dev builds); default: natively")
     args = ap.parse_args()
+    ROOT = (args.root or ROOT).resolve()
+    PLAY = (args.play or PLAY).resolve()
+    RUNS = ROOT / "runs/autoplay"
+    settings = dict(l.partition("=")[::2] for l in (PLAY / "hwder_settings.ini").read_text().splitlines() if "=" in l)
+    GAME_FILES.update(HWDER_NSP=args.nsp or settings.get("nsp_path", ""), HWDER_KEYS=args.keys or settings.get("keys_path", ""))
+    if not all(Path(v).is_file() for v in GAME_FILES.values()):
+        raise SystemExit("name the game and keys with --nsp/--keys (the play settings have none)")
     if running_games():
         raise SystemExit("hwder is already running; not starting a test")
     run = owned(RUNS / f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{args.name}")
     prepare(args, run)
     env, game_env, flags = environment(args, run)
-    listed = subprocess.run(["/usr/bin/distrobox", "list", "--no-color"], capture_output=True, text=True, env=env).stdout
-    if not re.search(r"\|\s*hwder-dev\s*\|", listed):
-        raise SystemExit("the hwder-dev container is missing; not creating one")
-    game = (["/usr/bin/distrobox", "enter", "-n", "hwder-dev", "--", "env", "-u", "LD_PRELOAD"]
-            + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")])
+    if args.container:
+        listed = subprocess.run(["/usr/bin/distrobox", "list", "--no-color"], capture_output=True, text=True, env=env).stdout
+        if not re.search(r"\|\s*%s\s*\|" % re.escape(args.container), listed):
+            raise SystemExit(f"the {args.container} container is missing; not creating one")
+        game = (["/usr/bin/distrobox", "enter", "-n", args.container, "--", "env", "-u", "LD_PRELOAD"]
+                + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")])
+    else:
+        game = ["/usr/bin/env", "-u", "LD_PRELOAD"] + [f"{k}={v}" for k, v in game_env.items()] + [str(run / "hwder")]
     if not args.visible:
         w, h = args.size.split("x")
         game = ["/usr/bin/gamescope", "--backend", "headless", "-W", w, "-H", h, "-w", w, "-h", h, "-r", "120", "--"] + game

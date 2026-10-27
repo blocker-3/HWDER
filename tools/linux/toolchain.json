@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "target": "linux-x86_64-glibc2.35",
+  "note": "Fetched by HWDER Setup on the player's machine (tools/linux_setup.py), each download checked against its SHA-256. Nothing here is bundled in the release.",
+  "artifacts": [
+    {
+      "id": "zig",
+      "version": "0.15.2",
+      "url": "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz",
+      "sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239",
+      "size": 53733924,
+      "archive_root": "zig-x86_64-linux-0.15.2",
+      "required": ["zig", "lib/libc/glibc/abilists"],
+      "license": "MIT (Zig); LLVM Apache-2.0 WITH LLVM-exception; glibc/Linux headers under their own notices",
+      "license_source": "https://github.com/ziglang/zig/blob/0.15.2/LICENSE"
+    },
+    {
+      "id": "cmake",
+      "version": "3.31.12",
+      "url": "https://github.com/Kitware/CMake/releases/download/v3.31.12/cmake-3.31.12-linux-x86_64.tar.gz",
+      "sha256": "0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c",
+      "size": 55005786,
+      "archive_root": "cmake-3.31.12-linux-x86_64",
+      "required": ["bin/cmake"],
+      "license": "BSD-3-Clause and bundled notices",
+      "license_source": "https://raw.githubusercontent.com/Kitware/CMake/v3.31.12/Copyright.txt"
+    },
+    {
+      "id": "ninja",
+      "version": "1.13.2",
+      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip",
+      "sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6",
+      "size": 134040,
+      "archive_root": "",
+      "required": ["ninja"],
+      "license": "Apache-2.0",
+      "license_source": "https://raw.githubusercontent.com/ninja-build/ninja/v1.13.2/COPYING"
+    },
+    {
+      "id": "python",
+      "version": "3.13.16+20261003",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "4595c5589fff7bf0cb158d9a88a797e0d791fa33830770fcb7bf3f4b104feeae",
+      "size": 35076205,
+      "archive_root": "python",
+      "required": ["bin/python3"],
+      "license": "PSF-2.0 and bundled notices",
+      "license_source": "https://github.com/astral-sh/python-build-standalone/blob/20261003/LICENSE"
+    },
+    {
+      "id": "cryptography",
+      "version": "47.0.0",
+      "wheel": true,
+      "url": "https://files.pythonhosted.org/packages/00/e3/b27be1a670a9b87f855d211cf0e1174a5d721216b7616bd52d8581d912ed/cryptography-47.0.0-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "f5c15764f261394b22aef6b00252f5195f46f2ca300bec57149474e2538b31f8",
+      "size": 4668186,
+      "required": ["cryptography/__init__.py"],
+      "license": "Apache-2.0 OR BSD-3-Clause and bundled OpenSSL notices",
+      "license_source": "https://github.com/pyca/cryptography/tree/47.0.0"
+    },
+    {
+      "id": "cffi",
+      "version": "2.0.0",
+      "wheel": true,
+      "url": "https://files.pythonhosted.org/packages/98/df/0a1755e750013a2081e863e7cd37e0cdd02664372c754e5560099eb7aa44/cffi-2.0.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "c8d3b5532fc71b7a77c09192b4a5a200ea992702734a2e9279a37f2478236f26",
+      "size": 219499,
+      "required": ["cffi/__init__.py"],
+      "license": "MIT and bundled libffi notices",
+      "license_source": "https://pypi.org/project/cffi/2.0.0/"
+    },
+    {
+      "id": "pycparser",
+      "version": "3.0",
+      "wheel": true,
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "size": 48172,
+      "required": ["pycparser/__init__.py"],
+      "license": "BSD-3-Clause",
+      "license_source": "https://pypi.org/project/pycparser/3.0/"
+    },
+    {
+      "id": "lz4",
+      "version": "4.4.5",
+      "wheel": true,
+      "url": "https://files.pythonhosted.org/packages/d2/fb/ba9256c48266a09012ed1d9b0253b9aa4fe9cdff094f8febf5b26a4aa2a2/lz4-4.4.5-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "451039b609b9a88a934800b5fc6ee401c89ad9c175abf2f4d9f8b2e4ef1afc64",
+      "size": 1368257,
+      "required": ["lz4/__init__.py"],
+      "license": "BSD-3-Clause and LZ4 BSD-2-Clause notices",
+      "license_source": "https://github.com/python-lz4/python-lz4/blob/v4.4.5/LICENSE"
+    },
+    {
+      "id": "zstandard",
+      "version": "0.25.0",
+      "wheel": true,
+      "url": "https://files.pythonhosted.org/packages/63/4b/e3678b4e776db00f9f7b2fe58e547e8928ef32727d7a1ff01dea010f3f13/zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "8e735494da3db08694d26480f1493ad2cf86e99bdd53e8e9771b2752a5c0246a",
+      "size": 5547173,
+      "required": ["zstandard/__init__.py"],
+      "license": "BSD-3-Clause (python-zstandard, bundling zstd under BSD-3-Clause)",
+      "license_source": "https://github.com/indygreg/python-zstandard/blob/0.25.0/LICENSE"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+#!/bin/sh
+# HWDER Setup for Linux. Opens the Setup window; in a terminal without a display, or with --cli, the same steps
+# run as questions (tools/linux_setup.py). Other arguments go to tools/linux_setup.py (try --help).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+unset LD_PRELOAD  # Steam's overlay library, when Setup is started from Steam
+if ! command -v python3 >/dev/null 2>&1; then
+    msg="HWDER Setup needs Python 3 (python3), which Bazzite, SteamOS, Fedora, Ubuntu and Arch include. Install it, then start Setup again."
+    if [ -t 1 ]; then echo "$msg"; elif command -v kdialog >/dev/null 2>&1; then kdialog --error "$msg";
+    elif command -v zenity >/dev/null 2>&1; then zenity --error --text="$msg"; fi
+    exit 1
+fi
+if [ "$#" -eq 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; } && [ -x "$here/setup/hwder-setup-ui" ]; then
+    exec "$here/setup/hwder-setup-ui"
+fi
+[ "${1:-}" = "--cli" ] && shift
+exec python3 "$here/tools/linux_setup.py" "$@"
