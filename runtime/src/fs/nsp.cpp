@@ -35,6 +35,12 @@ namespace hwfs::nsp {
 
 namespace {
 
+#ifdef _WIN32
+constexpr const char* kSep = "\\";  // update paths may carry the \\?\ prefix, which takes no forward slashes
+#else
+constexpr const char* kSep = "/";
+#endif
+
 // ---------------------------------------------------------------- AES (CNG, AES-NI backed)
 #ifdef _WIN32
 class Aes {
@@ -485,7 +491,7 @@ std::string load_update(const std::string& dir, State::Update& u) {
     std::string text;
     {
         File f;
-        if (!f.open(dir + "\\update.json") || f.size() > 65536) return "update.json missing in " + dir;
+        if (!f.open(dir + kSep + "update.json") || f.size() > 65536) return "update.json missing in " + dir;
         text.resize(f.size());
         if (!f.read(0, (u8*)text.data(), text.size())) return "cannot read update.json";
     }
@@ -495,7 +501,7 @@ std::string load_update(const std::string& dir, State::Update& u) {
         !json_number(text, "romfs_offset", u.romfs_off) || !json_number(text, "romfs_size", u.romfs_size) ||
         !json_number(text, "patch_size", size))
         return "update.json is incomplete";
-    if (!u.patch.open(dir + "\\romfs.patch") || u.patch.size() != size) return "romfs.patch missing or the wrong size";
+    if (!u.patch.open(dir + kSep + "romfs.patch") || u.patch.size() != size) return "romfs.patch missing or the wrong size";
     if (ind_off > size || ind_size > size - ind_off || ind_size < 0x8000 || count == 0 || count > 1000000)
         return "romfs.patch has no valid indirect table";
     std::vector<u8> table(ind_size);
@@ -766,7 +772,7 @@ bool read_exefs(const char* name, std::vector<u8>& out) {
     if (!g_state) return false;
     if (g_state->update) {  // the update's own modules (main, main.npdm) replace the base game's
         File f;
-        if (f.open(g_state->update->dir + "\\exefs\\" + name)) {
+        if (f.open(g_state->update->dir + kSep + "exefs" + kSep + name)) {
             out.resize(f.size());
             return f.read(0, out.data(), out.size());
         }
