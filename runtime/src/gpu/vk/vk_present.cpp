@@ -2,6 +2,8 @@
 // picture) and present(), which picks the presented image, blacks out stale ultrawide side bands, runs the frame
 // diagnostics and hands the image to the display. Moved text-for-text from vk_renderer.cpp.
 #include "gpu/settings.h"
+#include "host/timing.h"
+#include "host/platform.h"
 #include "gpu/diag.h"
 #include "interp/interp.h"
 #include "post_spv.h"
@@ -109,20 +111,24 @@ void VkRenderer::post_picture(Image* img) {
         ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &ib);
+        g_rec.cmd();
+        g_rec.record([ib](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        });
         post_.w = w;
         post_.h = h;
     }
     // The picture's bytes into the copy (same texel size, so a raw copy; R/B order stays consistent because
     // the pass also writes through an R8G8B8A8 view of the picture).
     g_rec.barrier();
-    VkCommandBuffer cb = g_rec.cmd();
     VkImageCopy c{};
     c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.extent = {w, h, 1};
-    vkCmdCopyImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, post_.copy, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    {
+        const VkImage si = img->image, di = post_.copy;
+        g_rec.record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
+    }
     g_rec.barrier();
     VkDescriptorSet set = alloc_set(post_.dsl);
     VkDescriptorImageInfo ii[2] = {{post_.sampler, post_.copy_view, VK_IMAGE_LAYOUT_GENERAL},
@@ -137,12 +143,21 @@ void VkRenderer::post_picture(Image* img) {
         wr[i].pImageInfo = &ii[i];
     }
     vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
-    cb = g_rec.cmd();
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pipe);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pl, 0, 1, &set, 0, nullptr);
-    float pc[4] = {1.0f / w, 1.0f / h, settings::video().fxaa ? 1.0f : 0.0f, settings::video().sharpen / 100.0f};
-    vkCmdPushConstants(cb, post_.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
-    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    g_rec.cmd();
+    struct {
+        float pc[4];
+        VkPipeline pipe;
+        VkPipelineLayout pl;
+        VkDescriptorSet set;
+        u32 gx, gy;
+    } d{{1.0f / w, 1.0f / h, settings::video().fxaa ? 1.0f : 0.0f, settings::video().sharpen / 100.0f}, post_.pipe, post_.pl, set,
+        (w + 7) / 8, (h + 7) / 8};
+    g_rec.record([d](VkCommandBuffer cb) {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pl, 0, 1, &d.set, 0, nullptr);
+        vkCmdPushConstants(cb, d.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(d.pc), d.pc);
+        vkCmdDispatch(cb, d.gx, d.gy, 1);
+    });
     g_rec.barrier();
     rs_.pc_layout = VK_NULL_HANDLE;  // the game's next draw pushes its constants again
     tc_.mark_modified(img);
@@ -192,8 +207,10 @@ int VkRenderer::capture_for_present(Image* img, u32 w, u32 h) {
         ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &ib);
+        g_rec.cmd();
+        g_rec.record([ib](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        });
         hd.w = w;
         hd.h = h;
         hd.fmt = fmt;
@@ -203,7 +220,11 @@ int VkRenderer::capture_for_present(Image* img, u32 w, u32 h) {
     c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.extent = {w, h, 1};
-    vkCmdCopyImage(g_rec.cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, hd.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    g_rec.cmd();
+    {
+        const VkImage si = img->image, di = hd.image;
+        g_rec.record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
+    }
     g_rec.barrier();
     hold_next_ = (i + 1) % 3;
     return (int)i;
@@ -214,14 +235,14 @@ void VkRenderer::present(const FramebufferInfo& fb) {
     int hold = -1;
     u64 capture_serial = 0;
     u32 w = fb.width, h = fb.height;
-    LARGE_INTEGER pt0, pt1, pt2, ptf;
-    QueryPerformanceFrequency(&ptf);
-    QueryPerformanceCounter(&pt0);
+    host::Counter pt0, pt1, pt2, ptf;
+    host::counter_frequency(&ptf);
+    host::counter(&pt0);
     {
         present_waiting_.fetch_add(1, std::memory_order_acq_rel);
         std::lock_guard<std::recursive_mutex> l(m_);
         present_waiting_.fetch_sub(1, std::memory_order_acq_rel);
-        QueryPerformanceCounter(&pt1);
+        host::counter(&pt1);
         process_invalidations();
         // Several images can share the presented address (a 3D render target, a VIC/CPU-written movie
         // frame, a differently sized alias). Take the most recently written one, and if the CPU wrote
@@ -245,7 +266,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         }
         w = (u32)(w * img->scale + 0.5f);
         h = (u32)(h * img->scale_y + 0.5f);
-        QueryPerformanceCounter(&pt2);
+        host::counter(&pt2);
         if ((pt2.QuadPart - pt0.QuadPart) * 1000.0 / ptf.QuadPart > 20.0)
             hw_log("vk: slow: present prologue %.0f ms (renderer lock %.0f, image lookup/validate %.0f) %s%s", (pt2.QuadPart - pt0.QuadPart) * 1000.0 / ptf.QuadPart,
                    (pt1.QuadPart - pt0.QuadPart) * 1000.0 / ptf.QuadPart, (pt2.QuadPart - pt1.QuadPart) * 1000.0 / ptf.QuadPart,
@@ -286,7 +307,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             hw_log("fd: present %llx %ux%u f%d %s", (unsigned long long)fb.address, w, h, (int)img->info.fmt.vk,
                    img->gpu_modified ? "gpu-rendered" : "from guest memory");
             // Contents of every render target of this frame, for finding the stage that goes wrong.
-            CreateDirectoryA("fd", nullptr);
+            { std::error_code mkdir_ec; std::filesystem::create_directory("fd", mkdir_ec); }
             // In a multi-present window (HWDER_VK_FRAME_DUMP_COUNT) only the last present writes the RTs
             // (each write-out stalls ~1 s); the earlier presents just log.
             bool last_of_window = g_s.present_count + 2 >= dump_frame_ + dump_count_;
@@ -347,7 +368,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                     a.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
                     VkClearRect rr[2] = {{{{0, 0}, {band, ih}}, 0, 1}, {{{(s32)(iw - band), 0}, {band, ih}}, 0, 1}};
                     begin_rendering(f);
-                    vkCmdClearAttachments(g_rec.cmd_in_pass(), 1, &a, 2, rr);
+                    struct {
+                        VkClearAttachment a;
+                        VkClearRect rr[2];
+                    } c2{a, {rr[0], rr[1]}};
+                    g_rec.record([c2](VkCommandBuffer cb) { vkCmdClearAttachments(cb, 1, &c2.a, 2, c2.rr); });
                 }
             }
         }
@@ -371,7 +396,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                 if (settings::video().unlocked_res) {  // largest 16:9 that fits the window; the blit pillarboxes the rest
                     unsigned cw = 0, chh = 0;
                     display::client_size(&cw, &chh);
+#ifdef _WIN32
                     if (!cw || !chh) cw = GetSystemMetrics(SM_CXSCREEN), chh = GetSystemMetrics(SM_CYSCREEN);
+#else
+                    if (!cw || !chh) cw = 1920, chh = 1080;  // no window yet: the game's own 16:9 size
+#endif
                     wx = wy = std::min(cw / 1920.0f, chh / 1080.0f);  // uneven X/Y squeezes the game's 16:9 projection
                     // Fill ultrawide: the game's camera is widened to the window's aspect (runtime/src/game/
                     // widescreen.cpp), so the targets take the window's shape too.
@@ -398,11 +427,15 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             {
                 prof_flush();
                 const double busy = gpu::gpu_busy_ms_reset();
-                hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames", busy / 120.0);
+                u64 submits = 0;
+                double submit_ms = 0;
+                submit_stats_reset(&submits, &submit_ms);
+                hw_log("vk: gpu thread busy %.1f ms per frame over the last 120 frames; %.1f submits per frame, %.0f us each",
+                       busy / 120.0, submits / 120.0, submits ? submit_ms * 1000.0 / submits : 0.0);
                 diag::prof_window_log(120, busy);
             }
         }
-        const u64 audit_now = GetTickCount64();
+        const u64 audit_now = host::ticks_ms();
         if (audit_now - audit_report_ms_ >= 10000) {
             audit_report_ms_ = audit_now;
             log_warmup("periodic");
@@ -418,7 +451,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             for (const auto& [program, count] : audit_skips_by_program_)
                 hw_log("gfx-audit: program %016llx cumulative skipped draws %llu", (unsigned long long)program, (unsigned long long)count);
         }
-        if (dump_time_ >= 0 && GetTickCount64() - g_start_ms >= (u64)(dump_time_ * 1000.0)) {
+        if (dump_time_ >= 0 && host::ticks_ms() - g_start_ms >= (u64)(dump_time_ * 1000.0)) {
             dump_time_ = -1;
             dump_frame_ = g_s.present_count + 1;
             hw_log("fd: dumping frame %llu (time trigger)", (unsigned long long)dump_frame_);
@@ -429,7 +462,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         static const u64 auto_min_draws = auto_env ? strtoull(auto_env, nullptr, 0) : 600;
         static const u64 auto_max_draws = auto_env && strchr(auto_env, '-') ? strtoull(strchr(auto_env, '-') + 1, nullptr, 0) : ~0ull;
         if (dump_auto_ && st_.draws >= auto_min_draws && st_.draws <= auto_max_draws &&
-            GetTickCount64() - g_start_ms >= (u64)(dump_auto_after_ * 1000.0)) {
+            host::ticks_ms() - g_start_ms >= (u64)(dump_auto_after_ * 1000.0)) {
             dump_auto_ = false;
             // HWDER_VK_FRAME_DUMP_SKIP=n dumps the n-th present after the trigger instead (menu frames
             // straddle presents: a 44-draw "frame" is followed by a 7-draw one, then the next full one).
@@ -438,7 +471,7 @@ void VkRenderer::present(const FramebufferInfo& fb) {
             // (e.g. the Select Mode menu is complete ~3 s after its first 44-draw parchment frame).
             static const double delay = debug::value(debug::VkFrameDumpDelay, 0.0);
             if (delay > 0) {
-                dump_time_ = (GetTickCount64() - g_start_ms) / 1000.0 + delay;
+                dump_time_ = (host::ticks_ms() - g_start_ms) / 1000.0 + delay;
                 hw_log("fd: draw-count trigger (previous frame had %llu draws); dumping at t=%.2f", (unsigned long long)st_.draws, dump_time_);
             } else {
                 dump_frame_ = g_s.present_count + 1 + skip;
@@ -459,7 +492,16 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         wait_serial(capture_serial);  // the copy has run: the guest buffer is no longer needed
         fb.on_captured();
     }
-    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, g_rec.serial() - 1, fb.release_hz);
+    // The present waits for this serial on the same queue: it must not go in before the serial's own submit
+    // (the queue would wait for a signal queued behind it, a GPU hang).
+    // Read once: the GPU thread may flush (advance the serial) meanwhile.
+    const u64 wait_for = g_rec.serial() - 1;
+    wait_submitted(wait_for);
+    if (submitted_serial() < wait_for) {  // cannot happen after wait_submitted: catches a broken ordering
+        static int n = 0;
+        if (n++ < 5) hw_log("vk: ERROR: present queued before serial %llu was submitted", (unsigned long long)wait_for);
+    }
+    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, wait_for, fb.release_hz);
     if (hold >= 0) hold_[hold].ticket = display::last_present_ticket();
 }
 

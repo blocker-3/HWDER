@@ -83,6 +83,14 @@ const char* pad_type_name(int type);               // "DualSense", "Xbox One / S
 
 // Poll every host source (cheap; safe to call at 1 kHz). Not thread safe: call from one thread.
 void poll_host_input(HostInput& out);
+#ifndef _WIN32
+// SDL's main event thread publishes keyboard and hotplug state to the HID thread.
+void host_keyboard_event(int scancode, bool down);
+void host_keyboard_clear();
+void poll_prelaunch_input();
+void start_guest_polling();
+void host_gamepad_event(u32 type, u32 id);
+#endif
 
 // In-game menu: while blocked the game sees a neutral pad and no touch. After unblocking, the game
 // sees nothing until every button and stick is released, so the press that closed the menu stays out.

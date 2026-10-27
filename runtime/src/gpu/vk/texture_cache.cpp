@@ -1,7 +1,12 @@
+#include "gpu/gpu.h"
+#include "host/timing.h"
+#include "host/platform.h"
 // Texture cache: guest surfaces (block-linear / pitch) <-> VkImages keyed by guest address.
 #include "gpu/settings.h"
+#include <optional>
 #include <algorithm>
 #include <map>
+#include <filesystem>
 
 #include <unordered_set>
 
@@ -104,15 +109,9 @@ void release(const Alloc& a) {
 
 // Committed bytes from addr (VirtualQuery walk; slow when memory is committed in small pieces).
 static u64 walk_committed(u64 addr, u64 size) {
-    u64 done = 0;
-    while (done < size) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery((void*)(addr + done), &mbi, sizeof(mbi))) break;
-        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) break;
-        done = (u64)mbi.BaseAddress + mbi.RegionSize - addr;
-    }
-    return std::min(done, size);
+    return host::memory_readable(reinterpret_cast<void*>(addr), size);
 }
+
 u64 readable_size(u64 addr, u64 size) {
     // The kernel's region map (whole heaps per region) answers this in a few lookups; memory that is
     // not a kernel region (host-side allocations) falls back to the OS view.
@@ -219,7 +218,9 @@ static void transfer_image(Image* src, Image* dst, u32 layers) {
         c.dstSubresource = {dst->aspect, 0, 0, layers};
         c.extent = {std::min(src->level_width(0), dst->level_width(0)), std::min(src->level_height(0), dst->level_height(0)),
                     std::min(src->info.depth, dst->info.depth)};
-        vkCmdCopyImage(rec().cmd(), src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        rec().cmd();
+        const VkImage si = src->image, di = dst->image;
+        rec().record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
     } else {
         VkImageBlit b{};
         b.srcSubresource = {src->aspect, 0, 0, layers};
@@ -227,8 +228,12 @@ static void transfer_image(Image* src, Image* dst, u32 layers) {
         b.srcOffsets[1] = {(s32)src->level_width(0), (s32)src->level_height(0), 1};
         b.dstOffsets[1] = {(s32)dst->level_width(0), (s32)dst->level_height(0), 1};
         bool depth = src->aspect != VK_IMAGE_ASPECT_COLOR_BIT;
-        vkCmdBlitImage(rec().cmd(), src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                       depth ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+        rec().cmd();
+        const VkImage si = src->image, di = dst->image;
+        const VkFilter filter = depth ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        rec().record([si, di, b, filter](VkCommandBuffer cb) {
+            vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &b, filter);
+        });
     }
     rec().barrier();
 }
@@ -289,13 +294,13 @@ bool TextureCache::match_subresource(Image* img, u64 addr, const ImageInfo& info
 Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
     SlowTimer timer("texture get", 30.0);
     *sub = {};
-    ProfScope* ps = new ProfScope(kProfGetLayout);
+    std::optional<ProfScope> ps(std::in_place, kProfGetLayout);
     u64 size = compute_layout(info, nullptr, nullptr);
-    delete ps;
-    ps = new ProfScope(kProfGetOverlaps);
+    ps.reset();
+    ps.emplace(kProfGetOverlaps);
     std::vector<Image*> overlaps;
     collect_overlaps(addr, size, overlaps);
-    delete ps;
+    ps.reset();
     if (info.render_target) {  // the game renders into it again: recreate it at the current scale (apply_scale)
         for (size_t i = 0; i < overlaps.size();) {
             Image* o = overlaps[i];
@@ -307,7 +312,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             }
         }
     }
-    ps = new ProfScope(kProfGetMatch);
+    ps.emplace(kProfGetMatch);
     Image* hit = nullptr;
     for (Image* img : overlaps) {
         if (img->addr == addr && img->info.type == info.type && img->info.width == info.width &&
@@ -327,7 +332,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             }
         }
     }
-    delete ps;
+    ps.reset();
     if (hit) {
         ProfScope vs(kProfGetValidate);
         hit->last_used = rec().serial();
@@ -384,7 +389,7 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
             bool done = false;
             if (match_subresource(img, o->addr, o->info, &s) && !o->info.fmt.compressed && !img->info.fmt.compressed &&
                 o->scale == img->scale && o->scale_y == img->scale_y) {
-                VkCommandBuffer cb = rec().cmd();
+                rec().cmd();
                 std::vector<VkImageCopy> regions;
                 for (u32 l = 0; l < o->info.levels && s.level + l < img->info.levels; l++) {
                     VkImageCopy c{};
@@ -396,8 +401,10 @@ Image* TextureCache::get(u64 addr, const ImageInfo& info, Subresource* sub) {
                 }
                 if (o->aspect == img->aspect && !regions.empty()) {
                     rec().barrier();
-                    vkCmdCopyImage(cb, o->image, VK_IMAGE_LAYOUT_GENERAL, img->image, VK_IMAGE_LAYOUT_GENERAL,
-                                   (u32)regions.size(), regions.data());
+                    const VkImage si = o->image, di = img->image;
+                    rec().record([si, di, regions](VkCommandBuffer cb) {
+                        vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+                    });
                     rec().barrier();
                     img->gpu_modified = true;
                     done = true;
@@ -464,11 +471,15 @@ int TextureCache::written_since_check(Image* img) { return written_since(img->ad
 int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     u64 start = addr & ~0xFFFull, end = (addr + size + 0xFFF) & ~0xFFFull;
     if (start == end) return 0;
-    // One query per 2 MiB block and command batch instead of one per image: a frame validates hundreds of
-    // images that share a few blocks, and each GetWriteWatch call cost ~5 us. The batch (recorder serial)
-    // advances after every guest submission, so writes the game made before submitting are still seen.
+    // One query per 2 MiB block and guest submission instead of one per image: a frame validates hundreds of
+    // images that share a few blocks, and each GetWriteWatch call cost ~5 us. Keyed by the guest GPFIFO
+    // submission being executed (about 2 per frame), not the recorder serial, which also advances on every
+    // internal queue submit (~24 per frame at the busy spot, mostly the game's wait-for-idle methods): writes
+    // the game made before submitting are still seen, and the game does not rewrite a texture that work it
+    // has already submitted reads. HWDER_WATCH_PER_SERIAL=1 keys by the serial as before (A/B tests).
     // Reports for pages of other images in the block are kept in written_pages_ like before.
-    const u64 serial = rec().serial();
+    static const bool per_serial = debug::flag(debug::WatchPerSerial);
+    const u64 serial = per_serial ? rec().serial() : gpu::exec_count() | (1ull << 62);
     for (u64 b = start & ~(kWatchBlock - 1); b < end; b += kWatchBlock) {
         u64& queried = watch_blocks_[b];
         if (queried == serial) continue;
@@ -477,18 +488,18 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
         const bool whole = queried != kNotWatched;
         const u64 qs = whole ? b : std::max(b, start), qe = whole ? b + kWatchBlock : std::min(b + kWatchBlock, end);
         watch_buf_.resize((qe - qs) >> 12);
-        ULONG_PTR n = watch_buf_.size();
-        ULONG gran = 0;
+        size_t n = watch_buf_.size();
         SlowTimer t("write watch query", 2.0);
         ProfScope wps(kProfWatch);
-        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (void*)qs, qe - qs, watch_buf_.data(), &n, &gran) != 0) {
+        if (!host::write_watch_reset((void*)qs, qe - qs, watch_buf_.data(), &n)) {
             if (!whole) return -1;  // range not reserved with MEM_WRITE_WATCH
             queried = kNotWatched;
             b -= kWatchBlock;  // retry this block with the image's range
             continue;
         }
         if (whole) queried = serial;
-        for (ULONG_PTR i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+        for (size_t i = 0; i < n; i++) written_pages_[(u64)watch_buf_[i]] = epoch_;
+        if (n) watch_written_[b] = epoch_;
     }
     if (epoch_ - watch_pruned_ >= 512) {  // forget old reports; images last checked before then re-hash once
         watch_pruned_ = epoch_ - 256;
@@ -498,6 +509,14 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
     u64 since = watch_epoch;
     watch_epoch = epoch_;
     if (since < watch_pruned_) return 1;
+    // Most images' blocks had no report since their last check: skip walking the page map (a large texture
+    // spans hundreds of recorded pages, and the walk cost ~5% of the GPU thread in a busy battle).
+    bool recent = false;
+    for (u64 b = start & ~(kWatchBlock - 1); b < end && !recent; b += kWatchBlock) {
+        auto w = watch_written_.find(b);
+        recent = w != watch_written_.end() && w->second >= since;
+    }
+    if (!recent) return 0;
     for (auto it = written_pages_.lower_bound(start); it != written_pages_.end() && it->first < end; ++it)
         if (it->second >= since) return 1;
     return 0;
@@ -505,7 +524,7 @@ int TextureCache::written_since(u64 addr, u64 size, u64& watch_epoch) {
 
 void TextureCache::alloc_image(Image* img) {
     const ImageInfo& info = img->info;
-    ProfScope* ps = new ProfScope(kProfCreateImage);
+    std::optional<ProfScope> ps(std::in_place, kProfCreateImage);
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = info.type == ImageType::e1D ? VK_IMAGE_TYPE_1D
                    : info.type == ImageType::e3D ? VK_IMAGE_TYPE_3D
@@ -540,16 +559,16 @@ void TextureCache::alloc_image(Image* img) {
                info.width, info.height, info.depth, info.layers, info.levels);
         hw_fatal("vk: image creation");
     }
-    delete ps;
-    ps = new ProfScope(kProfAllocBind);
+    ps.reset();
+    ps.emplace(kProfAllocBind);
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(dev(), img->image, &req);
     Alloc a = allocate(req, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     VK_CHECK(vkBindImageMemory(dev(), img->image, a.mem, a.offset));
     g_allocs[(u64)img->image] = a;
-    delete ps;
+    ps.reset();
     // initial layout transition to GENERAL
-    VkCommandBuffer cb = rec().cmd();
+    rec().cmd();
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = img->image;
@@ -557,8 +576,9 @@ void TextureCache::alloc_image(Image* img) {
     b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                         nullptr, 1, &b);
+    rec().record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
     // Fresh VRAM holds whatever the previous owner left there. Depth images are never uploaded, and
     // colour images only receive the committed part of guest memory, so define every texel first:
     // render targets the game draws before clearing (first battle frames) otherwise show garbage.
@@ -567,10 +587,12 @@ void TextureCache::alloc_image(Image* img) {
         if (img->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
             static const float init_depth = (float)debug::value(debug::VkInitDepth, 1.0);
             VkClearDepthStencilValue ds{init_depth, 0};
-            vkCmdClearDepthStencilImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all);
+            const VkImage im = img->image;
+            rec().record([im, ds, all](VkCommandBuffer cb) { vkCmdClearDepthStencilImage(cb, im, VK_IMAGE_LAYOUT_GENERAL, &ds, 1, &all); });
         } else {
             VkClearColorValue zero{};
-            vkCmdClearColorImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+            const VkImage im = img->image;
+            rec().record([im, zero, all](VkCommandBuffer cb) { vkCmdClearColorImage(cb, im, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all); });
         }
         rec().barrier();
     }
@@ -618,7 +640,14 @@ Image* TextureCache::create(u64 addr, const ImageInfo& info) {
             const char* ey = debug::str(debug::ResScaleY);
             g_res_scale = g_res_scale_y = e ? (float)atof(e) : settings::video().res_scale;
             if (!e && settings::video().unlocked_res) {
+#ifdef _WIN32
                 float sx = GetSystemMetrics(SM_CXSCREEN) / 1920.0f, sy = GetSystemMetrics(SM_CYSCREEN) / 1080.0f;
+#else
+                unsigned width = 0, height = 0;
+                display::client_size(&width, &height);
+                if (!width || !height) { width = 1920; height = 1080; }
+                float sx = width / 1920.0f, sy = height / 1080.0f;
+#endif
                 if (settings::video().ultrawide && sx > sy) g_res_scale = sx, g_res_scale_y = sy;  // the screen's aspect
                 else g_res_scale = g_res_scale_y = std::min(sx, sy);  // largest 16:9 that fits (pillarboxed on ultrawide)
             }
@@ -696,7 +725,10 @@ static ScratchImage make_scratch(Image* img) {
     b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(rec().cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    rec().cmd();
+    rec().record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
     return t;
 }
 static void blit_scratch(VkImage src, u32 sw, u32 sh, VkImage dst, u32 dw, u32 dh, VkImageAspectFlags aspect, u32 layers) {
@@ -706,8 +738,11 @@ static void blit_scratch(VkImage src, u32 sw, u32 sh, VkImage dst, u32 dw, u32 d
     b.dstSubresource = {aspect, 0, 0, layers};
     b.srcOffsets[1] = {(s32)sw, (s32)sh, 1};
     b.dstOffsets[1] = {(s32)dw, (s32)dh, 1};
-    vkCmdBlitImage(rec().cmd(), src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                   aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    rec().cmd();
+    const VkFilter filter = aspect == VK_IMAGE_ASPECT_COLOR_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    rec().record([src, dst, b, filter](VkCommandBuffer cb) {
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &b, filter);
+    });
     rec().barrier();
 }
 static void free_scratch(ScratchImage t) {
@@ -773,11 +808,14 @@ void TextureCache::upload(Image* img) {
             if (info.fmt.astc) {
                 out_size = (u64)p.w * p.h * p.d * 4;
                 // Decoded textures are cached on disk by content hash: the CPU decode is paid once per machine.
-                static bool cache_ok = CreateDirectoryA("cache", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
-                static bool cache_dir = cache_ok && (CreateDirectoryA("cache\\astc", nullptr) || GetLastError() == ERROR_ALREADY_EXISTS);
+                static bool cache_dir = [] {
+                    std::error_code error;
+                    std::filesystem::create_directories("cache/astc", error);
+                    return !error;
+                }();
                 char path[128];
                 u64 h = hash_bytes(lin, lin_size, ((u64)p.w << 40) ^ ((u64)p.h << 20) ^ p.d ^ ((u64)info.fmt.bw << 56) ^ ((u64)info.fmt.bh << 60));
-                snprintf(path, sizeof(path), "cache\\astc\\%016llx.rgba", (unsigned long long)h);
+                snprintf(path, sizeof(path), "cache/astc/%016llx.rgba", (unsigned long long)h);
                 bool loaded = false;
                 if (cache_dir) {
                     if (FILE* f = fopen(path, "rb")) {
@@ -804,17 +842,23 @@ void TextureCache::upload(Image* img) {
         }
     }
     if (regions.empty()) return;
-    VkCommandBuffer cb = rec().cmd();
     rec().barrier();
+    const VkBuffer sbuf = st.buf;
     if (img->scale != 1.0f || img->scale_y != 1.0f) {
         ScratchImage t = make_scratch(img);
         if (t.image) {
-            vkCmdCopyBufferToImage(cb, st.buf, t.image, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+            const VkImage ti = t.image;
+            rec().record([sbuf, ti, regions](VkCommandBuffer cb) {
+                vkCmdCopyBufferToImage(cb, sbuf, ti, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+            });
             blit_scratch(t.image, img->info.width, img->info.height, img->image, img->phys_w(), img->phys_h(), img->aspect, img->info.layers);
             free_scratch(t);
         }
     } else {
-        vkCmdCopyBufferToImage(cb, st.buf, img->image, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+        const VkImage di = img->image;
+        rec().record([sbuf, di, regions](VkCommandBuffer cb) {
+            vkCmdCopyBufferToImage(cb, sbuf, di, VK_IMAGE_LAYOUT_GENERAL, (u32)regions.size(), regions.data());
+        });
     }
     rec().barrier();
 }
@@ -822,16 +866,16 @@ void TextureCache::upload(Image* img) {
 void TextureCache::download(Image* img) {
     n_downloads++;
     const ImageInfo& info = img->info;
-    LARGE_INTEGER dl_t0, dl_t1, dl_t2, dl_f;
-    QueryPerformanceFrequency(&dl_f);
-    QueryPerformanceCounter(&dl_t0);
+    host::Counter dl_t0, dl_t1, dl_t2, dl_f;
+    host::counter_frequency(&dl_f);
+    host::counter(&dl_t0);
     dl_t1 = dl_t2 = dl_t0;
     struct Report {
         Image* img;
-        LARGE_INTEGER *t0, *t1, *t2, *f;
+        host::Counter *t0, *t1, *t2, *f;
         ~Report() {
-            LARGE_INTEGER t3;
-            QueryPerformanceCounter(&t3);
+            host::Counter t3;
+            host::counter(&t3);
             double total = (t3.QuadPart - t0->QuadPart) * 1000.0 / f->QuadPart;
             if (total > 30.0)
                 hw_log("vk: slow: texture download took %.0f ms (record %.0f, gpu wait %.0f, copy-back %.0f) %ux%u fmt %u %s at %llx",
@@ -872,12 +916,14 @@ void TextureCache::download(Image* img) {
         }
     }
     rec().barrier();
-    vkCmdCopyImageToBuffer(rec().cmd(), src_image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, (u32)regions.size(),
-                           regions.data());
+    const VkBuffer rbuf = rb.buf;
+    rec().record([src_image, rbuf, regions](VkCommandBuffer cb) {
+        vkCmdCopyImageToBuffer(cb, src_image, VK_IMAGE_LAYOUT_GENERAL, rbuf, (u32)regions.size(), regions.data());
+    });
     rec().barrier();
-    QueryPerformanceCounter(&dl_t1);
+    host::counter(&dl_t1);
     rec().wait_idle();
-    QueryPerformanceCounter(&dl_t2);
+    host::counter(&dl_t2);
     if (scratch.image) free_scratch(scratch);
     VkMappedMemoryRange mr{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     mr.memory = rb.mem;

@@ -14,6 +14,9 @@ The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys`
 
 ---
 
+Native Linux x86-64 is an experimental port for Bazzite/ROG Ally on the `linux-native` branch; it is not part of a
+release. See [the Linux build and validation instructions](docs/linux-native.md).
+
 ## Playing
 
 You do not need to clone this repository or install any developer tools. Windows 10/11 x64 only.
@@ -324,8 +327,10 @@ current values. Kinds:
 | `HWDER_GI_LOG` | presence | off | 120 fps mode: log its timing and skip reasons periodically. |
 | `HWDER_GI_LOG_MS` | integer | unset | Period of the HWDER_GI_LOG reports in ms (strtoull, base 10). |
 | `HWDER_GI_NO_OBJECTS` | presence | off | 120 fps mode: interpolate the camera only, no object/bone blending (comparison). |
+| `HWDER_GI_OBJ_SYNC` | presence | off | 120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison). |
 | `HWDER_GI_OBJ_TRACE` | presence | off | 120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms. |
 | `HWDER_GPU_TRACE` | string | unset | GPU command trace; "2": raw 3D method stream (first 200000); "3": host methods, class binds and submissions. |
+| `HWDER_GUEST_LIBC` | presence | off | Run the game's own (translated) memcpy/memmove/memset/bzero/strlen instead of the host C library's. |
 | `HWDER_HOLD` | presence | off | On a fatal error keep the window up showing the reason instead of exiting. |
 | `HWDER_IPC_BT` | string | unset | Log a backtrace for the IPC command named "<Service>#<command>" (e.g. IFile#4). |
 | `HWDER_IPC_DUMP` | string | unset | Dump the raw request/response bytes of IPC calls whose target service name contains the value (empty: all). |
@@ -350,6 +355,7 @@ current values. Kinds:
 | `HWDER_RES_SCALE` | number | unset | Internal resolution scale override (0.5 to 4). |
 | `HWDER_RES_SCALE_X` | number | unset | Per-axis resolution scale override, X (test aid: emulate another window aspect). |
 | `HWDER_RES_SCALE_Y` | number | unset | Per-axis resolution scale override, Y. |
+| `HWDER_SAMPLE_US` | integer | unset | Linux: sample the GPU command thread and, in battle, MainThread every that many microseconds of their CPU time; counts per function, per MainThread tick phase and per address go to <log>.samples.txt and <log>.samples-main.txt every 10 s. |
 | `HWDER_SHADER_FALLBACK` | string | unset | "all": replace every stage, "frag": only fragment shaders, with the solid-magenta fallback. |
 | `HWDER_SHADER_NO_KIL` | presence | off | Shader translation: turn every (conditional) KIL into a no-op (alpha-test diagnosis). |
 | `HWDER_SHOW` | presence | off | Show the window normally even in an automated (HWDER_LOG) run. |
@@ -357,6 +363,7 @@ current values. Kinds:
 | `HWDER_SYNC_TRACE` | presence | off | nvdrv syncpoint wait / signal trace. |
 | `HWDER_THREAD_DUMP` | integer | unset | Dump all guest threads to the log every n seconds. |
 | `HWDER_THREAD_STATS` | integer | unset | Log per-thread CPU, waits and efficiency-core share every n ms, guest sleeps and the per-frame GPU thread profile (turns the draw profiler on). |
+| `HWDER_TIMELINE` | number | unset | Linux/Windows: from that many seconds after start, record 0.5 s of frame-loop events (MainThread phases, GPU thread busy/idle, GPFIFO submissions, syncpoints, vi queue/dequeue, compositor) to <log>.timeline.txt. |
 | `HWDER_TOTAL_MEM_MB` | integer | unset | The TotalMemorySize the game is told, in MiB (a Switch: 3285); overrides the Gameplay menu's Game memory option. Above 4096 the game takes its dev-kit memory layout; capped at the 6 GiB heap ceiling plus UsedMemorySize. |
 | `HWDER_UPDATE` | presence | off | Folder of the game update unpacked by tools/game_update.py (read as a wide string by the loader; the startup screen notes it). |
 | `HWDER_USED_MEM_MB` | integer | unset | Kernel: the fixed part of UsedMemorySize in MiB (default 48, the mapped code and main stack); 256 is the old figure that left the game a 208 MiB smaller heap. |
@@ -373,9 +380,11 @@ current values. Kinds:
 | `HWDER_VK_FRAME_DUMP_SKIP` | integer | unset | Frame dump auto trigger: dump the n-th present after the trigger (strtoull, base 0). |
 | `HWDER_VK_INIT_DEPTH` | number | unset | Initial clear value of newly created depth images. |
 | `HWDER_VK_NO_CULL` | presence | off | Disable face culling. |
+| `HWDER_VK_SYNC_SUBMIT` | presence | off | Submit Vulkan work on the GPU command thread instead of its own submit thread (comparison). |
 | `HWDER_VK_VERBOSE` | presence | off | Verbose renderer logging: the first draws, texture handles and clears. |
 | `HWDER_VK_WHITE_TEX` | presence | off | Bind the white dummy texture instead of every sampled texture. |
 | `HWDER_WAIT_TRACE` | presence | off | Kernel: log slow WaitSynchronization calls. |
+| `HWDER_WATCH_PER_SERIAL` | presence | off | Query texture write watch once per recorder serial (every queue submit) instead of once per guest submission (A/B tests). |
 <!-- debug-flags:end -->
 
 Successful graphics pipelines are recorded with their shader code and binding metadata in

@@ -6,7 +6,17 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <chrono>
+#include <stdexcept>
+#include <thread>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using namespace gpu::warmup;
 namespace {
@@ -14,8 +24,35 @@ constexpr u64 kTag = 0x1111222233334444ull;
 unsigned checks = 0;
 void check(bool good, const char* what) {
     ++checks;
-    if (!good) { std::fprintf(stderr,"FAIL: %s\n",what); std::exit(1); }
+    if (!good) throw std::runtime_error(what);
 }
+#ifndef _WIN32
+// Process-wide state: declare before SaveTask so its worker is joined first
+// during unwinding. Only the soft limit changes; the original action is retained.
+class ScopedWriteLimit {
+    struct rlimit previous_limit{};
+    struct sigaction previous_action{};
+    bool limited=false, ignored=false;
+public:
+    bool enable() {
+        if(getrlimit(RLIMIT_FSIZE,&previous_limit))return false;
+        struct sigaction action{};action.sa_handler=SIG_IGN;sigemptyset(&action.sa_mask);
+        if(sigaction(SIGXFSZ,&action,&previous_action))return false;
+        ignored=true;
+        auto limit=previous_limit;limit.rlim_cur=1;
+        if(setrlimit(RLIMIT_FSIZE,&limit))return false;
+        limited=true;return true;
+    }
+    bool restore() {
+        if(limited) {if(setrlimit(RLIMIT_FSIZE,&previous_limit))return false;limited=false;}
+        if(ignored) {if(sigaction(SIGXFSZ,&previous_action,nullptr))return false;ignored=false;}
+        return true;
+    }
+    ~ScopedWriteLimit() {
+        if(!restore()){std::fputs("FAIL: restore file-size limit/signal action\n",stderr);std::abort();}
+    }
+};
+#endif
 std::vector<u8> read(const std::string& path) {
     std::ifstream f(path,std::ios::binary);
     return {std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>()};
@@ -88,20 +125,28 @@ void unchanged_on_failure(const std::string& path, u64 tag, Status expected) {
 }
 SaveResult finish(SaveTask& task) {
     SaveResult result;
-    const u64 deadline=GetTickCount64()+10000;
-    while (!task.poll(result)) { if (GetTickCount64()>=deadline) check(false,"background save timeout"); Sleep(1); }
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while (!task.poll(result)) {
+        if (std::chrono::steady_clock::now()>=deadline) check(false,"background save timeout");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     return result;
 }
 }  // namespace
 
-int main() {
-    auto dir=std::filesystem::temp_directory_path()/("hwder-warmup-test-"+std::to_string(GetCurrentProcessId()));
+int run_tests() {
+#ifdef _WIN32
+    const auto pid=GetCurrentProcessId();
+#else
+    const auto pid=getpid();
+#endif
+    auto dir=std::filesystem::temp_directory_path()/("hwder-warmup-test-"+std::to_string(pid));
     check(std::filesystem::create_directory(dir),"create private test directory");
     std::string path=(dir/"cache.bin").string(), raw=(dir/"raw.bin").string(), second=(dir/"second.bin").string();
     Cache original=fixture(), loaded;
     check(load(path.c_str(),kTag,loaded)==Status::NotFound,"missing cache");
     auto saved=save(path.c_str(),kTag,original);
-    if(saved!=Status::Ok) std::fprintf(stderr,"nontrivial save status: %s (Win32 %lu)\n",name(saved),GetLastError());
+    if(saved!=Status::Ok) std::fprintf(stderr,"nontrivial save status: %s\n",name(saved));
     check(saved==Status::Ok,"nontrivial save");
     check(load(path.c_str(),kTag,loaded)==Status::Ok,"nontrivial load");
     check(loaded.programs.size()==1 && loaded.pipelines.size()==2,"record counts and shared program reference");
@@ -113,6 +158,9 @@ int main() {
     check(save(second.c_str(),kTag,loaded)==Status::Ok && read(path)==read(second),"deterministic canonical encoding");
     auto good=read(path);
     {
+#ifndef _WIN32
+        ScopedWriteLimit write_limit;
+#endif
         SaveTask task;
         Cache snapshot=original;
         check(task.start(second,kTag,std::move(snapshot),true),"background snapshot starts");
@@ -121,12 +169,25 @@ int main() {
         auto result=finish(task);
         check(result.status==Status::Ok && result.recipes==original.pipelines.size() && !task.pending(),"background completion reports retained recipes");
         check(read(second)==good,"background persistence has identical encoding");
+#ifdef _WIN32
         HANDLE locked=CreateFileA(second.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         check(locked!=INVALID_HANDLE_VALUE,"lock background output against replacement");
         Cache empty;
         check(task.start(second,kTag,std::move(empty)),"background replacement starts");
         check(finish(task).status==Status::IoError && read(second)==good,"background failure retains previous history");
         CloseHandle(locked);
+#else
+        // One byte reaches the sibling temporary file, then write fails with
+        // EFBIG. Exercise the same existing destination as the successful save.
+        check(write_limit.enable(),"limit background temporary-file writes");
+        Cache empty;
+        check(task.start(second,kTag,std::move(empty)),"background replacement starts");
+        const auto failed=finish(task);
+        check(write_limit.restore(),"restore background write limit and signal action");
+        check(failed.status==Status::IoError && read(second)==good,"partial background write retains destination history");
+        check(std::distance(std::filesystem::directory_iterator(dir),std::filesystem::directory_iterator{})==2,
+              "failed background write leaves no temporary artifact");
+#endif
         snapshot=original;
         check(task.start(second,kTag,std::move(snapshot)),"failed background save can be retried");
         check(finish(task).status==Status::Ok && read(second)==good,"background retry preserves complete snapshot");
@@ -295,16 +356,50 @@ int main() {
         std::ofstream sparse(raw,std::ios::binary|std::ios::trunc); sparse.seekp(kMaxFileBytes); sparse.put(0);
     }
     unchanged_on_failure(raw,kTag,Status::Invalid);
+#ifdef _WIN32
     HANDLE locked=CreateFileA(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
     check(locked!=INVALID_HANDLE_VALUE,"lock old cache against replacement");
     check(save(path.c_str(),kTag,minimal)==Status::IoError,"atomic replacement failure reported");
     CloseHandle(locked);
+#else
+    struct stat permissions{};
+    check(stat(path.c_str(),&permissions)==0 && (permissions.st_mode&0777)==0600,"new private cache has owner-only permissions");
+    {
+        ScopedWriteLimit write_limit;
+        check(write_limit.enable(),"limit synchronous temporary-file writes");
+        const auto failed=save(path.c_str(),kTag,minimal);
+        check(write_limit.restore(),"restore synchronous write limit and signal action");
+        check(failed==Status::IoError,"partial temporary write failure reported");
+    }
+#endif
     check(read(path)==good,"failed atomic replacement retains previous bytes");
+#ifndef _WIN32
+    const auto blocked=dir/"blocked";
+    check(std::filesystem::create_directory(blocked),"create rename failure fixture");
+    check(save(blocked.string().c_str(),kTag,minimal)==Status::IoError && std::filesystem::is_directory(blocked),
+          "rename failure leaves directory destination intact");
+    check(std::filesystem::remove(blocked),"remove rename failure fixture");
+#endif
     size_t files=0; for(const auto& ignored:std::filesystem::directory_iterator(dir)) ++files;
     check(files==3,"failed save leaves no temporary artifact");
     check(save(path.c_str(),kTag,minimal)==Status::Ok,"atomic replacement succeeds after releasing old file");
     Cache replaced; check(load(path.c_str(),kTag,replaced)==Status::Ok && replaced.pipelines.empty(),"replacement contains new cache");
+#ifndef _WIN32
+    std::ifstream old(path,std::ios::binary);
+    check(bool(old),"open old inode before replacement");
+    const auto previous=read(path);
+    check(save(path.c_str(),kTag,original)==Status::Ok,"POSIX replaces cache with active reader");
+    const std::vector<u8> previous_reader{std::istreambuf_iterator<char>(old),std::istreambuf_iterator<char>()};
+    check(previous_reader==previous && read(path)==good,"reader retains old inode while new readers observe complete replacement");
+    old.close();
+#endif
     Cache empty; check(save(second.c_str(),kTag,empty)==Status::Ok && load(second.c_str(),kTag,replaced)==Status::Ok && replaced.programs.empty(),"empty cache roundtrips");
     std::filesystem::remove(path); std::filesystem::remove(raw); std::filesystem::remove(second); std::filesystem::remove(dir);
     std::printf("pipeline_warmup_cache_test: %u checks passed\n",checks);
+    return 0;
+}
+
+int main() {
+    try {return run_tests();}
+    catch(const std::exception& error) {std::fprintf(stderr,"FAIL: %s\n",error.what());return 1;}
 }

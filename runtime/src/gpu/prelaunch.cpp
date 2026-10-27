@@ -8,7 +8,14 @@
 #include "hid/host_input.h"
 #include "hwder/runtime.h"
 
+#ifdef _WIN32
 #include <shobjidl.h>
+#else
+#include <SDL3/SDL.h>
+#include <condition_variable>
+#include <mutex>
+#endif
+#include "host/timing.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,6 +41,7 @@ const ImVec4 kOk(0.47f, 0.80f, 0.47f, 1.0f);
 const ImVec4 kPending(1.0f, 0.7f, 0.25f, 1.0f);
 const ImVec4 kError(0.95f, 0.42f, 0.36f, 1.0f);
 
+#ifdef _WIN32
 std::string to_utf8(const wchar_t* w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     std::string s(n > 0 ? n - 1 : 0, '\0');
@@ -85,6 +93,34 @@ std::string pick_file(const wchar_t* title, const wchar_t* type_name, const wcha
 }
 
 // Re-runs the NSP and key checks with the current picks.
+#else
+std::string pick_file(const wchar_t*, const wchar_t*, const wchar_t* type_spec, const std::string& current) {
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool complete = false;
+        std::string path;
+        SDL_DialogFileFilter filter;
+    } request;
+    const bool game = std::wstring(type_spec) == L"*.nsp";
+    request.filter = game ? SDL_DialogFileFilter{"Nintendo Switch package", "nsp"}
+                          : SDL_DialogFileFilter{"Key files", "keys"};
+    display::on_main_thread([&] {
+        SDL_ShowOpenFileDialog([](void* opaque, const char* const* files, int) {
+            auto& result = *static_cast<Request*>(opaque);
+            { std::lock_guard lock(result.mutex);
+              if (files && files[0]) result.path = files[0];
+              result.complete = true;
+              result.wake.notify_one(); }
+        }, &request, display::window(), &request.filter, 1, current.empty() ? nullptr : current.c_str(), false);
+    });
+    std::unique_lock lock(request.mutex);
+    request.wake.wait(lock, [&] { return request.complete; });
+    return request.path;
+}
+#endif
+
+
 void check() {
     hwfs::nsp::set_paths(settings::launch().nsp_path, settings::launch().keys_path);
     hwfs::nsp::set_update(settings::launch().update_path);
@@ -291,7 +327,9 @@ void preparation_frame(const char* message,unsigned done,unsigned total) {
 
 bool run(const std::string& exe_dir) {
     g_dir = exe_dir;
+#ifdef _WIN32
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+#endif
     if (!hwfs::nsp::active()) check();
     display::set_status("startup");
     overlay::set_screen(draw);
@@ -321,10 +359,12 @@ bool run(const std::string& exe_dir) {
             }
         }
         if (max_frames && frame >= max_frames) g_quit = true;
-        Sleep(15);
+        host::sleep_ms(15);
     }
     overlay::set_screen(nullptr);
+#ifdef _WIN32
     if (SUCCEEDED(co)) CoUninitialize();
+#endif
     hw_log("prelaunch: %s", g_play ? "play" : "quit");
     return g_play;
 }

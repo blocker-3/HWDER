@@ -2,7 +2,11 @@
 // the VkRenderer class, the structs it works with, the command scheduler's state and the helpers that
 // more than one unit uses. All of it used to live in vk_renderer.cpp; it moved here text-for-text.
 #pragma once
+#ifdef _WIN32
 #include <windows.h>
+#endif
+#include "host/platform.h"
+#include "host/timing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -27,6 +32,7 @@
 #include "gpu/vk/pipeline_warmup_cache.h"
 #include "gpu/vk/pipeline_catalog.h"
 #include "vk_common.h"
+#include "flat_map.h"
 #include "debug_flags.h"
 
 namespace gpu::vk {
@@ -47,6 +53,9 @@ struct Frame {
     u32 dpool_index = 0;
     std::vector<std::function<void()>> deferred;
     u64 serial = 0;
+    // HWDER_GPU_TIMING: timestamp i starts segs[i]; one more ends the last segment.
+    VkQueryPool qpool = VK_NULL_HANDLE;
+    std::vector<gputime::Seg> segs;
 };
 
 struct Sched {
@@ -66,9 +75,17 @@ struct Sched {
     std::vector<std::tuple<u64, u64, std::function<void()>>> graveyard;  // serial, present count, fn
 };
 extern Sched g_s;
+// Called by Recorder::flush before it submits (the renderer finishes CPU-side writes into staging slices).
+extern void (*g_before_submit)();
 extern Recorder g_rec;
 
 void wait_serial(u64 serial);
+// Blocks until the command buffer of `serial` has been submitted to the queue (the record worker submits after
+// recording). Another submission on the same queue that waits for the timeline must not be queued before it.
+void wait_submitted(u64 serial);
+u64 submitted_serial();  // highest serial submitted to the queue so far
+// vkQueueSubmit calls and their total time since the last call (the periodic frame log).
+void submit_stats_reset(u64* submits, double* ms);
 void waiter_thread();
 void full_barrier(VkCommandBuffer cb);
 void run_graveyard();  // present: destroy what the graveyard holds once the GPU and presenter are done with it
@@ -258,6 +275,9 @@ struct StageLayout {
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     std::vector<VkDescriptorType> types;
     std::vector<u32> counts;
+    // The last set filled for this layout, reused by a draw with identical descriptors in the same submission.
+    VkDescriptorSet last_set = VK_NULL_HANDLE;
+    u64 last_key = 0, last_serial = ~0ull;
 };
 
 struct ShaderEntry {
@@ -570,7 +590,27 @@ private:
     void obj_cbuf_census(u32 index, const u8* data, u64 bytes);
     void obj_trace_log();
     void obj_frame_begin(u64 tag);
-    void obj_transforms(u32 index, u8* data, u64 bytes);
+    void obj_transforms(u32 index, u8* data, u64 bytes, u64 draw_key, u64 tag);
+    // The blending runs on its own thread (vk_interp_objects.cpp) in the order the draws were bound: the GPU thread
+    // copies the guest block and queues it with its staging slice; every submit first waits for the queue to empty.
+    struct ObjJob {
+        u8* dst;
+        u64 key, tag, bytes;
+        u32 index;
+        alignas(16) u8 data[4096];
+    };
+    static constexpr u32 kObjJobs = 2048;
+    std::unique_ptr<ObjJob[]> obj_jobs_;
+    std::atomic<u32> obj_head_{0}, obj_tail_{0};
+    std::atomic<bool> obj_sleeping_{false};
+    std::atomic<u64> obj_wait_ns_{0};  // GPU thread time spent in obj_drain waiting for the blending thread
+    std::mutex obj_m_;
+    std::condition_variable obj_cv_;
+    bool obj_async();  // whether blending is asynchronous (starts the thread on first use)
+    ObjJob& obj_job_slot();  // the next free job (waits while the queue is full)
+    void obj_job_push();     // queues the job returned by obj_job_slot()
+    void obj_drain();        // returns once every queued job has written its staging slice
+    void obj_worker();
     bool obj_candidate(u32 index, u64 bytes) const {
         return cur_stage_ == 0 && index == 3 && bytes >= 64 && bytes <= 4096 && gpu::exec_gi_tag();
     }
@@ -637,6 +677,14 @@ private:
     std::condition_variable pipe_done_cv_;
     std::deque<PipeJob> pipe_jobs_;
     std::vector<PipeDone> pipe_done_;
+    std::atomic<u32> pipe_done_n_{0};  // pipe_done_.size(), read without pipe_m_ to skip the lock when it is empty
+    VkPipeline last_pipe_ = VK_NULL_HANDLE;  // get_pipeline's previous result and key (GPU thread only)
+    PipelineKey last_pipe_key_{};
+    static constexpr u32 kProgStateWords = 141;  // get_program's program-selecting registers
+    GfxProgram* last_prog_ = nullptr;
+    u64 last_prog_key_ = 0, last_prog_frame_ = 0;
+    u32 last_prog_state_[kProgStateWords] = {};
+    GfxProgram* get_program_hashed(const u32* regs, const u32* rtf, u64* key_out);
     std::unordered_set<u64> pipe_pending_;  // GPU thread only
     std::unordered_set<u64> pipe_retried_;  // GPU thread only: async build failed, retried synchronously once
     std::vector<std::thread> pipe_workers_;
@@ -656,8 +704,7 @@ private:
     u64 warmup_pending_max_ms_ = 0;
     size_t warmup_storage_bytes_ = 0;
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
-    bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
-                        const std::function<u32(u32, u32)>& cbuf, const std::function<bool(u32, u64&, u32&)>& cb_range,
+    bool bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet& set, const CbufBinding* cbs, u32 ncbs,
                         const u32* tic_pool_regs, bool linked_tsc, std::vector<std::function<void()>>& post);
     bool read_tic(u64 pool_va, u32 limit, u32 index, u32* out);
 
@@ -671,6 +718,7 @@ private:
     void record_draw(const u32* regs, const DrawParams& p, const Framebuffer& fb, GfxProgram* prog, VkPipeline pipe,
                      const VkDescriptorSet* sets, std::vector<std::function<void()>>& post, DrawCtx& d);
     void do_clear(const u32* regs, u32 v);
+    void fast_clear_color(Image* img, VkImageView view, const VkClearColorValue& color);
     void do_dispatch(const u32* cregs, u64 qmd_va);
     bool do_blit(const u32* r);
 
@@ -709,6 +757,8 @@ private:
         VkIndexType it = VK_INDEX_TYPE_MAX_ENUM;
         VkPipelineLayout pc_layout = VK_NULL_HANDLE;
         shader::PushConstants pc{};
+        VkPipelineLayout set_layout = VK_NULL_HANDLE;  // layout the graphics sets below were bound with
+        VkDescriptorSet sets[5] = {};
     } rs_;
     // Same guest vertex/index range staged again within one submission (instanced crowds, multi-pass
     // meshes): reuse the staging slice instead of copying it again. Validated by a sample hash.
@@ -716,12 +766,12 @@ private:
         u64 serial, bytes, sample;
         Slice slice;
     };
-    std::unordered_map<u64, SliceEntry> vb_cache_;
+    FlatMap<SliceEntry> vb_cache_;
     struct IdxRange {
         u64 serial, sample;  // valid only within the submission that scanned it (the sample covers 128 bytes)
         u32 vmin, vmax;
     };
-    std::unordered_map<u64, IdxRange> idx_range_cache_;  // index buffer scan results (vmin/vmax)
+    FlatMap<IdxRange> idx_range_cache_;  // index buffer scan results (vmin/vmax)
     static u64 sample_hash(const u8* p, u64 n) {
         if (!p || !n) return n;
         u64 h = hash_bytes(p, std::min<u64>(n, 64), n);
@@ -741,17 +791,18 @@ private:
     };
     struct GeomEntry {
         u64 watch_epoch = 0, checked_serial = 0, sample = 0, last_epoch = 0;
+        u64 off = 0, bytes = 0;  // resident copy: offset in `chunk`
         u32 clean = 0;           // consecutive clean submissions
+        int chunk = -1;          // resident copy: chunk
+        u32 vmin = 0, vmax = 0;  // index scan result (has_range)
         bool clean_now = false;  // this submission's check
-        int chunk = -1;          // resident copy: chunk and offset
-        u64 off = 0, bytes = 0;
-        bool has_range = false;  // index scan result
-        u32 vmin = 0, vmax = 0;
+        bool has_range = false;  // (fields ordered without padding: a FlatMap slot is 80 bytes)
     };
     std::vector<GeomChunk> geom_chunks_;
     int geom_cur_ = -1;
-    std::unordered_map<u64, GeomEntry> geom_;
+    FlatMap<GeomEntry> geom_;
     u64 geom_swept_ = 0;
+    size_t geom_cursor_ = 0;  // next slot of geom_ to sweep
     bool geom_check(GeomEntry& e, const u8* src, u64 bytes);
     bool geom_slice(u64 key, const u8* src, u64 bytes, Slice& out);  // true: a resident copy of these bytes
     void geom_release(GeomEntry& e);
@@ -766,10 +817,20 @@ private:
         VkImageView view;
         ViewParams vp;
     };
-    std::unordered_map<u64, TicEntry> tic_cache_;
+    FlatMap<TicEntry> tic_cache_;
+    static constexpr u32 kTicFast = 1024, kSamplerFast = 256;
+    TicEntry tic_fast_[kTicFast] = {};  // by TIC index: copies of tic_cache_ hits (same validity rule)
+    struct SamplerFast {
+        u32 tsc[8];
+        int aniso;
+        VkSampler sampler;
+    };
+    SamplerFast sampler_fast_[kSamplerFast] = {};  // by TSC index
     Framebuffer fb_cache_;
-    u64 fb_cache_key_ = 0, fb_cache_gen_ = 0;
+    u64 fb_cache_gen_ = 0;
     bool fb_cache_valid_ = false;
+    static constexpr u32 kFbKeyWords = 8 * 16 + 5 + 3 + 2;  // RenderTarget, Zeta, ZetaSize, RtControl, ZetaEnable
+    u32 fb_cache_regs_[kFbKeyWords] = {};  // the render-target registers fb_cache_ was resolved from
     size_t pcache_saved_ = 0;  // pipelines_.size() at the last save
     void save_pipeline_cache() {
         save_warmup_records();
@@ -815,6 +876,8 @@ private:
     Image* dummy3d_ = nullptr;
     Image* dummy1d_ = nullptr;
     VkSampler dummy_sampler_ = VK_NULL_HANDLE;
+    VkImageView dummy_views_[8] = {};  // by VkImageViewType
+    VkImageView dummy_view_lookup(VkImageViewType t);
     // FXAA / sharpening on the tonemapped picture (post.comp), run right after the final tonemap pass.
     void post_picture(Image* img);
     struct {

@@ -3,6 +3,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <filesystem>
 
 #include "service/common.h"
 
@@ -32,9 +33,16 @@ constexpr Result ResultWriteNotPermitted = FsResult(6203);
 constexpr Result ResultUnsupportedOperation = FsResult(6300);
 constexpr Result ResultPermissionDenied = FsResult(6400);
 
+#ifdef _WIN32
 std::wstring utf8_to_wide(const std::string& s);
 std::string wide_to_utf8(const std::wstring& s);
-const std::wstring& exe_dir();  // directory containing hwder.exe (no trailing slash)
+#endif
+using HostPath = std::filesystem::path;
+inline std::string path_utf8(const HostPath& path) {
+    const auto value = path.u8string();
+    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+}
+const HostPath& exe_dir();  // directory containing the host executable
 bool trace_enabled();           // HWDER_FS_TRACE set
 
 // Base for fs interfaces: unknown commands are logged once and succeed with no output.
@@ -46,9 +54,9 @@ public:
 
 // RomFS: a virtual level-3 RomFS image synthesized from the extracted romfs directory.
 ServicePtr open_romfs_storage();
-const std::wstring& romfs_host_dir();
+const HostPath& romfs_host_dir();
 
 // IFileSystem backed by a host directory (save data, SD card, read-only romfs view).
-ServicePtr make_host_filesystem(const std::wstring& root, bool read_only, const std::string& label);
+ServicePtr make_host_filesystem(const HostPath& root, bool read_only, const std::string& label);
 
 }  // namespace hwfs

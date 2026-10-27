@@ -5,8 +5,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <stdexcept>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <signal.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 extern "C" void hw_log(const char*,...) {}
 extern "C" void hw_fatal(const char*) {std::abort();}
 static std::string test_root;
@@ -19,6 +26,31 @@ bool romfs_read(uint64_t,uint8_t*,uint64_t){return false;}
 using namespace gpu;
 static unsigned checks=0;
 #define CHECK(x) do {++checks;if(!(x)){std::fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}}while(0)
+#ifndef _WIN32
+class ScopedWriteLimit {
+    struct rlimit previous_limit{};
+    struct sigaction previous_action{};
+    bool limited=false, ignored=false;
+public:
+    bool enable() {
+        if(getrlimit(RLIMIT_FSIZE,&previous_limit))return false;
+        struct sigaction action{};action.sa_handler=SIG_IGN;sigemptyset(&action.sa_mask);
+        if(sigaction(SIGXFSZ,&action,&previous_action))return false;
+        ignored=true;
+        auto limit=previous_limit;limit.rlim_cur=1;
+        if(setrlimit(RLIMIT_FSIZE,&limit))return false;
+        limited=true;return true;
+    }
+    bool restore() {
+        if(limited) {if(setrlimit(RLIMIT_FSIZE,&previous_limit))return false;limited=false;}
+        if(ignored) {if(sigaction(SIGXFSZ,&previous_action,nullptr))return false;ignored=false;}
+        return true;
+    }
+    ~ScopedWriteLimit() {
+        if(!restore()){std::fputs("FAIL: restore file-size limit/signal action\n",stderr);std::abort();}
+    }
+};
+#endif
 // Entirely synthetic minimal graphics programs, generated in memory. No game fixture.
 static std::vector<u8> source(u32 stage) {
     std::vector<u8> b(0x60);u32 header=(stage<<10)|(3<<5)|(stage==5?2:1);
@@ -35,7 +67,20 @@ struct Env:shader::Environment {
     u32 texture_bound_buffer()override{return 2;}
 };
 static void reseal(std::vector<u8>& bytes){auto h=catalog::digest(bytes.data(),bytes.size()-32);std::copy(h.begin(),h.end(),bytes.end()-32);}
+static FILE* create_resource(const std::filesystem::path& path) {
+#ifdef _WIN32
+    return _wfopen(path.c_str(),L"wb");
+#else
+    return fopen(path.c_str(),"wb");
+#endif
+}
 int main() {
+    // Public known-answer vectors ensure both host providers implement SHA-256.
+    const catalog::Digest abc={0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad};
+    const catalog::Digest empty={0xe3,0xb0,0xc4,0x42,0x98,0xfc,0x1c,0x14,0x9a,0xfb,0xf4,0xc8,0x99,0x6f,0xb9,0x24,
+        0x27,0xae,0x41,0xe4,0x64,0x9b,0x93,0x4c,0xa4,0x95,0x99,0x1b,0x78,0x52,0xb8,0x55};
+    CHECK(catalog::digest("abc",3)==abc);CHECK(catalog::digest("",0)==empty);
     catalog::Catalog cat;cat.build=37;cat.game_version=65536;cat.scope="synthetic-stage";
     catalog::Program program;program.key=0x123456789abcdef0ull;
     warmup::ProgramRecord translated;translated.key=program.key;
@@ -92,13 +137,38 @@ int main() {
     auto good=source(1);CHECK(!catalog::source_identity(good.data(),good.size(),5,size,hash));
     auto words=warmup::key_words(key);CHECK(words.size()==229);warmup::PipelineKey key2;CHECK(warmup::key_from_words(words,key2));CHECK(warmup::key_words(key2)==words);
     words.pop_back();CHECK(!warmup::key_from_words(words,key2));
-    auto directory=std::filesystem::temp_directory_path()/("hwder-catalog-test-"+std::to_string(GetCurrentProcessId()));std::filesystem::create_directories(directory);
+#ifdef _WIN32
+    const auto pid=GetCurrentProcessId();
+#else
+    const auto pid=getpid();
+#endif
+    auto directory=std::filesystem::temp_directory_path()/("hwder-catalog-test-"+std::to_string(pid));CHECK(std::filesystem::create_directory(directory));
     auto path=(directory/"catalog.bin").string();CHECK(catalog::save(path.c_str(),cat)==catalog::Status::Ok);
     CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok);
+    auto replacement=cat;replacement.scope="new-scope";
+#ifdef _WIN32
     HANDLE locked=CreateFileA(path.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
     CHECK(locked!=INVALID_HANDLE_VALUE);
-    auto replacement=cat;replacement.scope="new-scope";
     CHECK(catalog::save(path.c_str(),replacement)==catalog::Status::IoError);CloseHandle(locked);
+#else
+    // POSIX permits replacement while readers retain the old inode.
+    FILE* old=fopen(path.c_str(),"rb");CHECK(old!=nullptr);
+    CHECK(catalog::save(path.c_str(),replacement)==catalog::Status::Ok);
+    std::vector<u8> old_bytes(bytes.size());CHECK(fread(old_bytes.data(),1,old_bytes.size(),old)==old_bytes.size());fclose(old);
+    CHECK(old_bytes==bytes);CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok && round.scope==replacement.scope);
+    CHECK(catalog::save(path.c_str(),cat)==catalog::Status::Ok);
+    {
+        // A partial sibling-temp write must preserve this catalog's old bytes.
+        ScopedWriteLimit write_limit;CHECK(write_limit.enable());
+        const auto failed=catalog::save(path.c_str(),replacement);
+        CHECK(write_limit.restore());CHECK(failed==catalog::Status::IoError);
+    }
+    FILE* retained=fopen(path.c_str(),"rb");CHECK(retained!=nullptr);
+    std::vector<u8> retained_bytes(bytes.size());
+    const bool retained_ok=fread(retained_bytes.data(),1,retained_bytes.size(),retained)==retained_bytes.size() && fgetc(retained)==EOF;
+    fclose(retained);CHECK(retained_ok && retained_bytes==bytes);
+    CHECK(std::distance(std::filesystem::directory_iterator(directory),std::filesystem::directory_iterator{})==1);
+#endif
     CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok && round.scope==cat.scope);
     invalid=cat;invalid.scope="";CHECK(catalog::save(path.c_str(),invalid)==catalog::Status::Invalid);CHECK(catalog::load(path.c_str(),37,65536,round)==catalog::Status::Ok);
     std::filesystem::remove(directory/"catalog.bin");
@@ -109,14 +179,24 @@ int main() {
     // Deliberately byte-unaligned NVN header/SPH, as in the actual G2S archives.
     std::vector<u8> container(0x31);u32 nvn=0x12345678;std::memcpy(container.data()+1,&nvn,4);
     container.insert(container.end(),good.begin(),good.end());
-    FILE* f=_wfopen(resource.c_str(),L"wb");CHECK(f!=nullptr);CHECK(fwrite(container.data(),1,container.size(),f)==container.size());fclose(f);
+    FILE* f=create_resource(resource);CHECK(f!=nullptr);CHECK(fwrite(container.data(),1,container.size(),f)==container.size());fclose(f);
     catalog::GameSources sources;CHECK(sources.index());CHECK(sources.count()==1);CHECK(sources.verify());
     catalog::Locator locator;CHECK(sources.locate(good.data(),good.size(),1,locator));CHECK(locator.offset==0x31);
     std::vector<u8> reread;CHECK(sources.read(locator,reread));CHECK(reread==good);
     auto escape=locator;escape.resource="../outside";CHECK(!sources.read(escape,reread));
     auto oversized=locator;oversized.offset=~0ull;CHECK(!sources.read(oversized,reread));
-    f=_wfopen(resource.c_str(),L"wb");CHECK(f!=nullptr);fputc(0,f);fclose(f);CHECK(!sources.read(locator,reread));
+    f=create_resource(resource);CHECK(f!=nullptr);fputc(0,f);fclose(f);CHECK(!sources.read(locator,reread));
     std::filesystem::remove(resource);
+#ifndef _WIN32
+    // An allowed resource name must still reject a symlink outside the RomFS root.
+    const auto outside=directory.parent_path()/(directory.filename().string()+"-outside");
+    CHECK(std::filesystem::create_directory(outside));
+    const auto external=outside/"synthetic.bin";
+    f=create_resource(external);CHECK(f!=nullptr);CHECK(fwrite(container.data(),1,container.size(),f)==container.size());fclose(f);
+    std::filesystem::create_symlink(external,resource);
+    CHECK(!sources.read(locator,reread));CHECK(!sources.index());
+    CHECK(std::filesystem::remove(resource));CHECK(std::filesystem::remove(external));CHECK(std::filesystem::remove(outside));
+#endif
     std::filesystem::remove(directory/"data/stage/common");std::filesystem::remove(directory/"data/stage");std::filesystem::remove(directory/"data");std::filesystem::remove(directory);
     std::printf("pipeline catalog: %u checks passed; synthetic metadata only\n",checks);return 0;
 }

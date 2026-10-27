@@ -1,5 +1,6 @@
 // nvdrv: the NVIDIA driver interface. Devices: nvmap, nvhost-as-gpu, nvhost-ctrl, nvhost-ctrl-gpu,
 // nvhost-gpu (channels). Video devices register themselves through nvdrv_device.h.
+#include "host/sampler.h"
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -8,6 +9,8 @@
 #include "gpu.h"
 #include "nvdrv_device.h"
 #include "service/common.h"
+#include "host/platform.h"
+#include "host/timing.h"
 
 #include "interp/interp.h"
 #include "debug_flags.h"
@@ -62,6 +65,7 @@ u32 syncpoint_increment(u32 id) {
     {
         std::lock_guard<std::mutex> l(g_sp.m);
         v = ++g_sp.value[id];
+        host::timeline("syncpt", id, v);
         if (reached(v, g_sp.max[id])) g_sp.max[id] = v;
         for (size_t i = 0; i < g_sp.actions.size();) {
             if (g_sp.actions[i].id == id && reached(v, g_sp.actions[i].threshold)) {
@@ -494,7 +498,9 @@ public:
             static const bool trace = debug::flag(debug::SyncTrace);
             if (trace && !reached(syncpoint_read(p[0]), p[1]))
                 hw_log("sync: syncpt wait %u >= %u (value %u) timeout %d", p[0], p[1], syncpoint_read(p[0]), timeout);
+            host::timeline("sp wait", p[0], p[1]);
             bool ok = syncpoint_wait(p[0], p[1], timeout < 0 ? -1 : (s64)timeout * 1000000);
+            host::timeline("sp wait done", p[0], p[1]);
             if (trace && !ok) hw_log("sync: syncpt wait %u >= %u timed out", p[0], p[1]);
             if ((cmd & 0xFF) == 0x19) p[3] = syncpoint_read(p[0]);
             return ok ? Success : Timeout;
@@ -513,7 +519,7 @@ public:
                 if (ev.threshold && !reached(syncpoint_read(ev.syncpt), ev.threshold))
                     hw_log("nvhost-ctrl: wait for syncpt %u >= %u abandoned (value %u, max %u, host thread %lu)", ev.syncpt,
                            ev.threshold, syncpoint_read(ev.syncpt), g_sp.max[ev.syncpt % kMaxSyncpoints].load(),
-                           GetCurrentThreadId());
+                           static_cast<unsigned long>(host::thread_id()));
                 ev.threshold = 0;
                 ev.generation++;
                 if (ev.event) ev.event->clear();
@@ -858,11 +864,11 @@ private:
         b.in2_size = in2.size;
         b.out2 = out2.size ? out2_buf.data() : nullptr;
         b.out2_size = out2.size;
-        LARGE_INTEGER io0, io1, iof;
-        QueryPerformanceCounter(&io0);
+        host::Counter io0, io1, iof;
+        host::counter(&io0);
         NvResult r = dev->ioctl(fd, cmd, b);
-        QueryPerformanceCounter(&io1);
-        QueryPerformanceFrequency(&iof);
+        host::counter(&io1);
+        host::counter_frequency(&iof);
         if ((io1.QuadPart - io0.QuadPart) * 1000.0 / iof.QuadPart > 10.0)
             hw_log("nvdrv: slow: fd %u ioctl 0x%08x took %.0f ms", fd, cmd, (io1.QuadPart - io0.QuadPart) * 1000.0 / iof.QuadPart);
         if (out.addr && (cmd >> 31 & 1)) memcpy((void*)out.addr, work.data(), out.size);

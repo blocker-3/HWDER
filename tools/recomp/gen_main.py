@@ -23,6 +23,26 @@ from recomp.a64 import hx  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The SDK's C library routines, by their exported name, run as host library calls instead of translated
+# AArch64 (the guest memcpy's byte-merging loops cost ~8% of MainThread at the busy spot). Guest memory is
+# identity mapped; x0 (the returned destination) is left as is, and nothing else a caller may rely on
+# changes. memcpy uses memmove: a guest call with overlapping ranges then behaves like the original.
+LIBC_INTRINSICS = {
+    "memcpy": "memmove((void*)HW_PTR(c->x[0]), (const void*)HW_PTR(c->x[1]), (size_t)c->x[2]);",
+    "memmove": "memmove((void*)HW_PTR(c->x[0]), (const void*)HW_PTR(c->x[1]), (size_t)c->x[2]);",
+    "memset": "memset((void*)HW_PTR(c->x[0]), (int)(u8)c->x[1], (size_t)c->x[2]);",
+    "bzero": "memset((void*)HW_PTR(c->x[0]), 0, (size_t)c->x[1]);",
+    "strlen": "c->x[0] = (u64)strlen((const char*)HW_PTR(c->x[0]));",
+}
+
+
+def libc_intrinsics(mod):
+    """{guest address: C body} for the LIBC_INTRINSICS functions mod exports."""
+    if mod.m.name != "sdk":
+        return {}
+    return {mod.base + s.value: LIBC_INTRINSICS[s.name] for s in mod.m.symbols
+            if s.defined and s.type == 2 and s.value and s.name in LIBC_INTRINSICS}
+
 
 def read_symbols(path):
     """tools/recomp/symbols.txt: `<addr> <Name> [func|data] [hook]  # note` per line -> list of
@@ -64,6 +84,10 @@ def main():
                     help="guest functions the runtime overrides (hex, one per line, # comments)")
     ap.add_argument("--symbols", default=os.path.join(HERE, "symbols.txt"),
                     help="named guest symbols; those marked `hook` are overridden like --hooks entries")
+    ap.add_argument("--no-regcache", action="store_true",
+                    help="keep guest registers in Ctx throughout (gen.regcache_emit; A/B tests)")
+    ap.add_argument("--no-libc-intrinsics", action="store_true",
+                    help="translate the SDK's memcpy/memset/... like any other function (A/B tests)")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -97,7 +121,22 @@ def main():
         mod = Module(proc, name)
         log(f"module {name}: base={mod.base:#x} text={mod.text_lo:#x}-{mod.text_hi:#x}")
         funcs, _ = discover(mod, {}, log, {x for x in extra if mod.in_text(x)})
-        em = Emitter(mod, funcs, {}, log)
+        em = Emitter(mod, funcs, {}, log, regcache=not a.no_regcache)
+        intrinsics = {} if a.no_libc_intrinsics else libc_intrinsics(mod)
+        intrinsics = {st: b for st, b in intrinsics.items() if st in funcs and st not in hooks}
+        if intrinsics:
+            log(f"  {len(intrinsics)} C library functions as host calls")
+
+        def emit(st):
+            if st in intrinsics:  # the translated body stays as f_<addr>_guest (HWDER_GUEST_LIBC=1 selects it)
+                guest = em.emit_function(st, funcs[st]).replace(
+                    f"void {fn_name(st)}(Ctx* restrict c) {{", f"void {fn_name(st)}_guest(Ctx* restrict c) {{", 1)
+                return (f"void {fn_name(st)}_guest(Ctx* restrict c);\n"
+                        f"void {fn_name(st)}(Ctx* restrict c) {{\n"
+                        f"  if (hw_guest_libc) {{ HW_MUSTTAIL return {fn_name(st)}_guest(c); }}\n"
+                        f"  {intrinsics[st]}\n}}\n" + guest)
+            return em.emit_function(st, funcs[st])
+
         starts = sorted(funcs)
         # One file per 64 KiB of guest code: adding an entry point only changes (and rebuilds) one file.
         buckets = {}
@@ -105,8 +144,7 @@ def main():
             buckets.setdefault((st - mod.text_lo) >> 16, []).append(st)
         for bucket, sts in sorted(buckets.items()):
             fname = f"rc_{name}_{bucket:03x}.c"
-            body = "".join((f"// {sym_name[st]}\n" if st in sym_name else "") + em.emit_function(st, funcs[st])
-                           for st in sts)
+            body = "".join((f"// {sym_name[st]}\n" if st in sym_name else "") + emit(st) for st in sts)
             # Hooked functions keep their body as f_<addr>_orig; the runtime defines f_<addr>, so
             # direct calls, tail calls and the dispatch table all reach the hook.
             for st in sts:

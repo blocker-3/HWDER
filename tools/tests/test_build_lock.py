@@ -47,11 +47,11 @@ class BuildLock(unittest.TestCase):
             argv = ["build.py", "--only-file", "synthetic.cpp", "--build-dir", directory]
             with patch.object(build, "build_lock", synthetic_lock), \
                  patch.object(build, "toolchain", return_value=({}, "cmake", "ninja", "clang", "clang++")), \
-                 patch.object(build.subprocess, "run", side_effect=lambda *a, **k: (events.append("compile"),
+                 patch.object(build.subprocess, "run", side_effect=lambda *a, **k: (events.append("stamp" if a[0][0] == "cmake" else "compile"),
                               subprocess.CompletedProcess(a[0], 0))[1]), \
                  patch.object(sys, "argv", argv):
                 self.assertEqual(build.main(), 0)
-        self.assertEqual(events, ["lock", "compile", "unlock"])
+        self.assertEqual(events, ["lock", "stamp", "compile", "unlock"])
 
     def test_empty_legacy_lock_serializes_and_releases_after_error(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,7 +106,17 @@ class BuildModes(unittest.TestCase):
                 self.assertEqual(build.main(), 0)
             self.assertEqual(run.call_args_list[-1].args[0][-1], "synthetic_tests")
 
-    def test_absent_host_candidate_fails_before_lock_or_toolchain(self):
+    def test_host_build_includes_complete_contract_aggregate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            argv = ["build.py", "--host-tests", "--build-dir", directory]
+            with patch.object(build, "build_lock"), \
+                 patch.object(build, "toolchain", return_value=({}, "cmake", "ninja", "clang", "clang++")), \
+                 patch.object(build.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 patch.object(sys, "argv", argv):
+                self.assertEqual(build.main(), 0)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "host_tests")
+
+    def test_incomplete_host_kit_fails_before_lock_or_toolchain(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(build, "ROOT", directory), \
                  patch.object(build, "build_lock") as lock, \
@@ -116,7 +126,7 @@ class BuildModes(unittest.TestCase):
                 with self.assertRaises(SystemExit) as error:
                     build.main()
                 self.assertEqual(error.exception.code, 2)
-                self.assertIn("separate, unmerged Linux host-test candidate", stderr.getvalue())
+                self.assertIn("complete source kit", stderr.getvalue())
                 lock.assert_not_called()
                 toolchain.assert_not_called()
 

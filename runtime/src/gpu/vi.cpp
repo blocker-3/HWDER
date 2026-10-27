@@ -1,3 +1,5 @@
+#include "host/sampler.h"
+#include "host/timing.h"
 // vi: display service. IHOSBinderDriver speaks android's IGraphicBufferProducer protocol over
 // parcels; queued buffers are composited (presented) by our compositor thread at the swap interval.
 #include <condition_variable>
@@ -224,6 +226,10 @@ public:
             s32 slot = in.read<s32>();
             QueueBufferInput qbi = in.read_flattened<QueueBufferInput>();
             perf::note_present();
+            // Sampler/idle-trace phases: split MainThread's present into before and after QueueBuffer.
+            if (host::g_sample_phase == 3) host::set_sample_phase(5);
+            else if (host::g_sample_phase == 4) host::set_sample_phase(6);
+            host::timeline("queue buffer", (unsigned long long)slot);
             {
                 std::lock_guard<std::mutex> l(m_);
                 if (slot >= 0 && slot < kSlots) {
@@ -234,10 +240,10 @@ public:
             cv_.notify_all();
             QueueBufferOutput qbo{width_, height_, 0, (u32)pending()};
             if (pace_trace()) {
-                static LARGE_INTEGER freq, prev;
-                if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
-                LARGE_INTEGER now;
-                QueryPerformanceCounter(&now);
+                static host::Counter freq, prev;
+                if (!freq.QuadPart) host::counter_frequency(&freq);
+                host::Counter now;
+                host::counter(&now);
                 hw_log("pace: queue slot %d dt %.2f produce %.2f iv %u fence %u:%u (value %u) pending %u", slot,
                        prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / freq.QuadPart : 0.0,
                        (now.QuadPart - last_dequeue_.QuadPart) * 1000.0 / freq.QuadPart, qbi.swap_interval,
@@ -319,8 +325,9 @@ private:
     }
 
     int dequeue() {
-        LARGE_INTEGER t0;
-        QueryPerformanceCounter(&t0);
+        host::Counter t0;
+        host::counter(&t0);
+        host::timeline("dequeue");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             // Oldest-presented free slot first (round robin keeps triple buffering in order).
@@ -331,11 +338,12 @@ private:
                     best = i;
             if (best >= 0) {
                 slots_[best].state = SlotState::Dequeued;
+                host::timeline("dequeued", (unsigned long long)best);
                 if (!any_free_locked()) buffer_event->clear();
                 if (pace_trace()) {
-                    LARGE_INTEGER freq, t1;
-                    QueryPerformanceFrequency(&freq);
-                    QueryPerformanceCounter(&t1);
+                    host::Counter freq, t1;
+                    host::counter_frequency(&freq);
+                    host::counter(&t1);
                     last_dequeue_ = t1;
                     hw_log("pace: dequeue slot %d waited %.2f", best, (t1.QuadPart - t0.QuadPart) * 1000.0 / freq.QuadPart);
                 }
@@ -355,7 +363,7 @@ private:
     }
 
     void compositor() {
-        SetThreadDescription(GetCurrentThread(), L"HWDER compositor");
+        host::name_thread(L"HWDER compositor");
         int presented = -1;
         u64 frame = 0;
         for (;;) {
@@ -380,6 +388,7 @@ private:
                                q.in.fence.fences[i].value, waited, nv::syncpoint_read(q.in.fence.fences[i].id));
                 }
             }
+            host::timeline("comp fence done", (unsigned long long)q.slot);
             gpu::FramebufferInfo fb;
             fb.address = nv::nvmap_address(gb.nvmap_handle) + gb.offset;
             fb.width = (u32)gb.width;
@@ -407,6 +416,7 @@ private:
                     slots_[q.slot].frame = ++frame;
                     slots_[q.slot].state = SlotState::Free;
                     presented = -1;
+                    host::timeline("slot free", (unsigned long long)q.slot);
                 }
                 cv_.notify_all();
                 buffer_event->signal();
@@ -470,7 +480,7 @@ private:
     std::deque<Queued> queue_;
     std::thread thread_;
     u32 width_ = 1280, height_ = 720;
-    LARGE_INTEGER last_dequeue_{};  // HWDER_PACE_TRACE
+    host::Counter last_dequeue_{};  // HWDER_PACE_TRACE
 };
 
 BufferQueue& layer_queue() {
@@ -484,23 +494,21 @@ std::shared_ptr<ReadableEvent> vsync_event() {
         auto e = make_event();
         hw_log("vi: vsync event requested by the game");
         std::thread([e] {
-            SetThreadDescription(GetCurrentThread(), L"HWDER vsync");
+            host::name_thread(L"HWDER vsync");
             // The game's frame clock: its ticks must not be delayed by busy worker threads.
+#ifdef _WIN32
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-            HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-            LARGE_INTEGER freq, next, now;
-            QueryPerformanceFrequency(&freq);
-            QueryPerformanceCounter(&next);
+#endif
+            host::Counter freq, next, now;
+            host::counter_frequency(&freq);
+            host::counter(&next);
             const s64 period = freq.QuadPart / 60;
             for (;;) {
                 next.QuadPart += period;
-                QueryPerformanceCounter(&now);
+                host::counter(&now);
                 s64 wait = next.QuadPart - now.QuadPart;
                 if (wait > 0) {
-                    LARGE_INTEGER due;
-                    due.QuadPart = -(wait * 10000000 / freq.QuadPart);
-                    SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0);
-                    WaitForSingleObject(timer, INFINITE);
+                    host::sleep_counter_ticks(wait, freq.QuadPart);
                 } else if (wait < -period * 4) {
                     next = now;
                 }

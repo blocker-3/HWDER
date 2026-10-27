@@ -41,7 +41,12 @@ def toolchain(managed=None, temporary=None):
     if os.name == "nt":
         import msvc
         env = msvc.vs_env()
-        return env, vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env), vs_tool("Ninja", "ninja.exe", env), "clang-cl", "clang-cl"
+        install = msvc.vs_install()
+        compiler = Path(install) / "VC/Tools/Llvm/x64/bin/clang-cl.exe" if install else None
+        compiler = str(compiler) if compiler and compiler.is_file() else shutil.which("clang-cl.exe", path=env["PATH"])
+        if not compiler:
+            raise RuntimeError("clang-cl.exe not found: install the VS C++ Clang tools component")
+        return env, vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env), vs_tool("Ninja", "ninja.exe", env), compiler, compiler
     if not sys.platform.startswith("linux"):
         raise RuntimeError("Only Windows x64 and experimental Linux x86-64 are supported")
     env = dict(os.environ)
@@ -75,7 +80,7 @@ def main():
     if a.only_file and (a.synthetic_tests or a.host_tests or a.game_only or a.setup_ui or a.managed_probe or a.managed_runtime_link):
         ap.error("--only-file cannot be combined with a test/library mode")
     if a.host_tests and not (Path(ROOT) / "tools/tests/host.cmake").is_file():
-        ap.error("--host-tests requires the separate, unmerged Linux host-test candidate; use --synthetic-tests on Windows")
+        ap.error("--host-tests requires tools/tests/host.cmake from the complete source kit")
     if a.managed_probe and not a.managed_toolchain:
         ap.error("--managed-probe requires a certified --managed-toolchain")
     if a.managed_runtime_link and (not a.managed_toolchain or not a.generated_dir):
@@ -97,8 +102,13 @@ def build(a):
     os.makedirs(bdir, exist_ok=True)
     env, cmake, ninja, cc, cxx = toolchain(managed, getattr(a, "managed_temp_dir", None))
     if a.only_file:
+        version_dir = os.path.join(bdir, "version")
+        result = subprocess.run([cmake, f"-DSRC={ROOT}", f"-DOUT={version_dir}/hwder_version.h",
+                                 "-P", os.path.join(ROOT, "tools", "version.cmake")], env=env)
+        if result.returncode:
+            return result.returncode
         cpp = a.only_file.endswith((".cpp", ".cc", ".cxx"))
-        includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src")]
+        includes = [os.path.join(ROOT, "runtime", "include"), generated, os.path.join(ROOT, "runtime", "src"), version_dir]
         includes += [os.path.join(ROOT, "third_party", name, "include") for name in ("vulkan-headers", "spirv-headers")]
         if os.name == "nt" and not managed:
             args = [cc, "/nologo", "/c", "/O2", "/arch:AVX2", "-mfma", "-Wno-everything", "/DNOMINMAX", "/DWIN32_LEAN_AND_MEAN"]
@@ -130,7 +140,7 @@ def build(a):
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
-    target = a.target or ("managed_compatibility" if getattr(a, "managed_probe", False) else "hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_platform_test" if a.host_tests else "hwder_game" if a.game_only else "hwder")
+    target = a.target or ("managed_compatibility" if getattr(a, "managed_probe", False) else "hwder_setup" if a.setup_ui else "synthetic_tests" if a.synthetic_tests else "host_tests" if a.host_tests else "hwder_game" if a.game_only else "hwder")
     return subprocess.run([ninja, "-C", bdir, "-j", str(a.jobs), target], env=env).returncode
 
 

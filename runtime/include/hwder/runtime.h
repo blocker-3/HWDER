@@ -12,6 +12,7 @@ extern "C" {
 void hw_log(const char* fmt, ...);
 void hw_fatal(const char* why);
 void hw_sleep_ns(s64 ns);
+__attribute__((noreturn)) void hw_exit_process(int code);
 
 // Build identity (runtime/src/version.cpp): git describe, short commit, build date.
 const char* hw_version(void);

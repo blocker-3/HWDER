@@ -1,7 +1,10 @@
 // hid services: IHidServer / IAppletResource with the HID shared memory (0x40000) kept up to date by a
 // host thread. Layout: switchbrew "HID_Shared_Memory".
+#include "host/timing.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -280,7 +283,12 @@ void update_once(const hid::HostInput& in) {
 }
 
 void update_thread() {
+#ifndef _WIN32
+    hid::start_guest_polling();
+#endif
+#ifdef _WIN32
     timeBeginPeriod(1);
+#endif
     hid::HostInput in;
     // HWDER_AUTOPLAY=1: tap A every 1.5 s (after 5 s) so unattended runs advance through the menus.
     static const bool autoplay = debug::flag(debug::Autoplay);
@@ -290,12 +298,12 @@ void update_thread() {
     static const bool battle = autoplay && atoi(debug::str(debug::Autoplay)) == 2;
     // HWDER_AUTOPLAY_PLUS=1: + five times a second for the first 30 s (+ on the title screen opens the manual).
     static const bool plus_spam = debug::flag(debug::AutoplayPlus);
-    const u64 t0 = GetTickCount64();
+    const u64 t0 = host::ticks_ms();
     for (;;) {
         hid::poll_host_input(in);
-        if (plus_spam && GetTickCount64() - t0 < 30000 && (GetTickCount64() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
+        if (plus_spam && host::ticks_ms() - t0 < 30000 && (host::ticks_ms() - t0) % 200 < 100) in.pads[0].buttons |= hid::kBtnPlus;
         if (battle) {
-            u64 t = GetTickCount64() - t0;
+            u64 t = host::ticks_ms() - t0;
             // Every 3 s: B (leaves a sub-screen such as Battlefield Info; nothing on the pre-battle menu),
             // Up x3 (the menu's top entry is Start Battle), A (also: continue text, attack in battle).
             u64 c = t % 3000;
@@ -350,6 +358,14 @@ void update_thread() {
                 if (c >= 1500 && c < 1620) in.pads[0].buttons |= hid::kBtnA;
             }
             if (!skip && t > 30000 && !in_battle && (t % 9000) >= 2000 && (t % 9000) < 2150) in.pads[0].buttons |= hid::kBtnPlus;  // loading tips
+            // HWDER_AUTOPLAY_X=1: X once, 1 s into the battle (the heavy-fight save starts its special mode with it).
+            static const bool x_once = debug::flag(debug::AutoplayX);
+            static u64 x_at = 0;
+            if (x_once && in_battle && !x_at) {
+                x_at = t + 1000;
+                hw_log("autoplay: X at +1 s");
+            }
+            if (x_once && x_at && t >= x_at && t < x_at + 150) in.pads[0].buttons |= hid::kBtnX;
             static const bool idle_in_battle = debug::flag(debug::AutoplayIdle);  // experiments: no input in battle
             if (in_battle && !idle_in_battle) {
                 if ((t % 800) < 100) in.pads[0].buttons |= hid::kBtnY;
@@ -369,7 +385,7 @@ void update_thread() {
                 if (cam) in.pads[0].rx = (s32)(((t / 2000) % 3) == 0 ? 20000 : ((t / 2000) % 3) == 1 ? -20000 : 0);
             }
         } else if (autoplay) {
-            u64 t = GetTickCount64() - t0;
+            u64 t = host::ticks_ms() - t0;
             u64 c = t % 4000;
             // Generic advance: A every 1.5 s. Skip cutscenes: + opens "Skip cutscene?", Left selects Yes, A confirms.
             if (t > 5000 && (t % 1500) < 120) in.pads[0].buttons |= hid::kBtnA;
@@ -391,7 +407,7 @@ void update_thread() {
             }
         }
         update_once(in);
-        Sleep(4);
+        host::sleep_ms(4);
     }
 }
 

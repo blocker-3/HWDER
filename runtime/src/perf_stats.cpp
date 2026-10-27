@@ -1,10 +1,17 @@
 // Per-thread CPU and wait statistics, see perf_stats.h.
 #include "perf_stats.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -14,6 +21,8 @@
 #include <vector>
 
 #include "debug_flags.h"
+#include "host/platform.h"
+#include "host/timing.h"
 #include "hwder/runtime.h"
 #include "kernel/kernel.h"
 
@@ -22,7 +31,7 @@ namespace perf {
 namespace {
 
 struct ThreadRec {
-    DWORD tid = 0;
+    uint32_t tid = 0;
     std::atomic<int64_t> wait[kWaitCount]{};
     std::atomic<uint64_t> samples{0}, ecore{0};
     std::atomic<int64_t> sleeps{0}, sleep_req{0}, sleep_over{0};
@@ -32,20 +41,21 @@ std::mutex g_m;
 std::vector<ThreadRec*> g_recs;  // never freed: a few dozen threads per run
 thread_local ThreadRec* t_rec;
 std::atomic<uint64_t> g_presents{0};
-std::atomic<DWORD> g_presenter{0};
+std::atomic<uint32_t> g_presenter{0};
 bool g_ecore[256];  // logical processor index -> efficiency core
 bool g_hybrid;
 
 ThreadRec* rec() {
     if (!t_rec) {
         t_rec = new ThreadRec;
-        t_rec->tid = GetCurrentThreadId();
+        t_rec->tid = host::thread_id();
         std::lock_guard<std::mutex> l(g_m);
         g_recs.push_back(t_rec);
     }
     return t_rec;
 }
 
+#ifdef _WIN32
 void load_core_classes() {
     ULONG len = 0;
     GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
@@ -71,78 +81,137 @@ void load_core_classes() {
     hw_log("perf: %d performance and %d efficiency logical processors", p, e);
 }
 
+#endif
+
+// One sample of a host thread: id, CPU time so far and its name.
+struct ThreadSample {
+    uint32_t tid;
+    double cpu_ms;
+    std::string name;
+};
+
+#ifdef _WIN32
 double ft_ms(const FILETIME& f) { return (((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 10000.0; }
+
+double process_cpu_ms() {
+    FILETIME pc, pe, pk, pu;
+    GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
+    return ft_ms(pk) + ft_ms(pu);
+}
+
+std::vector<ThreadSample> thread_samples() {
+    std::vector<ThreadSample> out;
+    const DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof(te)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        FILETIME c, e, k, u;
+        ThreadSample t{te.th32ThreadID, GetThreadTimes(h, &c, &e, &k, &u) ? ft_ms(k) + ft_ms(u) : 0, "host"};
+        PWSTR d = nullptr;
+        if (SUCCEEDED(GetThreadDescription(h, &d)) && d && d[0]) {
+            char b[128];
+            WideCharToMultiByte(CP_UTF8, 0, d, -1, b, sizeof(b), nullptr, nullptr);
+            t.name = b;
+        }
+        if (d) LocalFree(d);
+        CloseHandle(h);
+        out.push_back(t);
+    }
+    CloseHandle(snap);
+    return out;
+}
+#else
+// utime + stime of a /proc stat line, in ms (fields 14 and 15, counted after the parenthesised name).
+double stat_cpu_ms(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return 0;
+    char line[1024];
+    const bool got = std::fgets(line, sizeof(line), f) != nullptr;
+    std::fclose(f);
+    const char* rest = got ? std::strrchr(line, ')') : nullptr;
+    unsigned long long utime = 0, stime = 0;
+    if (!rest || std::sscanf(rest + 1, " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &utime, &stime) != 2) return 0;
+    static const double tick_ms = 1000.0 / (double)sysconf(_SC_CLK_TCK);
+    return (double)(utime + stime) * tick_ms;
+}
+
+double process_cpu_ms() { return stat_cpu_ms("/proc/self/stat"); }
+
+std::vector<ThreadSample> thread_samples() {
+    std::vector<ThreadSample> out;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+        const std::string dir = entry.path().string();
+        const uint32_t tid = (uint32_t)std::strtoul(entry.path().filename().c_str(), nullptr, 10);
+        if (!tid) continue;
+        ThreadSample t{tid, stat_cpu_ms(dir + "/stat"), "host"};
+        if (FILE* f = std::fopen((dir + "/comm").c_str(), "r")) {
+            char b[64];
+            if (std::fgets(b, sizeof(b), f)) {
+                b[std::strcspn(b, "\n")] = 0;
+                if (b[0]) t.name = b;
+            }
+            std::fclose(f);
+        }
+        out.push_back(t);
+    }
+    return out;
+}
+#endif
 
 struct Row {
     std::string name;
     double cpu_pct, wait_ms[kWaitCount], ecore_pct;
     int64_t sleeps, sleep_req, sleep_over;
-    DWORD tid;
+    uint32_t tid;
 };
 
 void reporter(int period_ms) {
-    SetThreadDescription(GetCurrentThread(), L"HWDER perf stats");
-    std::map<DWORD, double> prev_cpu;
-    std::map<DWORD, int64_t> prev_wait[kWaitCount];
-    std::map<DWORD, std::pair<uint64_t, uint64_t>> prev_core;
-    std::map<DWORD, int64_t> prev_sl[3];
-    LARGE_INTEGER freq, last, now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&last);
+    host::name_thread(L"HWDER perf stats");
+    std::map<uint32_t, double> prev_cpu;
+    std::map<uint32_t, int64_t> prev_wait[kWaitCount];
+    std::map<uint32_t, std::pair<uint64_t, uint64_t>> prev_core;
+    std::map<uint32_t, int64_t> prev_sl[3];
+    host::Counter freq, last, now;
+    host::counter_frequency(&freq);
+    host::counter(&last);
     uint64_t last_presents = g_presents.load();
-    FILETIME pc, pe, pk, pu;
-    GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
-    double last_proc = ft_ms(pk) + ft_ms(pu);
-    const DWORD pid = GetCurrentProcessId();
+    double last_proc = process_cpu_ms();
     for (;;) {
-        Sleep(period_ms);
-        QueryPerformanceCounter(&now);
+        host::sleep_ms((uint32_t)period_ms);
+        host::counter(&now);
         const double wall = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
         last = now;
         const uint64_t presents = g_presents.load();
-        GetProcessTimes(GetCurrentProcess(), &pc, &pe, &pk, &pu);
-        const double proc = ft_ms(pk) + ft_ms(pu);
+        const double proc = process_cpu_ms();
 
         // Guest thread labels by host thread id.
-        std::map<DWORD, std::string> guest;
+        std::map<uint32_t, std::string> guest;
         for (auto& t : kern::all_threads()) {
             if (!t->host_handle || t->exited) continue;
             char b[160];
             snprintf(b, sizeof(b), "guest %llu %s prio %d core %d entry %llx", (unsigned long long)t->id, t->name.c_str(), t->priority,
                      t->ideal_core, (unsigned long long)t->entry);
-            guest[GetThreadId(t->host_handle)] = b;
+            guest[host::thread_os_id(t->host_handle)] = b;
         }
-        std::map<DWORD, ThreadRec*> recs;
+        std::map<uint32_t, ThreadRec*> recs;
         {
             std::lock_guard<std::mutex> l(g_m);
             for (ThreadRec* r : g_recs) recs[r->tid] = r;
         }
 
         std::vector<Row> rows;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        THREADENTRY32 te{sizeof(te)};
-        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-            if (te.th32OwnerProcessID != pid) continue;
-            HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
-            if (!h) continue;
-            FILETIME c, e, k, u;
-            double cpu = GetThreadTimes(h, &c, &e, &k, &u) ? ft_ms(k) + ft_ms(u) : 0;
+        for (const ThreadSample& sample : thread_samples()) {
             Row r{};
-            r.tid = te.th32ThreadID;
+            r.tid = sample.tid;
             auto pit = prev_cpu.find(r.tid);
-            r.cpu_pct = pit == prev_cpu.end() ? 0 : (cpu - pit->second) * 100.0 / wall;
-            prev_cpu[r.tid] = cpu;
+            r.cpu_pct = pit == prev_cpu.end() ? 0 : (sample.cpu_ms - pit->second) * 100.0 / wall;
+            prev_cpu[r.tid] = sample.cpu_ms;
             if (auto g = guest.find(r.tid); g != guest.end()) r.name = g->second;
-            else {
-                PWSTR d = nullptr;
-                if (SUCCEEDED(GetThreadDescription(h, &d)) && d && d[0]) {
-                    char b[128];
-                    WideCharToMultiByte(CP_UTF8, 0, d, -1, b, sizeof(b), nullptr, nullptr);
-                    r.name = b;
-                } else r.name = "host";
-                if (d) LocalFree(d);
-            }
-            CloseHandle(h);
+            else r.name = sample.name;
             if (r.tid == g_presenter.load()) r.name += " [presents]";
             if (auto ri = recs.find(r.tid); ri != recs.end()) {
                 ThreadRec* t = ri->second;
@@ -161,7 +230,6 @@ void reporter(int period_ms) {
             } else r.ecore_pct = -1;
             rows.push_back(r);
         }
-        CloseHandle(snap);
         std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.cpu_pct > b.cpu_pct; });
         const double frames = (double)(presents - last_presents);
         hw_log("perf: %.0f ms window: %.1f guest fps, process CPU %.2f cores, %zu threads", wall, frames * 1000.0 / wall,
@@ -202,7 +270,9 @@ void start() {
     static std::once_flag once;
     if (!enabled()) return;
     std::call_once(once, [] {
+#ifdef _WIN32
         load_core_classes();
+#endif
         std::thread(reporter, std::max(500, period())).detach();
     });
 }
@@ -214,10 +284,12 @@ void add_wait(WaitKind k, int64_t qpc_ticks) {
 
 void sample_core() {
     if (!enabled() || !g_hybrid) return;
+#ifdef _WIN32
     ThreadRec* r = rec();
     DWORD cpu = GetCurrentProcessorNumber();
     r->samples.fetch_add(1, std::memory_order_relaxed);
     if (cpu < 256 && g_ecore[cpu]) r->ecore.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void note_sleep(int64_t req_ns, int64_t actual_ns) {
@@ -231,19 +303,19 @@ void note_sleep(int64_t req_ns, int64_t actual_ns) {
 void note_present() {
     if (!enabled()) return;
     g_presents.fetch_add(1, std::memory_order_relaxed);
-    g_presenter.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    g_presenter.store(host::thread_id(), std::memory_order_relaxed);
 }
 
 WaitScope::WaitScope(WaitKind kind) : k(kind) {
     if (!enabled()) return;
-    LARGE_INTEGER a;
-    QueryPerformanceCounter(&a);
+    host::Counter a;
+    host::counter(&a);
     t0 = a.QuadPart;
 }
 WaitScope::~WaitScope() {
     if (!t0) return;
-    LARGE_INTEGER b;
-    QueryPerformanceCounter(&b);
+    host::Counter b;
+    host::counter(&b);
     add_wait(k, b.QuadPart - t0);
 }
 

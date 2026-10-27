@@ -1,8 +1,14 @@
 // Minimal dynamic Vulkan loader (no SDK needed: vulkan-1.dll ships with the GPU driver).
 #pragma once
 #define VK_NO_PROTOTYPES
+#ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
+#define HW_VK_PLATFORM_INSTANCE_FUNCS(X) X(vkCreateWin32SurfaceKHR)
+#else
+#define HW_VK_PLATFORM_INSTANCE_FUNCS(X)
+struct SDL_Window;
+#endif
 #include <vulkan/vulkan.h>
 
 #define HW_VK_GLOBAL_FUNCS(X) \
@@ -12,7 +18,7 @@
     X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties)                          \
     X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceFormatProperties) X(vkCreateDevice)              \
-    X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) X(vkCreateWin32SurfaceKHR)                    \
+    X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) HW_VK_PLATFORM_INSTANCE_FUNCS(X)                    \
     X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)  \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR)                         \
     X(vkCreateDebugUtilsMessengerEXT)
@@ -42,7 +48,7 @@
     X(vkCmdSetPrimitiveTopology) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable)                         \
     X(vkCmdSetDepthCompareOp) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetPrimitiveRestartEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetDepthBiasEnable) X(vkCmdPushDescriptorSetKHR)                   \
-    X(vkCmdPushConstants) X(vkCmdResolveImage)                                                                    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets)       X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateBufferView) X(vkDestroyBufferView)               X(vkFlushMappedMemoryRanges) X(vkInvalidateMappedMemoryRanges) X(vkDestroyPipelineCache) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue)
+    X(vkCmdPushConstants) X(vkCmdResolveImage)                                                                    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets)       X(vkUpdateDescriptorSets) X(vkCmdBindDescriptorSets) X(vkCreateBufferView) X(vkDestroyBufferView)               X(vkFlushMappedMemoryRanges) X(vkInvalidateMappedMemoryRanges) X(vkDestroyPipelineCache) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
 
 #define HW_VK_DECLARE(fn) extern PFN_##fn fn;
 HW_VK_GLOBAL_FUNCS(HW_VK_DECLARE)

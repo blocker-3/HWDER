@@ -1,7 +1,10 @@
 // Draw, clear, compute dispatch and 2D blit of the Vulkan renderer: the Maxwell state to pipeline key, vertex
 // and index staging, descriptor binding and command recording of every draw. Moved text-for-text from
 // vk_renderer.cpp.
+#include <optional>
 #include <cmath>
+#include "host/timing.h"
+#include "host/platform.h"
 
 #include "gpu/settings.h"
 #include "gpu/diag.h"
@@ -10,6 +13,58 @@
 
 namespace gpu::vk::detail {
 using namespace m3d;
+
+// A draw's commands as one recorded closure: the state that changed since the previous draw in this command
+// buffer (record_draw tracks it in rs_) and the draw itself.
+struct DrawRec {
+    enum : u32 {
+        kViewport = 1, kScissor = 2, kBias = 4, kBlend = 8, kStencil = 16, kLineWidth = 32, kBounds = 64, kPush = 128,
+        kIndexBuffer = 256, kIndexed = 512
+    };
+    u32 flags = 0;
+    u8 nsets = 0, nvb = 0;
+    u8 set_slot[5], vb_slot[17];
+    VkPipeline pipe = VK_NULL_HANDLE;  // bind when set
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet sets[5];
+    VkBuffer vb[17];
+    VkDeviceSize vo[17];
+    VkViewport vp;
+    VkRect2D sc;
+    float bias[3], bc[4], lw, bounds[2];
+    u32 st[6];
+    shader::PushConstants pc;
+    VkBuffer ib = VK_NULL_HANDLE;
+    VkDeviceSize io = 0;
+    VkIndexType it = VK_INDEX_TYPE_UINT16;
+    u32 count = 0, first = 0, base_instance = 0;
+    s32 vertex_offset = 0;
+
+    void exec(VkCommandBuffer cb) const {
+        if (pipe) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        for (u32 i = 0; i < nsets; i++)
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, set_slot[i], 1, &sets[i], 0, nullptr);
+        for (u32 i = 0; i < nvb; i++) vkCmdBindVertexBuffers(cb, vb_slot[i], 1, &vb[i], &vo[i]);
+        if (flags & kViewport) vkCmdSetViewport(cb, 0, 1, &vp);
+        if (flags & kScissor) vkCmdSetScissor(cb, 0, 1, &sc);
+        if (flags & kBias) vkCmdSetDepthBias(cb, bias[0], bias[1], bias[2]);
+        if (flags & kBlend) vkCmdSetBlendConstants(cb, bc);
+        if (flags & kStencil) {
+            vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_BIT, st[0]);
+            vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_BIT, st[1]);
+            vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_BIT, st[2]);
+            vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_BACK_BIT, st[3]);
+            vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, st[4]);
+            vkCmdSetStencilReference(cb, VK_STENCIL_FACE_BACK_BIT, st[5]);
+        }
+        if (flags & kLineWidth) vkCmdSetLineWidth(cb, lw);
+        if (flags & kBounds) vkCmdSetDepthBounds(cb, bounds[0], bounds[1]);
+        if (flags & kPush) vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(pc), &pc);
+        if (flags & kIndexBuffer) vkCmdBindIndexBuffer(cb, ib, io, it);
+        if (flags & kIndexed) vkCmdDrawIndexed(cb, count, 1, 0, vertex_offset, base_instance);
+        else vkCmdDraw(cb, count, 1, first, base_instance);
+    }
+};
 
 // ------------------------------------------------------------------ draw
 void VkRenderer::build_pipeline_key(const u32* regs, const DrawParams& p, const void* inline_idx, u64 prog_key, const Framebuffer& fb,
@@ -170,19 +225,24 @@ void VkRenderer::geom_release(GeomEntry& e) {
 }
 
 bool VkRenderer::geom_slice(u64 key, const u8* src, u64 bytes, Slice& out) {
-    {   // drop ranges not drawn for a while
+    {   // drop ranges not drawn for 300 frames: a 256th of the table per frame, in place (a whole-table rebuild every
+        // 300 frames took ~20 ms on this thread and made one frame in every 300 late; a 32nd per frame still cost
+        // ~4% of the thread in a heavy battle)
         const u64 epoch = tc_.epoch();
-        if (epoch - geom_swept_ >= 300 || geom_.size() > 200000) {
+        auto stale = [&](u64, GeomEntry& g) {
+            if (epoch - g.last_epoch <= 300) return false;
+            if (g.chunk >= 0) geom_release(g);
+            return true;
+        };
+        if (geom_.size() > 200000) {
+            geom_.erase_if([&](u64, GeomEntry& g) {
+                if (g.chunk >= 0) geom_release(g);
+                return true;
+            });
+            geom_cursor_ = 0;
+        } else if (epoch != geom_swept_) {
             geom_swept_ = epoch;
-            const bool all = geom_.size() > 200000;
-            for (auto it = geom_.begin(); it != geom_.end();) {
-                if (all || epoch - it->second.last_epoch > 300) {
-                    if (it->second.chunk >= 0) geom_release(it->second);
-                    it = geom_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            geom_cursor_ = geom_.sweep(geom_cursor_, geom_.capacity() / 256 + 1, stale);
         }
     }
     GeomEntry& e = geom_[key];
@@ -264,20 +324,22 @@ bool VkRenderer::read_indices(const u32* regs, const DrawParams& p, const void* 
         if (!inline_idx) {
             u64 kw[3] = {(u64)(uintptr_t)idx_src, ((u64)p.count << 8) | (isize << 1) | (key.prim_restart ? 1 : 0), 0x1d1d};
             ikey = hash_bytes(kw, sizeof(kw), 0);
-            isample = sample_hash(idx_src, (u64)p.count * isize);
-            auto cit = idx_range_cache_.find(ikey);
-            if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample)
-                cached = &cit->second;
             range = &geom_[ikey ^ 0x5ca75ca75ca75ca7ull];
+            // Unchanged since its scan (write watch + sample): use the persistent range without the per-submission cache.
             if (!geom_check(*range, idx_src, (u64)p.count * isize) || !range->has_range) {
-                if (cached) range->has_range = true, range->vmin = cached->vmin, range->vmax = cached->vmax;
-            }
-            if (range->has_range && !cached) {
-                idx_range_cache_[ikey] = {g_rec.serial(), isample, range->vmin, range->vmax};
-                cached = &idx_range_cache_[ikey];
+                isample = sample_hash(idx_src, (u64)p.count * isize);
+                auto cit = idx_range_cache_.find(ikey);
+                if (cit != idx_range_cache_.end() && cit->second.serial == g_rec.serial() && cit->second.sample == isample) {
+                    cached = &cit->second;
+                    range->has_range = true, range->vmin = cached->vmin, range->vmax = cached->vmax;
+                }
             }
         }
-        if (cached) {
+        if (range && range->has_range && !cached) {
+            st_.idx_hit++;
+            vmin = range->vmin;
+            vmax = range->vmax;
+        } else if (cached) {
             st_.idx_hit++;
             vmin = cached->vmin;
             vmax = cached->vmax;
@@ -374,12 +436,12 @@ void VkRenderer::stage_vertex_input(const u32* regs, const DrawParams& p, DrawCt
         {
             u64 kw[2] = {va + start, bytes};
             u64 vkey = hash_bytes(kw, sizeof(kw), 0x7b7b);
-            u64 vsample = sample_hash(src, avail);
-            auto vit = vb_cache_.find(vkey);
+            u64 vsample = 0;
+            FlatMap<SliceEntry>::Slot* vit = nullptr;
             if (avail == bytes && geom_slice(vkey, src, bytes, sl)) {
                 st_.vb_hit++;
-            } else if (vit != vb_cache_.end() && vit->second.serial == g_rec.serial() && vit->second.bytes == bytes &&
-                vit->second.sample == vsample) {
+            } else if ((vsample = sample_hash(src, avail), vit = vb_cache_.find(vkey)) && vit->second.serial == g_rec.serial() &&
+                       vit->second.bytes == bytes && vit->second.sample == vsample) {
                 st_.vb_hit++;
                 sl = vit->second.slice;
             } else {
@@ -483,11 +545,12 @@ void VkRenderer::stage_indices(const DrawParams& p, const void* inline_idx, Draw
             Slice sl;
             u64 kw[2] = {(u64)(uintptr_t)idx_src, (u64)count * isize};
             u64 ikey2 = hash_bytes(kw, sizeof(kw), 0x1b1b);
-            u64 isample2 = sample_hash(idx_src, (u64)count * isize);
-            auto iit = vb_cache_.find(ikey2);
+            u64 isample2 = 0;
+            FlatMap<SliceEntry>::Slot* iit = nullptr;
             if (!inline_idx && geom_slice(ikey2, idx_src, (u64)count * isize, sl)) {
-            } else if (!inline_idx && iit != vb_cache_.end() && iit->second.serial == g_rec.serial() &&
-                iit->second.bytes == (u64)count * isize && iit->second.sample == isample2) {
+            } else if (!inline_idx && (isample2 = sample_hash(idx_src, (u64)count * isize), iit = vb_cache_.find(ikey2)) &&
+                       iit->second.serial == g_rec.serial() && iit->second.bytes == (u64)count * isize &&
+                       iit->second.sample == isample2) {
                 sl = iit->second.slice;
             } else {
                 sl = g_rec.stage((u64)count * isize, 16);
@@ -524,27 +587,40 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
     const VkIndexType itype = d.itype;
     const s32 vertex_offset = d.vertex_offset;
     const u32 first_vertex = d.first_vertex;
-    // ---- record
+    // ---- record: one closure with the state that changed (rs_) and the draw
     begin_rendering(fb);
-    VkCommandBuffer cb = g_rec.cmd_in_pass();
+    g_rec.cmd_in_pass();
+    DrawRec r;
     if (rs_.serial != g_rec.serial()) {
         rs_ = RecState{};
         rs_.serial = g_rec.serial();
     }
     if (rs_.pipe != pipe) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        r.pipe = pipe;
         rs_.pipe = pipe;
     }
+    if (rs_.set_layout != prog->layout) {  // sets bound with another layout no longer count as bound
+        rs_.set_layout = prog->layout;
+        for (VkDescriptorSet& bs : rs_.sets) bs = VK_NULL_HANDLE;
+    }
     for (u32 s = 0; s < 5; s++)
-        if (sets[s]) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, s, 1, &sets[s], 0, nullptr);
+        if (sets[s] && rs_.sets[s] != sets[s]) {
+            r.set_slot[r.nsets] = (u8)s;
+            r.sets[r.nsets++] = sets[s];
+            rs_.sets[s] = sets[s];
+        }
     for (u32 s = 0; s < 16; s++)
         if ((streams_used & (1u << s)) && (rs_.vb[s] != vbufs[s] || rs_.vo[s] != voffs[s])) {
-            vkCmdBindVertexBuffers(cb, s, 1, &vbufs[s], &voffs[s]);
+            r.vb_slot[r.nvb] = (u8)s;
+            r.vo[r.nvb] = voffs[s];
+            r.vb[r.nvb++] = vbufs[s];
             rs_.vb[s] = vbufs[s];
             rs_.vo[s] = voffs[s];
         }
     if (need_const && (rs_.vb[kConstBinding] != vbufs[kConstBinding] || rs_.vo[kConstBinding] != voffs[kConstBinding])) {
-        vkCmdBindVertexBuffers(cb, kConstBinding, 1, &vbufs[kConstBinding], &voffs[kConstBinding]);
+        r.vb_slot[r.nvb] = (u8)kConstBinding;
+        r.vo[r.nvb] = voffs[kConstBinding];
+        r.vb[r.nvb++] = vbufs[kConstBinding];
         rs_.vb[kConstBinding] = vbufs[kConstBinding];
         rs_.vo[kConstBinding] = voffs[kConstBinding];
     }
@@ -594,7 +670,8 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
         }
         VkViewport v{x, y, w ? w : 1.0f, h ? h : 1.0f, std::clamp(near_z, 0.0f, 1.0f), std::clamp(far_z, 0.0f, 1.0f)};
         if (memcmp(&rs_.vp, &v, sizeof(v)) != 0) {
-            vkCmdSetViewport(cb, 0, 1, &v);
+            r.flags |= DrawRec::kViewport;
+            r.vp = v;
             rs_.vp = v;
         }
         VkRect2D sc{{0, 0}, {fb.width, fb.height}};
@@ -621,7 +698,8 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
             sc = {{x0, y0}, {(u32)(x1 - x0), (u32)(y1 - y0)}};
         }
         if (memcmp(&rs_.sc, &sc, sizeof(sc)) != 0) {
-            vkCmdSetScissor(cb, 0, 1, &sc);
+            r.flags |= DrawRec::kScissor;
+            r.sc = sc;
             rs_.sc = sc;
         }
     }
@@ -638,13 +716,15 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
         }
         float db[3] = {units / 2.0f, std::isfinite(clamp) ? clamp : 0.0f, slope};
         if (memcmp(rs_.bias, db, sizeof(db)) != 0) {
-            vkCmdSetDepthBias(cb, db[0], db[1], db[2]);
+            r.flags |= DrawRec::kBias;
+            memcpy(r.bias, db, sizeof(db));
             memcpy(rs_.bias, db, sizeof(db));
         }
         float bc[4];
         memcpy(bc, &regs[BlendColor], 16);
         if (memcmp(rs_.bc, bc, 16) != 0) {
-            vkCmdSetBlendConstants(cb, bc);
+            r.flags |= DrawRec::kBlend;
+            memcpy(r.bc, bc, 16);
             memcpy(rs_.bc, bc, 16);
         }
         bool two = regs[StencilTwoSideEnable];
@@ -652,19 +732,16 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
                       two ? regs[StencilBackFuncMask] : regs[StencilFrontFuncMask],
                       two ? regs[StencilBackMask] : regs[StencilFrontMask], two ? regs[StencilBackRef] : regs[StencilFrontRef]};
         if (memcmp(rs_.st, stv, sizeof(stv)) != 0) {
-            vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_BIT, stv[0]);
-            vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_BIT, stv[1]);
-            vkCmdSetStencilReference(cb, VK_STENCIL_FACE_FRONT_BIT, stv[2]);
-            vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_BACK_BIT, stv[3]);
-            vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, stv[4]);
-            vkCmdSetStencilReference(cb, VK_STENCIL_FACE_BACK_BIT, stv[5]);
+            r.flags |= DrawRec::kStencil;
+            memcpy(r.st, stv, sizeof(stv));
             memcpy(rs_.st, stv, sizeof(stv));
         }
         float lw;
         memcpy(&lw, &regs[LineWidthAliased], 4);
         float lwv = (lw > 0 && lw < 64) ? lw : 1.0f;
         if (rs_.lw != lwv) {
-            vkCmdSetLineWidth(cb, lwv);
+            r.flags |= DrawRec::kLineWidth;
+            r.lw = lwv;
             rs_.lw = lwv;
         }
         float bmin, bmax;
@@ -672,7 +749,8 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
         memcpy(&bmax, &regs[DepthBoundsMax], 4);
         float bd[2] = {std::clamp(bmin, 0.0f, 1.0f), std::clamp(bmax, 0.0f, 1.0f)};
         if (memcmp(rs_.bounds, bd, sizeof(bd)) != 0) {
-            vkCmdSetDepthBounds(cb, bd[0], bd[1]);
+            r.flags |= DrawRec::kBounds;
+            memcpy(r.bounds, bd, sizeof(bd));
             memcpy(rs_.bounds, bd, sizeof(bd));
         }
     }
@@ -705,21 +783,30 @@ void VkRenderer::record_draw(const u32* regs, const DrawParams& p, const Framebu
     pc.picture[0] = settings::video().contrast / 100.0f;  // read only by the final tonemap pass (kPictureShaders)
     pc.picture[1] = settings::video().bloom / 100.0f;
     if (rs_.pc_layout != prog->layout || memcmp(&rs_.pc, &pc, sizeof(pc)) != 0) {
-        vkCmdPushConstants(cb, prog->layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(pc), &pc);
+        r.flags |= DrawRec::kPush;
+        r.pc = pc;
         rs_.pc_layout = prog->layout;
         rs_.pc = pc;
     }
     if (indexed) {
         if (rs_.ib != ibuf || rs_.io != ioff || rs_.it != itype) {
-            vkCmdBindIndexBuffer(cb, ibuf, ioff, itype);
+            r.flags |= DrawRec::kIndexBuffer;
+            r.ib = ibuf;
+            r.io = ioff;
+            r.it = itype;
             rs_.ib = ibuf;
             rs_.io = ioff;
             rs_.it = itype;
         }
-        vkCmdDrawIndexed(cb, count, 1, 0, vertex_offset, p.base_instance);
-    } else {
-        vkCmdDraw(cb, count, 1, first_vertex, p.base_instance);
+        r.flags |= DrawRec::kIndexed;
     }
+    r.layout = prog->layout;
+    r.count = count;
+    r.first = first_vertex;
+    r.vertex_offset = vertex_offset;
+    r.base_instance = p.base_instance;
+    g_rec.record([r](VkCommandBuffer cb) { r.exec(cb); });
+    gputime::count_draw(prog->stages[4] ? prog->stages[4]->key : 0);
     for (u32 i = 0; i < fb.num_colors; i++)
         if (fb.color[i] && key.color_mask[i]) tc_.mark_modified(fb.color[i]);
     if (fb.depth && (key.depth_write || key.stencil_enable)) tc_.mark_modified(fb.depth);
@@ -750,25 +837,28 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         VK_LOG_ONCE("vk: draw skipped (no usable program)");
         return;
     }
-    ProfScope* phase = new ProfScope(kProfFramebuffer);
+    std::optional<ProfScope> phase(std::in_place, kProfFramebuffer);
     // The render-target registers rarely change between draws: reuse the last resolved framebuffer
-    // while they (and the texture cache's image set) are unchanged.
-    u64 fbkey = hash_bytes(regs + RenderTarget, 8 * 16 * 4, regs[RtControl]);
-    fbkey = hash_bytes(regs + Zeta, 5 * 4, fbkey);
-    fbkey = hash_bytes(regs + ZetaSize, 3 * 4, fbkey ^ regs[ZetaEnable]);
+    // while they (and the texture cache's image set) are unchanged. Compared word for word (cheaper than hashing them).
+    u32 fbregs[kFbKeyWords];
+    memcpy(fbregs, regs + RenderTarget, 8 * 16 * 4);
+    memcpy(fbregs + 128, regs + Zeta, 5 * 4);
+    memcpy(fbregs + 133, regs + ZetaSize, 3 * 4);
+    fbregs[136] = regs[RtControl];
+    fbregs[137] = regs[ZetaEnable];
     Framebuffer fb;
-    if (fb_cache_valid_ && fb_cache_key_ == fbkey && fb_cache_gen_ == tc_.generation) {
+    if (fb_cache_valid_ && fb_cache_gen_ == tc_.generation && memcmp(fb_cache_regs_, fbregs, sizeof(fbregs)) == 0) {
         fb = fb_cache_;
     } else {
         fb = resolve_framebuffer(regs, false, 0);
         fb_cache_ = fb;
-        fb_cache_key_ = fbkey;
+        memcpy(fb_cache_regs_, fbregs, sizeof(fbregs));
         fb_cache_gen_ = tc_.generation;
         fb_cache_valid_ = true;
     }
 
-    delete phase;
-    phase = new ProfScope(kProfKeyBuild);
+    phase.reset();
+    phase.emplace(kProfKeyBuild);
     DrawCtx d;
     build_pipeline_key(regs, p, inline_idx, prog_key, fb, prog, d);
     PipelineKey& key = d.key;
@@ -779,16 +869,16 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
     bool& indexed = d.indexed;
     u32& count = d.count;
 
-    delete phase;
-    phase = new ProfScope(kProfVertex);
+    phase.reset();
+    phase.emplace(kProfVertex);
     stage_vertex_input(regs, p, d);
 
-    delete phase;
-    phase = new ProfScope(kProfIndex);
+    phase.reset();
+    phase.emplace(kProfIndex);
     stage_indices(p, inline_idx, d);
 
-    delete phase;
-    phase = new ProfScope(kProfDescriptors);
+    phase.reset();
+    phase.emplace(kProfDescriptors);
     // ---- descriptor sets (may upload textures: before rendering begins)
     VkDescriptorSet sets[5] = {};
     std::vector<std::function<void()>> post;
@@ -804,34 +894,15 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         if (!prog->stages[s]) continue;
         StageLayout* sl = prog->layouts[s];
         if (sl->types.empty()) continue;
-        {
-            ProfScope aps(kProfDescAlloc);
-            sets[s] = alloc_set(sl->layout);
-            g_prof_sets++;
-        }
-        u32 group = s;  // bind group of the stage
-        auto cbuf = [this, group](u32 index, u32 offset) -> u32 {
-            if (index >= 18) return 0;
-            const CbufBinding& b = cbufs_[group][index];
-            if (!b.valid || offset + 4 > b.size) return 0;
-            return read_u32(b.va + offset);
-        };
-        auto range = [this, group](u32 index, u64& lo, u32& size) -> bool {
-            if (index >= 18) return false;
-            const CbufBinding& b = cbufs_[group][index];
-            lo = b.va;
-            size = b.size;
-            return b.valid;
-        };
-        cur_stage_ = (int)s;
-        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbuf, range, pools, linked, post);
+        cur_stage_ = (int)s;  // s is also the stage's bind group; bind_resources allocates (or reuses) sets[s]
+        bind_resources(prog->stages[s]->prog.resources, sl, sets[s], cbufs_[s], 18, pools, linked, post);
     }
 
-    delete phase;
-    phase = new ProfScope(kProfPipeline);
+    phase.reset();
+    phase.emplace(kProfPipeline);
     VkPipeline pipe = get_pipeline(prog, key);
-    delete phase;
-    phase = nullptr;
+    phase.reset();
+    phase.reset();
     if (!pipe) {
         skipped_++;
         st_.skipped++;
@@ -852,7 +923,7 @@ void VkRenderer::do_draw(const u32* regs, const DrawParams& p, const void* inlin
         static const double after = debug::value(debug::VkFrameDumpAfter, 0.0);
         char kb[20];
         snprintf(kb, sizeof(kb), "%016llx", (unsigned long long)prog_key);
-        if (GetTickCount64() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
+        if (host::ticks_ms() - g_start_ms >= (u64)(after * 1000.0) && !strncmp(kb, dump_prog_.c_str(), dump_prog_.size())) {
             dump_frame_ = g_s.present_count + 2;  // the next full present
             hw_log("fd: program %s drawn (draw #%llu); dumping from present %llu", kb, (unsigned long long)draws_, (unsigned long long)dump_frame_);
             dump_prog_.clear();
@@ -1036,8 +1107,70 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
         fb.color[rt]->full_width_frame = g_s.present_count;
         fb.color[rt]->full_width_since_present = true;
     }
+    // A colour clear of a whole single-level, single-layer image is a load-op clear in COLOR_ATTACHMENT_OPTIMAL
+    // layout: the driver's fast clear (metadata only), which images in GENERAL layout never get. The game's full-
+    // screen G-buffer and effect clears were ~0.6 ms of GPU time per frame at the busy spot. (Depth clears gained
+    // nothing this way and stay as they are.)
+    if (att.size() == 1 && att[0].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
+        const Image* img = fb.color[rt];
+        if (img && img->info.levels == 1 && img->info.layers == 1 && img->info.type == ImageType::e2D && r.rect.offset.x == 0 &&
+            r.rect.offset.y == 0 && r.rect.extent.width == img->level_width(0) && r.rect.extent.height == img->level_height(0)) {
+            fast_clear_color(fb.color[rt], fb.color_view[rt], att[0].clearValue.color);
+            gputime::count_clear();
+            return;
+        }
+    }
     begin_rendering(fb);
-    vkCmdClearAttachments(g_rec.cmd_in_pass(), (u32)att.size(), att.data(), 1, &r);
+    struct {
+        VkClearAttachment a[2];
+        u32 n;
+        VkClearRect r;
+    } c{};
+    c.n = (u32)std::min<size_t>(att.size(), 2);
+    for (u32 i = 0; i < c.n; i++) c.a[i] = att[i];
+    c.r = r;
+    g_rec.record([c](VkCommandBuffer cb) { vkCmdClearAttachments(cb, c.n, c.a, 1, &c.r); });
+    gputime::count_clear();
+}
+
+void VkRenderer::fast_clear_color(Image* img, VkImageView view, const VkClearColorValue& color) {
+    g_rec.cmd();  // ends any rendering instance (with its barrier)
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img->image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    g_rec.record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
+    VkRenderingAttachmentInfo ai{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ai.imageView = view;
+    ai.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ai.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ai.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    ai.clearValue.color = color;
+    const VkExtent2D ext{img->level_width(0), img->level_height(0)};
+    gputime::mark(gputime::kPass, ext.width, ext.height, (u32)img->info.fmt.vk, 0, 1);
+    g_rec.record([ai, ext](VkCommandBuffer cb) {
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, ext};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &ai;
+        vkCmdBeginRendering(cb, &ri);
+        vkCmdEndRendering(cb);
+    });
+    gputime::mark(gputime::kOther);
+    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    g_rec.record([b](VkCommandBuffer cb) {
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    });
 }
 
 // ------------------------------------------------------------------ compute
@@ -1124,20 +1257,21 @@ void VkRenderer::do_dispatch(const u32* cr, u64 qmd_va) {
     if (!cp->layout->types.empty()) {
         set = alloc_set(cp->layout->layout);
         u32 pools[6] = {cr[0x55D], cr[0x55E], cr[0x55F], cr[0x557], cr[0x558], cr[0x559]};
-        auto range = [cb_va, cb_size](u32 index, u64& lo, u32& size) -> bool {
-            if (index >= 8 || !cb_va[index]) return false;
-            lo = cb_va[index];
-            size = cb_size[index];
-            return true;
-        };
-        bind_resources(cp->sh->prog.resources, cp->layout, set, cbuf, range, pools, linked, post);
+        CbufBinding cbs[8];
+        for (u32 i = 0; i < 8; i++) cbs[i] = {cb_va[i], cb_size[i], cb_va[i] != 0};
+        bind_resources(cp->sh->prog.resources, cp->layout, set, cbs, 8, pools, linked, post);
     }
-    VkCommandBuffer cb = g_rec.cmd();
-    full_barrier(cb);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
-    if (set) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl, 0, 1, &set, 0, nullptr);
-    vkCmdDispatch(cb, std::max(1u, q[12] & 0x7FFFFFFF), std::max(1u, q[13] & 0xFFFF), std::max(1u, q[13] >> 16));
-    full_barrier(cb);
+    g_rec.cmd();
+    const VkPipeline pipe = cp->pipe;
+    const VkPipelineLayout pl = cp->pl;
+    const u32 gx = std::max(1u, q[12] & 0x7FFFFFFF), gy = std::max(1u, q[13] & 0xFFFF), gz = std::max(1u, q[13] >> 16);
+    g_rec.record([pipe, pl, set, gx, gy, gz](VkCommandBuffer cb) {
+        full_barrier(cb);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        if (set) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &set, 0, nullptr);
+        vkCmdDispatch(cb, gx, gy, gz);
+        full_barrier(cb);
+    });
     for (auto& f : post) f();
 }
 
@@ -1223,11 +1357,14 @@ bool VkRenderer::do_blit(const u32* r) {
                src->info.height, (int)src->info.fmt.vk, b.srcOffsets[0].x, b.srcOffsets[0].y, b.srcOffsets[1].x, b.srcOffsets[1].y,
                (unsigned long long)dst->addr, dst->info.width, dst->info.height, (int)dst->info.fmt.vk, b.dstOffsets[0].x,
                b.dstOffsets[0].y, b.dstOffsets[1].x, b.dstOffsets[1].y);
-    VkCommandBuffer cb = g_rec.cmd();
-    full_barrier(cb);
-    vkCmdBlitImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-                   linear && !depth && !src->info.fmt.integer ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
-    full_barrier(cb);
+    g_rec.cmd();
+    const VkImage simg = src->image, dimg = dst->image;
+    const VkFilter filter = linear && !depth && !src->info.fmt.integer ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    g_rec.record([simg, dimg, b, filter](VkCommandBuffer cb) {
+        full_barrier(cb);
+        vkCmdBlitImage(cb, simg, VK_IMAGE_LAYOUT_GENERAL, dimg, VK_IMAGE_LAYOUT_GENERAL, 1, &b, filter);
+        full_barrier(cb);
+    });
     tc_.mark_modified(dst);
     return true;
 }

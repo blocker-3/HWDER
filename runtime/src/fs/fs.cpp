@@ -3,10 +3,15 @@
 //  - Save data: host directories <save folder>\<title id>\<user id | device | ...>\ (hostfs.cpp). The save folder is
 //    <exe dir>\save unless one was picked in the settings (save_dir.cpp).
 //  - SD card: <exe dir>\sdmc\.
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <set>
+#include <vector>
 
 #include "fs_internal.h"
 #include "fs/save_dir.h"
@@ -14,6 +19,7 @@
 
 namespace hwfs {
 
+#ifdef _WIN32
 std::wstring utf8_to_wide(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -30,8 +36,8 @@ std::string wide_to_utf8(const std::wstring& w) {
     return s;
 }
 
-const std::wstring& exe_dir() {
-    static std::wstring dir = [] {
+const HostPath& exe_dir() {
+    static HostPath dir = [] {
         std::wstring p(32768, L'\0');
         DWORD n = GetModuleFileNameW(nullptr, p.data(), (DWORD)p.size());
         p.resize(n);
@@ -41,6 +47,20 @@ const std::wstring& exe_dir() {
     }();
     return dir;
 }
+#else
+const HostPath& exe_dir() {
+    static HostPath dir = [] {
+        std::vector<char> buffer(4096);
+        for (;;) {
+            const auto size = readlink("/proc/self/exe", buffer.data(), buffer.size());
+            if (size < 0) hw_fatal("cannot locate host executable");
+            if (size_t(size) < buffer.size()) return HostPath(std::string(buffer.data(), size_t(size))).parent_path();
+            buffer.resize(buffer.size() * 2);
+        }
+    }();
+    return dir;
+}
+#endif
 
 bool trace_enabled() {
     static bool on = [] {
@@ -76,10 +96,10 @@ struct SaveDataAttribute {
 };
 static_assert(sizeof(SaveDataAttribute) == 0x40);
 
-std::wstring save_dir(const SaveDataAttribute& a) {
+HostPath save_dir(const SaveDataAttribute& a) {
     char buf[96];
     if (a.type == kSaveSystem) {
-        snprintf(buf, sizeof(buf), "\\system\\%016llX", (unsigned long long)a.system_save_data_id);
+        snprintf(buf, sizeof(buf), "system/%016llX", (unsigned long long)a.system_save_data_id);
     } else {
         u64 tid = a.program_id ? a.program_id : kern::g_process.title_id;
         char who[40];
@@ -95,14 +115,14 @@ std::wstring save_dir(const SaveDataAttribute& a) {
         case kSaveCache: snprintf(who, sizeof(who), "cache_%u", a.index); break;
         default: snprintf(who, sizeof(who), "device"); break;
         }
-        snprintf(buf, sizeof(buf), "\\%016llX\\%s", (unsigned long long)tid, who);
+        snprintf(buf, sizeof(buf), "%016llX/%s", (unsigned long long)tid, who);
     }
-    return active_save_root() + utf8_to_wide(buf);
+    return (active_save_root() / std::filesystem::u8path(buf)).make_preferred();
 }
 
 ServicePtr open_save(const SaveDataAttribute& a, bool read_only, const char* how) {
-    std::wstring dir = save_dir(a);
-    std::string label = "save" + wide_to_utf8(dir.substr(active_save_root().size()));
+    HostPath dir = save_dir(a);
+    std::string label = "save/" + path_utf8(dir.lexically_relative(active_save_root()));
     hw_log("fs: %s type %u title %016llx user %016llx%016llx -> %s", how, a.type, (unsigned long long)a.program_id,
            (unsigned long long)a.user_id[1], (unsigned long long)a.user_id[0], label.c_str());
     // Save data always "exists": the directory is created on first open.
@@ -145,7 +165,7 @@ public:
         });
         reg(18, [](Request&, Response& rs) {  // OpenSdCardFileSystem
             hw_log("fs: OpenSdCardFileSystem");
-            rs.push_object(make_host_filesystem(exe_dir() + L"\\sdmc", false, "sdmc"));
+            rs.push_object(make_host_filesystem(exe_dir() / "sdmc", false, "sdmc"));
         });
         reg(21, [](Request& rq, Response&) { hw_log("fs: DeleteSaveDataFileSystem(0x%llx)", (unsigned long long)rq.pop<u64>()); });
         reg(22, [](Request& rq, Response&) {  // CreateSaveDataFileSystem(attr, creation info, meta info)

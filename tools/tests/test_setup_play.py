@@ -143,6 +143,7 @@ class Play(unittest.TestCase):
             path.write_text(value if isinstance(value, str) else json.dumps(value))
             with self.assertRaises(ValueError): b.running_game(self.data, self.exe)
 
+    @unittest.skipUnless(os.name == "nt", "Windows process enumeration (ctypes.WinDLL)")
     def test_incomplete_process_enumeration_fails_closed(self):
         import ctypes
         class Function:

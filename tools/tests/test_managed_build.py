@@ -1,5 +1,6 @@
 """Command/certificate contracts only; no compiler or child process executes."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,7 @@ class ManagedBuild(unittest.TestCase):
         self.assertEqual(calls[1][0][-1],"managed_compatibility")
         self.assertEqual(calls[0][1]["env"],{"PATH":"private-only"})
 
+    @unittest.skipUnless(os.name == "nt", "the managed probe is the Windows LLVM-MinGW toolchain")
     def test_actual_production_probe_features_and_windows_defines(self):
         calls=[]
         def run(argv,**kwargs):

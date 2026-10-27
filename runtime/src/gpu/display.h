@@ -3,9 +3,12 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <functional>
 
 #include "hwder/runtime.h"
 #include "vk_loader.h"
+
+union SDL_Event;
 
 namespace display {
 
@@ -24,11 +27,28 @@ Device& device();
 
 // Opens the window and initializes Vulkan.
 void init();
+void apply_window_settings();
+void apply_refresh_rate();
+void restore_desktop_mode();
+void open_path(const std::string& path);
+#ifndef _WIN32
+void validation_report();
+void on_main_thread(std::function<void()> action);
+// A blocking error/warning dialog (an SDL message box on the main thread); MessageBoxW's role on Windows.
+void show_message(const std::string& text, bool warning = false);
+int run_main(int argc, char** argv, int (*runtime)(int, char**));
+void handle_window_event(const SDL_Event& event);
+void toggle_borderless();
+#endif
 // Starts the presenter for the game: the boot screen until frames arrive (and the 60 Hz monitor switch).
 void start();
 // One frame of just the overlay (the prelaunch screen) on a dark backdrop. Not paced: the caller sleeps.
 void present_overlay_frame();
+#ifdef _WIN32
 HWND window();
+#else
+SDL_Window* window();
+#endif
 
 // Present a guest frame (an image in GENERAL layout). Paced to the guest swap interval.
 // wait_sem/wait_value: timeline semaphore the presentation blit waits on (the renderer's last submit).

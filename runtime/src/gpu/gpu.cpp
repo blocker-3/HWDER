@@ -2,7 +2,8 @@
 #include "gpu.h"
 #include "gpu/diag.h"
 
-#include <windows.h>
+#include "host/timing.h"
+#include "host/sampler.h"
 
 #include <condition_variable>
 #include <deque>
@@ -33,19 +34,25 @@ static bool trace_enabled() {
 
 static u64 gpu_time_ns() { return hw_cntvct() * 625 / 12; }
 
-// Logs engine operations that take longer than `limit` ms (stall diagnostics).
+// Logs engine operations that take longer than `limit` ms (stall diagnostics). Runs around every draw: the
+// common case is one counter read and an integer compare.
+static double counter_ticks_per_ms() {
+    host::Counter f;
+    host::counter_frequency(&f);
+    return f.QuadPart / 1000.0;
+}
 struct OpTimer {
     const char* what;
     double limit;
     u64 extra;
-    LARGE_INTEGER a;
-    OpTimer(const char* w, u64 x = 0, double l = 30.0) : what(w), limit(l), extra(x) { QueryPerformanceCounter(&a); }
+    host::Counter a;
+    OpTimer(const char* w, u64 x = 0, double l = 30.0) : what(w), limit(l), extra(x) { host::counter(&a); }
     ~OpTimer() {
-        LARGE_INTEGER b, f;
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
-        double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
-        if (ms > limit) hw_log("gpu: slow: %s (%llu) took %.0f ms", what, (unsigned long long)extra, ms);
+        static const double per_ms = counter_ticks_per_ms();
+        host::Counter b;
+        host::counter(&b);
+        const s64 d = b.QuadPart - a.QuadPart;
+        if (d > (s64)(limit * per_ms)) hw_log("gpu: slow: %s (%llu) took %.0f ms", what, (unsigned long long)extra, d / per_ms);
     }
 };
 
@@ -65,9 +72,8 @@ public:
     u32 start[0x80] = {};
     u32 code_ptr = 0, start_ptr = 0;
 
-    using Send = void (*)(void* ctx, u32 method, u32 value);
-
-    // Execute macro `index` with parameters; writes go to send(method, value).
+    // Execute macro `index` with parameters; writes go to send(ctx, method, value) (a callable: inlined into the loop).
+    template <class Send>
     void run(u32 index, const std::vector<u32>& params, void* ctx, Send send) {
         u32 regs[8] = {};
         u32 pc = start[index & 0x7F];
@@ -392,16 +398,50 @@ static void draw(Engine3D& e, bool indexed, u32 first, u32 count, u32 topology) 
     p.instance_count = 1;
     if (trace_enabled()) hw_log("3d: draw %s first %u count %u topo %u inst %u", indexed ? "indexed" : "arrays", first, count, topology, p.base_instance);
     sync_cbufs(e);
-    {
-        OpTimer t("draw", count);
-        renderer()->yield_to_present();
-        renderer()->draw(e.regs, p);
-    }
+    // No OpTimer per draw (it cost ~2% of the GPU thread): a slow draw still shows as a slow pushbuffer entry.
+    renderer()->yield_to_present();
+    renderer()->draw(e.regs, p);
 }
 
 static void method_3d(Engine3D& e, u32 method, u32 value);
 
-static void macro_send(void* ctx, u32 method, u32 value) { method_3d(*(Engine3D*)ctx, method, value); }
+// 3D methods that do more than store their register (the cases of method_3d's switch). Every other method
+// below kNumRegs is a plain register write, done inline by the pushbuffer and macro loops.
+static const struct Special3D {
+    u8 s[m3d::kNumRegs] = {};
+    Special3D() {
+        using namespace m3d;
+        for (u32 m = 0; m < 0x40; m++) s[m] = 1;  // host (GPFIFO class) methods
+        for (u32 m : {(u32)WaitForIdle, (u32)LoadMmeInstructionRamPointer, (u32)LoadMmeInstructionRam,
+                      (u32)LoadMmeStartAddressRamPointer, (u32)LoadMmeStartAddressRam, (u32)I2mLaunchDma,
+                      (u32)I2mLoadInlineData, (u32)SyncInfo, (u32)DrawBegin, (u32)DrawEnd, (u32)VertexBufferCount,
+                      (u32)IndexBuffer + 6, (u32)DrawInlineIndex, (u32)InlineIndex2x16, (u32)InlineIndex4x8,
+                      (u32)VertexArrayInstanceFirst, (u32)VertexArrayInstanceSubsequent, (u32)ClearSurface,
+                      (u32)ReportSemaphore + 3})
+            s[m] = 1;
+        for (u32 m = IndexBuffer32First; m <= IndexBuffer8Subsequent; m++) s[m] = 1;
+        for (u32 m = ConstBufferData; m < ConstBufferData + 16; m++) s[m] = 1;
+        for (u32 g = 0; g < 5; g++) s[BindGroups + 4 + g * 8] = 1;
+    }
+} g_special3d;
+
+// HWDER_GPU_TRACE=2/3 log from method_3d / call_method: every method takes the slow path then.
+static bool method_trace() {
+    static const char* t = debug::str(debug::GpuTrace);
+    static const bool on = t && (t[0] == '2' || t[0] == '3');
+    return on;
+}
+
+static inline bool plain_3d(u32 method) { return method < m3d::kNumRegs && !g_special3d.s[method]; }
+
+static void macro_send(void* ctx, u32 method, u32 value) {
+    Engine3D& e = *(Engine3D*)ctx;
+    if (plain_3d(method) && !method_trace()) {
+        e.regs[method] = value;
+        return;
+    }
+    method_3d(e, method, value);
+}
 static u32 macro_read(void* ctx, u32 reg) { return reg < m3d::kNumRegs ? ((Engine3D*)ctx)->regs[reg] : 0; }
 
 static void flush_macro(Engine3D& e) {
@@ -412,7 +452,12 @@ static void flush_macro(Engine3D& e) {
     e.mme.ctx_read_ = macro_read;
     std::vector<u32> params;
     params.swap(e.macro_params);
-    e.mme.run(index, params, &e, macro_send);
+    e.mme.run(index, params, &e, [](void* ctx, u32 method, u32 value) { macro_send(ctx, method, value); });
+    // Hand the buffer back (keeps its capacity: no allocation per macro call) unless the macro started another one.
+    if (e.macro_params.empty()) {
+        params.clear();
+        e.macro_params.swap(params);
+    }
 }
 
 static void method_3d(Engine3D& e, u32 method, u32 value) {
@@ -488,7 +533,6 @@ static void method_3d(Engine3D& e, u32 method, u32 value) {
             p.base_instance = e.regs[GlobalBaseInstanceIndex] + e.instance;
             p.instance = e.instance;
             sync_cbufs(e);
-            OpTimer t("inline-index draw", p.count);
             renderer()->yield_to_present();
             renderer()->draw_inline_indices(e.regs, p, e.inline_indices.data(), 4);
             e.inline_indices.clear();
@@ -731,6 +775,24 @@ static void method_i2m(Channel* ch, u32 method, u32 value) {
 }
 
 // ------------------------------------------------------------------ puller
+// Time the GPU thread spends inside that busy time waiting for earlier GPU work: submission wait fences,
+// pushbuffer syncpoint waits and semaphore acquires (logged with the busy figure).
+enum { kGpuWaitFence, kGpuWaitSyncpt, kGpuWaitSem, kGpuWaitKinds };
+static double g_wait_ms[kGpuWaitKinds];
+static u64 g_wait_n[kGpuWaitKinds];
+struct GpuWaitTimer {
+    int kind;
+    host::Counter a;
+    explicit GpuWaitTimer(int k) : kind(k) { host::counter(&a); }
+    ~GpuWaitTimer() {
+        host::Counter b, f;
+        host::counter(&b);
+        host::counter_frequency(&f);
+        g_wait_ms[kind] += (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
+        g_wait_n[kind]++;
+    }
+};
+
 static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
     static const char* tr = debug::str(debug::GpuTrace);
     static const bool trace_host = tr && tr[0] == '3';  // host methods + class binds, per channel
@@ -755,7 +817,8 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                 renderer()->on_gpu_idle([ch, a, payload, short_form] { write_report(ch, a, payload, short_form); });
             } else if (op == 1 || op == 4 || op == 8) {  // acquire (equal / >= / and)
                 renderer()->flush_commands();
-                u64 t0 = GetTickCount64();
+                GpuWaitTimer wt(kGpuWaitSem);
+                u64 t0 = host::ticks_ms();
                 bool logged = false;
                 for (int spin = 0;; spin++) {
                     u32 v = 0;
@@ -764,7 +827,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                         (op == 8 && (v & ch->sem_payload)))
                         break;
                     if (spin > 1000) std::this_thread::yield();
-                    if (!logged && GetTickCount64() - t0 > 100) {
+                    if (!logged && host::ticks_ms() - t0 > 100) {
                         logged = true;
                         hw_log("gpu[sp%u]: semaphore acquire op %u at %llx waiting >100 ms (value %u, want %u)", ch->syncpt, op,
                                (unsigned long long)a, v, ch->sem_payload);
@@ -787,6 +850,7 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
                 renderer()->on_gpu_idle([id] { nv::syncpoint_increment(id); });
             } else {
                 renderer()->flush_commands();
+                GpuWaitTimer wt(kGpuWaitSyncpt);
                 if (!nv::syncpoint_wait(id, ch->syncpt_payload, 100 * 1000000)) {
                     hw_log("gpu[sp%u]: pushbuffer syncpoint wait %u >= %u (value %u) >100 ms", ch->syncpt, id, ch->syncpt_payload,
                            nv::syncpoint_read(id));
@@ -813,31 +877,42 @@ static void call_method(Channel* ch, u32 subch, u32 method, u32 value) {
     }
 }
 
+// A pushbuffer method: plain 3D register writes inline, everything else through call_method.
+static inline void put_method(Channel* ch, u32 subch, u32 method, u32 value) {
+    if (ch->bound_class[subch] == 0xB197 && plain_3d(method) && !method_trace()) {
+        ch->e3d.regs[method] = value;
+        return;
+    }
+    call_method(ch, subch, method, value);
+}
+
 static void process_pushbuffer(Channel* ch, const u32* words, u32 count) {
     diag::ProfScope ps(diag::kProfPushbuf);
     u32 i = 0;
     while (i < count) {
+        // The guest just wrote these words on another core: fetch a few cache lines ahead.
+        __builtin_prefetch(words + i + 64);
         u32 h = words[i++];
         u32 method = h & 0xFFF, subch = (h >> 13) & 7, n = (h >> 16) & 0x1FFF, op = h >> 29;
         switch (op) {
         case 1:  // incrementing
-            for (u32 k = 0; k < n && i < count; k++) call_method(ch, subch, method + k, words[i++]);
+            for (u32 k = 0; k < n && i < count; k++) put_method(ch, subch, method + k, words[i++]);
             break;
         case 3:  // non-incrementing
-            for (u32 k = 0; k < n && i < count; k++) call_method(ch, subch, method, words[i++]);
+            for (u32 k = 0; k < n && i < count; k++) put_method(ch, subch, method, words[i++]);
             break;
         case 4:  // immediate data in the header
-            call_method(ch, subch, method, n);
+            put_method(ch, subch, method, n);
             break;
         case 5:  // increment once
-            for (u32 k = 0; k < n && i < count; k++) call_method(ch, subch, method + (k ? 1 : 0), words[i++]);
+            for (u32 k = 0; k < n && i < count; k++) put_method(ch, subch, method + (k ? 1 : 0), words[i++]);
             break;
         case 0: {  // GRP0: tert op in bits 16-17 (0: legacy increment)
             if (h == 0) break;  // NOP
             u32 tert = (h >> 16) & 3;
             if (tert == 0) {
                 n = (h >> 18) & 0x7FF;
-                for (u32 k = 0; k < n && i < count; k++) call_method(ch, subch, method + k, words[i++]);
+                for (u32 k = 0; k < n && i < count; k++) put_method(ch, subch, method + k, words[i++]);
             }
             break;
         }
@@ -845,7 +920,7 @@ static void process_pushbuffer(Channel* ch, const u32* words, u32 count) {
             u32 tert = (h >> 16) & 3;
             if (tert == 0) {
                 n = (h >> 18) & 0x7FF;
-                for (u32 k = 0; k < n && i < count; k++) call_method(ch, subch, method, words[i++]);
+                for (u32 k = 0; k < n && i < count; k++) put_method(ch, subch, method, words[i++]);
             }
             break;
         }
@@ -872,15 +947,19 @@ static double g_busy_ms;
 double gpu_busy_ms_reset() {
     double v = g_busy_ms;
     g_busy_ms = 0;
+    hw_log("gpu: thread waits for the GPU over the last 120 frames, per frame: fence %.2f ms (%.1f), syncpoint %.2f ms (%.1f), "
+           "semaphore %.2f ms (%.1f)", g_wait_ms[kGpuWaitFence] / 120, g_wait_n[kGpuWaitFence] / 120.0, g_wait_ms[kGpuWaitSyncpt] / 120,
+           g_wait_n[kGpuWaitSyncpt] / 120.0, g_wait_ms[kGpuWaitSem] / 120, g_wait_n[kGpuWaitSem] / 120.0);
+    for (int k = 0; k < kGpuWaitKinds; k++) g_wait_ms[k] = 0, g_wait_n[k] = 0;
     return v;
 }
 static void execute_inner(Channel* ch, Submission& s);
 static void execute(Channel* ch, Submission& s) {
-    LARGE_INTEGER f, a, b;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&a);
+    host::Counter f, a, b;
+    host::counter_frequency(&f);
+    host::counter(&a);
     execute_inner(ch, s);
-    QueryPerformanceCounter(&b);
+    host::counter(&b);
     double ms = (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart;
     g_busy_ms += ms;
     if (ms > 100.0)
@@ -888,14 +967,18 @@ static void execute(Channel* ch, Submission& s) {
 }
 static u64 g_exec_gi_tag = 0;
 u64 exec_gi_tag() { return g_exec_gi_tag; }
+static u64 g_exec_count = 0;
+u64 exec_count() { return g_exec_count; }
 static void execute_inner(Channel* ch, Submission& s) {
     ch->syncpt = s.syncpoint;
     g_exec_gi_tag = s.gi_tag;
+    g_exec_count++;
     static const char* tr = debug::str(debug::GpuTrace);
     if (tr && tr[0] == '3')
         hw_log("gpu[sp%u]: --- submission: %zu entries, wait %d, increment %d x%u", ch->syncpt, s.entries.size(), (int)s.wait,
                (int)s.increment, s.increment_count);
     if (s.wait) {
+        GpuWaitTimer wt(kGpuWaitFence);
         // Bounded so a fence that can only be produced by later queued work cannot wedge the GPU thread.
         while (!nv::syncpoint_wait(s.wait_fence.id, s.wait_fence.value, 100 * 1000000)) {
             audit::fence_timeouts.fetch_add(1, std::memory_order_relaxed);
@@ -928,15 +1011,21 @@ static void execute_inner(Channel* ch, Submission& s) {
 }
 
 static void gpu_thread() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER GPU");
+    host::name_thread(L"HWDER GPU");
+    if (int us = debug::value(debug::SampleUs, 0); us > 0) {
+        const char* log = debug::str(debug::Log);
+        host::sample_current_thread(us, std::string(log && *log ? log : "hwder.log") + ".samples.txt");
+    }
     for (;;) {
         std::pair<Channel*, Submission> item;
         {
             std::unique_lock<std::mutex> l(g_q.m);
             perf::WaitScope ws(perf::kWaitGpuQueue);
+            if (g_q.queue.empty()) host::timeline("gpu idle");
             g_q.cv.wait(l, [] { return !g_q.queue.empty(); });
             item = std::move(g_q.queue.front());
             g_q.queue.pop_front();
+            host::timeline("gpu exec", item.second.entries.size(), g_q.queue.size());
         }
         g_q.drained.notify_all();
         perf::sample_core();
@@ -971,6 +1060,7 @@ void channel_submit(Channel* ch, Submission&& s) {
             perf::WaitScope ws(perf::kWaitGpuQueue);
             g_q.drained.wait(l, [] { return g_q.queue.size() < kMaxQueuedSubmissions; });
         }
+        host::timeline("gpfifo", g_q.queue.size(), s.increment ? s.increment_count : 0);
         g_q.queue.emplace_back(ch, std::move(s));
     }
     g_q.cv.notify_one();

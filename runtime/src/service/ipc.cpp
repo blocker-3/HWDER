@@ -1,5 +1,5 @@
 // HIPC/CMIF message handling. Layout reference: switchbrew "IPC_Marshalling".
-#include <windows.h>
+#include "host/timing.h"
 
 #include "ipc.h"
 #include "hipc.h"
@@ -161,12 +161,12 @@ Result send_sync_request(Handle h, u8* msg) {
     if (dump) dump_msg("req ", msg);
     {
         // A service call that takes long blocks the guest thread that issued it: report it.
-        LARGE_INTEGER d0, d1, df;
-        QueryPerformanceCounter(&d0);
+        host::Counter d0, d1, df;
+        host::counter(&d0);
         hw_gi_note_ipc(target->name().c_str(), rq.command);
         target->dispatch(rq, rs);
-        QueryPerformanceCounter(&d1);
-        QueryPerformanceFrequency(&df);
+        host::counter(&d1);
+        host::counter_frequency(&df);
         double ms = (d1.QuadPart - d0.QuadPart) * 1000.0 / df.QuadPart;
         if (ms > 10.0) hw_log("ipc: slow: %s command %u took %.0f ms", target->name().c_str(), rq.command, ms);
     }

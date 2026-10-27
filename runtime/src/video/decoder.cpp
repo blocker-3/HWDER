@@ -2,9 +2,10 @@
 //
 // NVDEC: the guest's multimedia library parses the stream itself and hands the engine a picture
 // info block (H264 parameter set + DPB) plus the slice data. We rebuild SPS/PPS from the parameter
-// set, prepend them to the slice data and decode with the Windows Media Foundation H.264 decoder.
+// set, prepend them to the slice data and decode with Media Foundation or FFmpeg's native H.264 decoder.
 // Decoded frames are kept host-side keyed by the output surface's luma address; VIC looks them up
 // by its input surface address, converts YUV -> RGB and writes the guest output surface.
+#ifdef _WIN32
 #include <windows.h>
 #include <codecapi.h>
 #include <mfapi.h>
@@ -12,10 +13,22 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <wmcodecdsp.h>
+#else
+// Link the host's shared LGPL libavcodec/libavutil; no FFmpeg sources or codec
+// binaries are bundled. No libx264/GPL encoder or libavformat dependency is used.
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
+#include <libavutil/pixfmt.h>
+}
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
+#include <cerrno>
+#include <climits>
 #include <deque>
 #include <set>
 #include <thread>
@@ -26,12 +39,15 @@
 #include <vector>
 
 #include "gpu/gpu.h"
+#include "host/timing.h"
 #include "host1x.h"
 
+#ifdef _WIN32
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "wmcodecdspuuid.lib")
 #pragma comment(lib, "ole32.lib")
+#endif
 
 namespace video {
 
@@ -298,6 +314,7 @@ std::vector<u8> build_headers(const H264Info& p) {
 }
 
 // ------------------------------------------------------------------ Media Foundation H.264 decoder
+#ifdef _WIN32
 class MfDecoder {
 public:
     bool ok() const { return mft_ != nullptr; }
@@ -465,11 +482,151 @@ private:
     u32 width_ = 0, height_ = 0;
     s32 stride_ = 0;
 };
+using HostDecoder = MfDecoder;
+#else
+class AvDecoder {
+public:
+    AvDecoder() {
+        // Select FFmpeg's native software decoder, never an optional wrapper.
+        const AVCodec* codec = avcodec_find_decoder_by_name("h264");
+        if (!codec) { hw_log("nvdec: FFmpeg native H.264 decoder unavailable");return; }
+        context_ = avcodec_alloc_context3(codec);
+        frame_ = av_frame_alloc();
+        picture_ = av_frame_alloc();
+        packet_ = av_packet_alloc();
+        if (!context_ || !frame_ || !picture_ || !packet_) { release();hw_log("nvdec: FFmpeg allocation failed");return; }
+        // The guest needs each completed picture in decode order, including B
+        // pictures whose POC precedes a forward reference already submitted to
+        // VIC. FFmpeg's presentation-order output can suppress those pictures
+        // under our no-reordering SPS. Retain the native decoder's allocated
+        // picture buffers and copy them only after synchronous decoding finishes.
+        context_->thread_count = 1;
+        context_->thread_type = 0;
+        context_->opaque = this;
+        context_->get_buffer2 = acquire_picture;
+        context_->max_pixels = 8192ll * 8192;
+        const int status = avcodec_open2(context_, codec, nullptr);
+        if (status < 0) { warn("open", status);release();return; }
+        hw_log("nvdec: FFmpeg native H.264 decoder ready");
+    }
+    ~AvDecoder() { release(); }
+    AvDecoder(const AvDecoder&) = delete;
+    AvDecoder& operator=(const AvDecoder&) = delete;
+
+    void restart() {
+        if (context_) avcodec_flush_buffers(context_);
+        if (frame_) av_frame_unref(frame_);
+        if (picture_) av_frame_unref(picture_);
+        if (packet_) av_packet_unref(packet_);
+    }
+    void decode(const std::vector<u8>& au, u32 tag) {
+        if (!context_ || au.empty() || au.size() > INT_MAX) return;
+        av_frame_unref(picture_);
+        av_packet_unref(packet_);
+        // av_new_packet adds AV_INPUT_BUFFER_PADDING_SIZE zero bytes, required
+        // by optimized bitstream readers even when the final NAL ends at size.
+        const int allocated = av_new_packet(packet_, int(au.size()));
+        if (allocated < 0) { warn("packet", allocated);return; }
+        memcpy(packet_->data, au.data(), au.size());
+        // Keep surface identity attached to the picture across decoder buffering.
+        // Tags are addresses, not a monotonic presentation clock.
+        packet_->pts = tag;
+        packet_->dts = AV_NOPTS_VALUE;
+        int status = avcodec_send_packet(context_, packet_);
+        if (status == AVERROR(EAGAIN)) {
+            if (!drain()) { av_packet_unref(packet_);av_frame_unref(picture_);return; }
+            status = avcodec_send_packet(context_, packet_);
+        }
+        av_packet_unref(packet_);
+        if (status < 0) { warn("send", status);av_frame_unref(picture_);return; }
+        if (!drain()) { av_frame_unref(picture_);return; }
+        // send/receive may decode internally; with all codec threading disabled,
+        // every write to the retained picture has finished before drain returns.
+        // A missing picture is an error, never permission to reuse an old tag.
+        if (picture_->data[0] && picture_->pts == int64_t(tag)) deliver(picture_);
+        else warn("decoded picture unavailable", AVERROR_INVALIDDATA);
+        av_frame_unref(picture_);
+    }
+private:
+    static int acquire_picture(AVCodecContext* context, AVFrame* frame, int flags) {
+        const int status = avcodec_default_get_buffer2(context, frame, flags);
+        if (status < 0) return status;
+        auto* self = static_cast<AvDecoder*>(context->opaque);
+        // H.264 may allocate missing-reference placeholders first. The actual
+        // picture is allocated last; keep only its own reference-counted planes.
+        av_frame_unref(self->picture_);
+        return av_frame_ref(self->picture_, frame);
+    }
+    void release() {
+        av_packet_free(&packet_);
+        av_frame_free(&picture_);
+        av_frame_free(&frame_);
+        avcodec_free_context(&context_);
+    }
+    void warn(const char* operation, int status) {
+        if (warnings_++ >= 4) return;
+        char error[AV_ERROR_MAX_STRING_SIZE]{};
+        av_strerror(status, error, sizeof(error));
+        hw_log("nvdec: FFmpeg %s failed: %s", operation, error);
+    }
+    bool drain() {
+        for (;;) {
+            const int status = avcodec_receive_frame(context_, frame_);
+            if (status == AVERROR(EAGAIN) || status == AVERROR_EOF) return true;
+            if (status < 0) { warn("receive", status);return false; }
+            // Consume the presentation queue so the codec accepts the next AU;
+            // guest delivery uses the completed picture retained by get_buffer2.
+            av_frame_unref(frame_);
+        }
+    }
+    void deliver(const AVFrame* frame_) {
+        const int width = frame_->width, height = frame_->height;
+        const bool nv12 = frame_->format == AV_PIX_FMT_NV12;
+        const bool planar = frame_->format == AV_PIX_FMT_YUV420P;
+        // VIC's existing NV12 contract requires even, 8-bit 4:2:0 dimensions.
+        // Refuse other formats rather than delivering partially filled planes.
+        if ((!nv12 && !planar) || width <= 0 || height <= 0 || (width & 1) || (height & 1) ||
+            width > 8192 || height > 8192 || frame_->pts < 0 || frame_->pts > UINT32_MAX ||
+            !frame_->data[0] || !frame_->data[1] || (planar && !frame_->data[2])) {
+            warn("output format or surface tag", AVERROR(EINVAL));return;
+        }
+        auto stride_fits = [](int stride, int bytes) { return stride >= bytes || int64_t(stride) <= -int64_t(bytes); };
+        if (!stride_fits(frame_->linesize[0], width) || !stride_fits(frame_->linesize[1], nv12 ? width : width / 2) ||
+            (planar && !stride_fits(frame_->linesize[2], width / 2))) {
+            warn("output stride", AVERROR(EINVAL));return;
+        }
+        auto output = std::make_shared<Frame>();
+        output->width = u32(width);output->height = u32(height);
+        output->y.resize(size_t(width) * height);
+        output->uv.resize(size_t(width) * (height / 2));
+        for (int y = 0; y < height; ++y)
+            memcpy(output->y.data() + size_t(y) * width, frame_->data[0] + int64_t(y) * frame_->linesize[0], width);
+        for (int y = 0; y < height / 2; ++y) {
+            u8* target = output->uv.data() + size_t(y) * width;
+            const u8* u = frame_->data[1] + int64_t(y) * frame_->linesize[1];
+            if (nv12) memcpy(target, u, width);
+            else {
+                const u8* v = frame_->data[2] + int64_t(y) * frame_->linesize[2];
+                for (int x = 0; x < width / 2; ++x) { target[x * 2] = u[x];target[x * 2 + 1] = v[x]; }
+            }
+        }
+        put_frame(u32(frame_->pts), std::move(output));
+        static bool first = true;
+        if (first) { first = false;hw_log("nvdec: first FFmpeg frame decoded (%dx%d)", width, height); }
+    }
+    AVCodecContext* context_ = nullptr;
+    AVFrame* frame_ = nullptr;
+    AVFrame* picture_ = nullptr;
+    AVPacket* packet_ = nullptr;
+    unsigned warnings_ = 0;
+};
+using HostDecoder = AvDecoder;
+#endif
 
 // One decoder per NVDEC channel state, owned and driven by the decode worker thread so the guest
 // thread that submits never blocks on the codec.
-std::map<host1x::ChannelState*, std::unique_ptr<MfDecoder>> g_decoders;
-std::unique_ptr<MfDecoder> g_spare_decoder;  // warm transform for the next movie (creation costs ~200 ms)
+std::map<host1x::ChannelState*, std::unique_ptr<HostDecoder>> g_decoders;
+std::unique_ptr<HostDecoder> g_spare_decoder;  // warm decoder for the next movie
 std::atomic<bool> g_new_session_pending{false};
 struct DecodeJob {
     host1x::ChannelState* st;
@@ -481,8 +638,8 @@ std::condition_variable g_jobs_cv;
 std::deque<DecodeJob> g_jobs;
 
 void decode_worker() {
-    SetThreadDescription(GetCurrentThread(), L"HWDER nvdec");
-    g_spare_decoder = std::make_unique<MfDecoder>();  // warm up before the first movie asks
+    host::name_thread(L"HWDER nvdec");
+    g_spare_decoder = std::make_unique<HostDecoder>();  // warm up before the first movie asks
     for (;;) {
         DecodeJob job;
         {
@@ -499,7 +656,7 @@ void decode_worker() {
             if (g_spare_decoder) g_spare_decoder->restart();
         }
         auto& d = g_decoders[job.st];
-        if (!d) d = g_spare_decoder ? std::move(g_spare_decoder) : std::make_unique<MfDecoder>();
+        if (!d) d = g_spare_decoder ? std::move(g_spare_decoder) : std::make_unique<HostDecoder>();
         d->decode(job.au, job.tag);
         {
             std::lock_guard<std::mutex> l(g_frames_lock);
@@ -518,7 +675,7 @@ void queue_decode(DecodeJob&& job) {
     start_decode_worker();
     {
         std::lock_guard<std::mutex> l(g_frames_lock);
-        u64 now = GetTickCount64();
+        u64 now = host::ticks_ms();
         if (g_last_job_ms && now - g_last_job_ms > 400) {  // a new movie: forget the old one's frames
             g_session++;
             g_frames.clear();

@@ -1,3 +1,4 @@
+#include <cstdlib>
 // Virtual RomFS image.
 //
 // The SDK's RomFS driver reads the raw (level 3) RomFS image through the IStorage returned by
@@ -7,7 +8,11 @@
 //
 // Image layout:  [header 0x50][pad to 0x200][file data, each file 0x10-aligned]
 //                [dir hash table][dir entries][file hash table][file entries]
+#ifdef _WIN32
 #include <windows.h>
+#endif
+#include "host/file.h"
+#include "host/timing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -64,14 +69,14 @@ u32 align4(u32 v) { return (v + 3) & ~3u; }
 
 struct BDir {
     std::string name;
-    std::wstring host;
+    HostPath host;
     u32 parent = 0;
     std::vector<u32> dirs, files;
     u32 off = 0;
 };
 struct BFile {
     std::string name;
-    std::wstring host;
+    HostPath host;
     u32 parent = 0;
     u64 size = 0;
     u64 data = 0;  // relative to file data start
@@ -80,7 +85,7 @@ struct BFile {
 
 class RomFsImage {
 public:
-    bool build(const std::wstring& root);
+    bool build(const HostPath& root);
     Result read(u64 off, u8* dst, u64 size);
     u64 size() const { return total_; }
     size_t file_count() const { return files_.size(); }
@@ -89,7 +94,7 @@ public:
 
 private:
     void scan(u32 dir_idx);
-    HANDLE handle(u32 file);
+    host::FileHandle handle(u32 file);
     bool read_host(u32 file, u64 off, u8* dst, u64 size);
 
     std::vector<BDir> dirs_;
@@ -102,32 +107,31 @@ private:
         u32 file;
     };
     std::vector<Span> spans_;  // non-empty files in data order
-    std::unique_ptr<std::atomic<HANDLE>[]> handles_;
+    std::unique_ptr<std::atomic<host::FileHandle>[]> handles_;
 };
 
 void RomFsImage::scan(u32 di) {
-    std::wstring pattern = dirs_[di].host + L"\\*";
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr,
-                                FIND_FIRST_EX_LARGE_FETCH);
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::vector<std::pair<std::string, WIN32_FIND_DATAW>> sub_dirs, sub_files;
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        std::string name = wide_to_utf8(fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) sub_dirs.emplace_back(std::move(name), fd);
-        else sub_files.emplace_back(std::move(name), fd);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+    std::error_code error;
+    std::vector<std::pair<std::string, std::filesystem::directory_entry>> sub_dirs, sub_files;
+    for (std::filesystem::directory_iterator it(dirs_[di].host, error), end; !error && it != end; it.increment(error)) {
+#ifndef _WIN32
+        // Do not follow arbitrary host symlink trees while synthesizing guest RomFS.
+        if (it->is_symlink(error)) continue;
+#endif
+        std::string name = path_utf8(it->path().filename());
+        if (it->is_directory(error)) sub_dirs.emplace_back(std::move(name), *it);
+        else if (it->is_regular_file(error)) sub_files.emplace_back(std::move(name), *it);
+    }
     auto by_name = [](const auto& a, const auto& b) { return a.first < b.first; };
     std::sort(sub_dirs.begin(), sub_dirs.end(), by_name);
     std::sort(sub_files.begin(), sub_files.end(), by_name);
     for (auto& [name, f] : sub_files) {
         BFile bf;
         bf.name = name;
-        bf.host = dirs_[di].host + L"\\" + f.cFileName;
+        bf.host = f.path();
         bf.parent = di;
-        bf.size = ((u64)f.nFileSizeHigh << 32) | f.nFileSizeLow;
+        bf.size = f.file_size(error);
+        if (error) continue;
         dirs_[di].files.push_back((u32)files_.size());
         files_.push_back(std::move(bf));
     }
@@ -135,7 +139,7 @@ void RomFsImage::scan(u32 di) {
     for (auto& [name, f] : sub_dirs) {
         BDir bd;
         bd.name = name;
-        bd.host = dirs_[di].host + L"\\" + f.cFileName;
+        bd.host = f.path();
         bd.parent = di;
         children.push_back((u32)dirs_.size());
         dirs_.push_back(std::move(bd));
@@ -144,9 +148,9 @@ void RomFsImage::scan(u32 di) {
     for (u32 c : children) scan(c);
 }
 
-bool RomFsImage::build(const std::wstring& root) {
-    DWORD attr = GetFileAttributesW(root.c_str());
-    bool exists = attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+bool RomFsImage::build(const HostPath& root) {
+    std::error_code error;
+    bool exists = std::filesystem::is_directory(root, error);
     dirs_.push_back(BDir{});
     dirs_[0].host = root;
     if (exists) scan(0);
@@ -241,38 +245,33 @@ bool RomFsImage::build(const std::wstring& root) {
 
     for (u32 fi : data_order)
         if (files_[fi].size) spans_.push_back({kDataStart + files_[fi].data, files_[fi].size, fi});
-    handles_ = std::make_unique<std::atomic<HANDLE>[]>(files_.size());
-    for (size_t i = 0; i < files_.size(); i++) handles_[i].store(nullptr, std::memory_order_relaxed);
+    handles_ = std::make_unique<std::atomic<host::FileHandle>[]>(files_.size());
+    for (size_t i = 0; i < files_.size(); i++) handles_[i].store(host::invalid_file, std::memory_order_relaxed);
     return exists;
 }
 
-HANDLE RomFsImage::handle(u32 fi) {
-    HANDLE h = handles_[fi].load(std::memory_order_acquire);
-    if (h) return h;
-    HANDLE nh = CreateFileW(files_[fi].host.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (nh == INVALID_HANDLE_VALUE) {
-        hw_log("romfs: cannot open host file '%s' (error %lu)", wide_to_utf8(files_[fi].host).c_str(), GetLastError());
-        return INVALID_HANDLE_VALUE;
+host::FileHandle RomFsImage::handle(u32 fi) {
+    auto h = handles_[fi].load(std::memory_order_acquire);
+    if (h != host::invalid_file) return h;
+    auto nh = host::file_open(files_[fi].host, host::file_read);
+    if (nh == host::invalid_file) {
+        hw_log("romfs: cannot open host file '%s' (error %lu)", path_utf8(files_[fi].host).c_str(), host::file_error());
+        return host::invalid_file;
     }
-    HANDLE expected = nullptr;
+    auto expected = host::invalid_file;
     if (!handles_[fi].compare_exchange_strong(expected, nh, std::memory_order_acq_rel)) {
-        CloseHandle(nh);
+        host::file_close(nh);
         return expected;
     }
     return nh;
 }
 
 bool RomFsImage::read_host(u32 fi, u64 off, u8* dst, u64 size) {
-    HANDLE h = handle(fi);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    auto h = handle(fi);
+    if (h == host::invalid_file) return false;
     while (size) {
-        DWORD chunk = (DWORD)std::min<u64>(size, 0x40000000ull);
-        OVERLAPPED ov{};
-        ov.Offset = (DWORD)off;
-        ov.OffsetHigh = (DWORD)(off >> 32);
-        DWORD got = 0;
-        if (!ReadFile(h, dst, chunk, &got, &ov) || got == 0) return false;
+        const auto got = host::file_read_at(h, dst, size_t(std::min<u64>(size, 0x40000000ull)), off);
+        if (got <= 0) return false;
         dst += got;
         off += got;
         size -= got;
@@ -406,9 +405,9 @@ RomFsImage* image() {
     std::call_once(g_image_once, [] {
         auto* img = new RomFsImage;
         auto t0 = std::chrono::steady_clock::now();
-        const std::wstring& root = romfs_host_dir();
+        const HostPath& root = romfs_host_dir();
         if (!img->build(root))
-            hw_log("romfs: directory '%s' not found - RomFS will be empty", wide_to_utf8(root).c_str());
+            hw_log("romfs: directory '%s' not found - RomFS will be empty", path_utf8(root).c_str());
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         hw_log("romfs: built virtual image: %zu files, %.2f GiB, in %.1f ms", img->file_count(),
                img->size() / (1024.0 * 1024.0 * 1024.0), ms);
@@ -430,22 +429,21 @@ public:
             if (!b.addr || !size) return;
             // Slow-read diagnostics: a single RomFS read over 20 ms stalls the game thread that issued it
             // (movie start, scene loads); logs the size so the decrypt/IO throughput can be judged.
-            LARGE_INTEGER rt0, rt1, rf;
-            QueryPerformanceFrequency(&rf);
-            QueryPerformanceCounter(&rt0);
+            host::Counter rt0, rf;
+            host::counter_frequency(&rf);
+            host::counter(&rt0);
             struct ReadTimer {
-                LARGE_INTEGER *t0, *f;
+                host::Counter *t0, *f;
                 u64 off, size;
                 ~ReadTimer() {
-                    LARGE_INTEGER t1;
-                    QueryPerformanceCounter(&t1);
+                    host::Counter t1;
+                    host::counter(&t1);
                     double ms = (t1.QuadPart - t0->QuadPart) * 1000.0 / f->QuadPart;
                     if (ms > 20.0)
                         hw_log("fs: slow: romfs read of %llu KiB at 0x%llx took %.0f ms (%.0f MB/s)", (unsigned long long)(size >> 10),
                                (unsigned long long)off, ms, size / 1048576.0 / (ms / 1000.0));
                 }
             } read_timer{&rt0, &rf, off, size};
-            (void)rt1;
             if (nsp::active()) {  // served straight out of the NSP's program NCA
                 if (!nsp::romfs_read(off, (u8*)b.addr, size)) {
                     static std::atomic<int> warned{0};
@@ -474,8 +472,9 @@ public:
 
 }  // namespace
 
-const std::wstring& romfs_host_dir() {
-    static std::wstring dir = [] {
+const HostPath& romfs_host_dir() {
+    static HostPath dir = [] {
+#ifdef _WIN32
         std::wstring p;
         if (const wchar_t* e = _wgetenv(L"HWDER_ROMFS")) p = e;
         else {
@@ -487,6 +486,13 @@ const std::wstring& romfs_host_dir() {
         while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
         if (p.rfind(L"\\\\", 0) != 0) p = L"\\\\?\\" + p;  // long-path form
         return p;
+#else
+        const char* setting = std::getenv("HWDER_ROMFS");
+        HostPath path = std::filesystem::u8path(setting ? setting : hw_romfs_path());
+        std::error_code error;
+        const auto absolute = std::filesystem::absolute(path, error);
+        return error ? path.lexically_normal() : absolute.lexically_normal();
+#endif
     }();
     return dir;
 }

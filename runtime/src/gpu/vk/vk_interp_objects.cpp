@@ -2,6 +2,11 @@
 // halfway between the previous real frame's copy of the same draw and the game-drawn in-between frame, with the
 // HWDER_GI_OBJ_TRACE diagnostics. Moved text-for-text from vk_renderer.cpp.
 #include <cmath>
+#if defined(__AVX__)
+#include <immintrin.h>
+#endif
+#include "host/timing.h"
+#include "host/platform.h"
 
 #include "interp/camera.h"
 #include "vk_renderer.h"
@@ -49,6 +54,35 @@ static bool obj_first_pos(const float* m, u64 nf, float out[3]) {
     return false;
 }
 
+// Sum of |x[i] - y[i]| over n floats. Stops early, with a partial sum >= limit, once the sum reaches `limit`
+// (checked every 64 floats). Pairing compares whole bone palettes (up to 1024 floats) against dozens of candidates,
+// the largest single cost of the 120 fps mode's in-between frames.
+static float abs_diff_sum(const float* x, const float* y, u64 n, float limit) {
+    float s = 0.0f;
+    u64 i = 0;
+#if defined(__AVX__)
+    const __m256 sign = _mm256_set1_ps(-0.0f);
+    for (; i + 64 <= n; i += 64) {
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        for (u64 j = i; j < i + 64; j += 16) {
+            a0 = _mm256_add_ps(a0, _mm256_andnot_ps(sign, _mm256_sub_ps(_mm256_loadu_ps(x + j), _mm256_loadu_ps(y + j))));
+            a1 = _mm256_add_ps(a1, _mm256_andnot_ps(sign, _mm256_sub_ps(_mm256_loadu_ps(x + j + 8), _mm256_loadu_ps(y + j + 8))));
+        }
+        const __m256 a = _mm256_add_ps(a0, a1);
+        __m128 h = _mm_add_ps(_mm256_castps256_ps128(a), _mm256_extractf128_ps(a, 1));
+        h = _mm_add_ps(h, _mm_movehl_ps(h, h));
+        h = _mm_add_ss(h, _mm_shuffle_ps(h, h, 1));
+        s += _mm_cvtss_f32(h);
+        if (s >= limit) return s;
+    }
+#endif
+    for (; i < n; i++) {
+        s += std::fabs(x[i] - y[i]);
+        if ((i & 3) == 3 && s >= limit) return s;
+    }
+    return s;
+}
+
 static const char* const kObjOutcomes[] = {"no previous frame", "no transform",   "key not in previous frame",
                                            "unpaired",          "ambiguous",      "offsets",
                                            "move",              "rigid",          "rotation",
@@ -58,7 +92,7 @@ enum ObjOutcome : u8 { kOutNoPrev, kOutNoTransform, kOutNoKey, kOutUnpaired, kOu
 
 void VkRenderer::obj_trace_log() {
     static u64 last = 0;
-    const u64 now = GetTickCount64();
+    const u64 now = host::ticks_ms();
     if (now - last < 1000) return;
     last = now;
     for (ObjTraceRec* r : {&obj_tr_skin_, &obj_tr_any_}) {
@@ -149,32 +183,94 @@ void VkRenderer::obj_frame_begin(u64 tag) {
     if ((tag & 1) && ++frames % 600 == 0) {
         hw_log("gi: stage c over 600 extra frames: %llu c3 blocks, %llu matched the previous frame, %llu blended "
                "(%llu matrices); left at tick n: %llu ambiguous, %llu offsets, %llu move, "
-               "%llu rigid, %llu rotation; skinned (8+ matrices) %llu matched, %llu blended; cost %.2f ms per tick",
+               "%llu rigid, %llu rotation; skinned (8+ matrices) %llu matched, %llu blended; cost %.2f ms per tick "
+               "(GPU thread waited %.2f ms per tick for it)",
                (unsigned long long)obj_st_.draws, (unsigned long long)obj_st_.matched, (unsigned long long)obj_st_.blended,
                (unsigned long long)obj_st_.mats, (unsigned long long)obj_st_.ambiguous,
                (unsigned long long)obj_st_.offsets, (unsigned long long)obj_st_.move, (unsigned long long)obj_st_.rigid,
                (unsigned long long)obj_st_.rotation, (unsigned long long)obj_st_.skin_matched,
-               (unsigned long long)obj_st_.skin_blended, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0);
+               (unsigned long long)obj_st_.skin_blended, obj_st_.ticks ? obj_st_.ms / obj_st_.ticks : 0.0,
+               obj_st_.ticks ? obj_wait_ns_.exchange(0) / 1e6 / obj_st_.ticks : 0.0);
         obj_st_ = ObjStats{};
     }
 }
 
-void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
-    if (cur_stage_ != 0 || index != 3 || bytes < 64 || bytes > 4096) return;  // world matrix / bone palette sizes
+// ------------------------------------------------------------------ the blending thread
+bool VkRenderer::obj_async() {
+    // HWDER_GI_OBJ_SYNC blends on the GPU thread as before; the trace reads blending state on the GPU thread too.
+    static const bool sync = debug::flag(debug::GiObjSync) || debug::flag(debug::GiObjTrace);
+    if (sync) return false;
+    if (!obj_jobs_) {
+        obj_jobs_.reset(new ObjJob[kObjJobs]);
+        std::thread([this] { obj_worker(); }).detach();
+        g_before_submit = [] {
+            if (auto* r = static_cast<VkRenderer*>(renderer())) r->obj_drain();
+        };
+        hw_log("gi: object blending on its own thread (HWDER_GI_OBJ_SYNC=1: on the GPU thread)");
+    }
+    return true;
+}
+
+VkRenderer::ObjJob& VkRenderer::obj_job_slot() {
+    const u32 head = obj_head_.load(std::memory_order_relaxed);
+    while (head - obj_tail_.load(std::memory_order_acquire) >= kObjJobs) host::thread_yield();  // full
+    return obj_jobs_[head % kObjJobs];
+}
+
+void VkRenderer::obj_job_push() {
+    obj_head_.store(obj_head_.load(std::memory_order_relaxed) + 1, std::memory_order_seq_cst);
+    if (obj_sleeping_.load(std::memory_order_seq_cst)) {
+        std::lock_guard<std::mutex> l(obj_m_);
+        obj_cv_.notify_one();
+    }
+}
+
+void VkRenderer::obj_drain() {
+    const u32 head = obj_head_.load(std::memory_order_relaxed);
+    if (obj_tail_.load(std::memory_order_acquire) == head) return;
+    const u64 t0 = host::monotonic_ns();
+    while (obj_tail_.load(std::memory_order_acquire) != head) host::thread_yield();
+    obj_wait_ns_.fetch_add(host::monotonic_ns() - t0, std::memory_order_relaxed);
+}
+
+void VkRenderer::obj_worker() {
+    host::name_thread(L"HWDER objects");
+    for (;;) {
+        u32 tail = obj_tail_.load(std::memory_order_relaxed);
+        // Spin briefly while the GPU thread is binding (the jobs come every few microseconds), then sleep.
+        for (int spin = 0; obj_head_.load(std::memory_order_acquire) == tail; spin++) {
+            if (spin < 2000) {
+                host::thread_yield();
+                continue;
+            }
+            std::unique_lock<std::mutex> l(obj_m_);
+            obj_sleeping_.store(true, std::memory_order_seq_cst);
+            obj_cv_.wait(l, [&] { return obj_head_.load(std::memory_order_seq_cst) != tail; });
+            obj_sleeping_.store(false, std::memory_order_relaxed);
+            break;
+        }
+        ObjJob& job = obj_jobs_[tail % kObjJobs];
+        obj_transforms(job.index, job.data, job.bytes, job.key, job.tag);
+        memcpy(job.dst, job.data, job.bytes);
+        obj_tail_.store(tail + 1, std::memory_order_release);
+    }
+}
+
+void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes, u64 draw_key, u64 tag) {
+    if (index != 3 || bytes < 64 || bytes > 4096) return;  // world matrix / bone palette sizes (vertex stage only)
     struct Timer {
         double& acc;
-        LARGE_INTEGER t0;
-        explicit Timer(double& a) : acc(a) { QueryPerformanceCounter(&t0); }
+        host::Counter t0;
+        explicit Timer(double& a) : acc(a) { host::counter(&t0); }
         ~Timer() {
-            static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-            LARGE_INTEGER t1;
-            QueryPerformanceCounter(&t1);
+            static host::Counter f = [] { host::Counter x; host::counter_frequency(&x); return x; }();
+            host::Counter t1;
+            host::counter(&t1);
             acc += (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
         }
     } timer(obj_st_.ms);
     static const bool off = debug::flag(debug::GiNoObjects);
     if (off) return;
-    u64 tag = gpu::exec_gi_tag();
     if (!tag) return;
     obj_frame_begin(tag);
     const u64 nf = bytes / 4;
@@ -185,7 +281,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         if (!has) return;  // nothing to blend in it
         ObjEntry e{(u32)obj_cur_.arena.size(), (u32)bytes, {pb[0], pb[1], pb[2]}, true};
         obj_cur_.arena.insert(obj_cur_.arena.end(), data, data + bytes);
-        obj_cur_.idx[cur_draw_key_].push_back(e);
+        obj_cur_.idx[draw_key].push_back(e);
         return;
     }
     // In-between frame of tick n: blend against real frame n-1. Many objects share a model (the same
@@ -207,6 +303,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
         const u16* mats = nullptr;
         u32 nm = 0, fail_n = ~0u, nprev = 0, occ = 0;
         float pair_d = -1, second_d = -1;
+        u64 key = 0;
         ~Trace() {
             if (!on || !r->obj_cam_) return;
             float p[3];
@@ -217,7 +314,7 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
             if (r->obj_link_ok_ && r->obj_near_cur_.size() < 32) {
                 const float lx = p[0] - r->obj_link_[0], ly = p[1] - r->obj_link_[1], lz = p[2] - r->obj_link_[2];
                 const float ld = std::sqrt(lx * lx + ly * ly + lz * lz);
-                if (ld < kObjNear) r->obj_near_cur_.push_back({r->cur_draw_key_, (u32)bytes, mats ? nm : 0, outcome, ld});
+                if (ld < kObjNear) r->obj_near_cur_.push_back({key, (u32)bytes, mats ? nm : 0, outcome, ld});
             }
             for (ObjTraceRec* t : {&r->obj_tr_any_, bytes >= 1024 ? &r->obj_tr_skin_ : nullptr}) {
                 if (!t || (t->valid && t->d_at <= d)) continue;
@@ -241,17 +338,18 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
             }
         }
     } tr{this, trace, (const float*)data, bytes};
+    tr.key = draw_key;
     if (!has) tr.outcome = kOutNoTransform;
     if (!has || obj_prev_.tag != ((tag >> 1) - 1) << 1) return;
     tr.outcome = kOutNoKey;
-    auto it = obj_prev_.idx.find(cur_draw_key_);
+    auto it = obj_prev_.idx.find(draw_key);
     if (it == obj_prev_.idx.end() || it->second.empty()) return;
     tr.outcome = kOutUnpaired;
     tr.nprev = (u32)it->second.size();
-    auto& used = obj_used_[cur_draw_key_];
+    auto& used = obj_used_[draw_key];
     if (used.size() < it->second.size()) used.resize(it->second.size(), false);  // cleared per frame, capacity kept
     // Same draw order first (the common case), else the nearest unused block among nearby occurrences.
-    const u32 occ = obj_occ_[cur_draw_key_]++;
+    const u32 occ = obj_occ_[draw_key]++;
     tr.occ = occ;
     const auto& prevs = it->second;
     auto dist = [&](size_t k) {
@@ -265,24 +363,40 @@ void VkRenderer::obj_transforms(u32 index, u8* data, u64 bytes) {
     // different block is nearly as close.
     size_t lo = occ > 32 ? occ - 32 : 0, hi = std::min(prevs.size(), (size_t)occ + 33);
     if (prevs.size() <= 96) lo = 0, hi = prevs.size();
+    // At most 96 candidates (the whole list when it is that short, else occ-32..occ+32).
+    u32 cand[96];
+    float cand_d[96];
+    u32 ncand = 0;
     float cd = INFINITY;
     for (size_t k = lo; k < hi; k++)
-        if (!used[k] && prevs[k].size == bytes) cd = std::min(cd, dist(k));
+        if (!used[k] && prevs[k].size == bytes) {
+            const float d = dist(k);
+            cd = std::min(cd, d);
+            cand[ncand] = (u32)k, cand_d[ncand++] = d;
+        }
     if (cd > kObjMaxMove * kObjMaxMove) return;
     const float* bb = (const float*)data;
     const float lim2 = std::max(4.0f * cd, 16.0f);
+    // Nearest first: the best two pairs are almost always among the nearest, and once two are known the content
+    // sums of the others stop early (a crowd of one model puts dozens of whole bone palettes here). Equal
+    // distances keep the draw order, so identical blocks still pair as before.
+    u32 nshort = 0;
+    for (u32 i = 0; i < ncand; i++) {
+        const u32 ki = cand[i];
+        const float di = cand_d[i];
+        if (di > lim2) continue;
+        u32 j = nshort++;  // insertion sort in place: j <= i, and cand[i] is saved above
+        for (; j > 0 && cand_d[j - 1] > di; j--) cand[j] = cand[j - 1], cand_d[j] = cand_d[j - 1];
+        cand[j] = ki, cand_d[j] = di;
+    }
     int c1 = -1, c2 = -1;
     float l1 = INFINITY, l2 = INFINITY;
-    for (size_t k = lo; k < hi; k++) {
-        if (used[k] || prevs[k].size != bytes || dist(k) > lim2) continue;
+    for (u32 ci = 0; ci < nshort; ci++) {
+        const size_t k = cand[ci];
         const float* x = (const float*)(obj_prev_.arena.data() + prevs[k].off);
         // The sum only grows: once it reaches the second-best so far this block cannot change the outcome (crowds of one
         // model put dozens of candidates here, each a whole bone palette).
-        float s = 0.0f;
-        for (u64 i = 0; i < nf && s < l2; i += 4) {
-            const u64 e = std::min<u64>(i + 4, nf);
-            for (u64 j = i; j < e; j++) s += std::fabs(x[j] - bb[j]);
-        }
+        const float s = abs_diff_sum(x, bb, nf, l2);
         if (s >= l2) continue;
         if (s < l1) l2 = l1, c2 = c1, l1 = s, c1 = (int)k;
         else if (s < l2) l2 = s, c2 = (int)k;

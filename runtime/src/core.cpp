@@ -1,11 +1,21 @@
 // HWDER runtime core: code dispatch, logging/crash reporting, and process boot.
 #include <exception>
 #include <csignal>
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
-#include <windows.h>
 #include <dbghelp.h>
 #include <timeapi.h>
+#else
+#include <execinfo.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+#include <filesystem>
+#include <mutex>
+#include <thread>
+#include "host/platform.h"
+#include "host/timing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -40,7 +50,10 @@ extern "C" const unsigned long long hw_resumable[];
 extern "C" const unsigned hw_resumable_count;
 static std::vector<u64> g_starts;  // sorted function starts
 
+extern "C" int hw_guest_libc = 0;
+
 static void build_dispatch() {
+    hw_guest_libc = debug::flag(debug::GuestLibc) ? 1 : 0;
     for (unsigned m = 0; m < hw_module_count; m++) {
         TextTable t{hw_modules[m].text_lo, hw_modules[m].text_hi, {}};
         t.fns.assign((t.hi - t.lo) >> 2, nullptr);
@@ -87,6 +100,7 @@ static std::string pretty_symbol(const char* sym) {
 }
 
 // Paths are UTF-8 internally (the ANSI code page cannot spell every folder name a user may have).
+#ifdef _WIN32
 static std::wstring to_w(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
     std::wstring w(n, L'\0');
@@ -112,7 +126,23 @@ static std::string exe_dir() {
     std::string s = to_u8(p);
     return s.substr(0, s.find_last_of("\\/"));
 }
-
+#else
+static std::string env_u8(const char* name) {
+    const char* value = std::getenv(name);
+    return value ? value : "";
+}
+static FILE* fopen_u8(const std::string& path, const char* mode) { return std::fopen(path.c_str(), mode); }
+static std::string exe_dir() {
+    std::vector<char> path(4096);
+    for (;;) {
+        const auto count = readlink("/proc/self/exe", path.data(), path.size());
+        if (count < 0) { std::perror("/proc/self/exe"); host::process_exit(1); }
+        if (static_cast<std::size_t>(count) < path.size())
+            return std::string(path.data(), static_cast<std::size_t>(count)).substr(0, std::string(path.data(), count).find_last_of('/'));
+        path.resize(path.size() * 2);
+    }
+}
+#endif
 
 // Functions with an unresolved indirect branch accept entry at any instruction (see gen.py):
 // the dispatcher sets c->pc = target | 1 and the function's prologue jumps to that label.
@@ -138,7 +168,7 @@ static void unknown_target(Ctx* c) {
     for (auto& t : g_tables) {
         if (c->pc >= t.lo && c->pc < t.hi) {
             // Record it so the next generator run adds it as an entry point.
-            if (FILE* f = fopen_u8(exe_dir() + "\\extra_entries.txt", "a")) {
+            if (FILE* f = fopen_u8(exe_dir() + "/extra_entries.txt", "a")) {
                 fprintf(f, "0x%llx\n", (unsigned long long)c->pc);
                 fclose(f);
             }
@@ -169,16 +199,16 @@ extern "C" void hw_dispatch(Ctx* c) {
 
 // ------------------------------------------------------------------ misc runtime hooks
 extern "C" u64 hw_cntvct(void) {
-    static LARGE_INTEGER freq = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
+    static host::Counter freq = [] {
+        host::Counter f;
+        host::counter_frequency(&f);
         return f;
     }();
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
+    host::Counter t;
+    host::counter(&t);
     return (u64)((double)t.QuadPart * (19200000.0 / (double)freq.QuadPart));
 }
-extern "C" void hw_yield(void) { SwitchToThread(); }
+extern "C" void hw_yield(void) { host::thread_yield(); }
 extern "C" void hw_brk(Ctx* c, u64 pc, u32 imm) {
     hw_log("guest brk #0x%x at 0x%llx (x0=0x%llx)", imm, (unsigned long long)pc, (unsigned long long)c->x[0]);
     hw_fatal("guest abort");
@@ -189,44 +219,31 @@ extern "C" void hw_unimpl(Ctx* c, u64 pc, u32 word) {
 }
 extern "C" void hw_sleep_ns(s64 ns) {
     if (ns <= 0) {
-        SwitchToThread();
+        host::thread_yield();
         return;
     }
-    static thread_local HANDLE timer =
-        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     // Sleeps of a millisecond or more end on time: the game's frame limiter sleeps ~15 ms on a job worker every
     // frame, and the high-resolution timer woke it ~0.3 ms late, so a busy battle ran at 17.0 ms instead of 16.7.
     // The timer covers all but the last millisecond, the rest is a yielding spin to the deadline.
     constexpr s64 kSpinNs = 1000000;
-    static const LARGE_INTEGER freq = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        return f;
-    }();
-    LARGE_INTEGER start;
-    QueryPerformanceCounter(&start);
+    const u64 start = host::monotonic_ns();
     const bool precise = ns >= kSpinNs;
     const s64 timer_ns = precise ? ns - kSpinNs : ns;
-    if (timer_ns > 0) {
-        LARGE_INTEGER due;
-        due.QuadPart = -(timer_ns / 100);
-        if (timer && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
-        else Sleep((DWORD)((timer_ns + 999999) / 1000000));
-    }
+    if (timer_ns > 0) host::sleep_ns(timer_ns);
     if (precise) {
-        const s64 end = start.QuadPart + ns * freq.QuadPart / 1000000000;
-        LARGE_INTEGER now;
-        for (;;) {
-            QueryPerformanceCounter(&now);
-            if (now.QuadPart >= end) break;
-            SwitchToThread();
-        }
+        const u64 end = start + (u64)ns;
+        while (host::monotonic_ns() < end) host::thread_yield();
     }
+}
+
+extern "C" void hw_exit_process(int code) {
+    if (code == 0) display::restore_desktop_mode();
+    host::process_exit(code);
 }
 
 // ------------------------------------------------------------------ logging / crashes
 static FILE* g_log;
-static SRWLOCK g_log_lock = SRWLOCK_INIT;
+static std::mutex g_log_lock;
 
 extern "C" void hw_log(const char* fmt, ...) {
     char buf[4096];
@@ -234,29 +251,31 @@ extern "C" void hw_log(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    static const ULONGLONG t0 = GetTickCount64();
-    unsigned ms = (unsigned)(GetTickCount64() - t0);
-    AcquireSRWLockExclusive(&g_log_lock);
+    static const u64 t0 = host::ticks_ms();
+    unsigned ms = (unsigned)(host::ticks_ms() - t0);
+    std::lock_guard lock(g_log_lock);
     fprintf(stderr, "[hwder] %s\n", buf);
     if (g_log) {
         fprintf(g_log, "[%3u.%03u] %s\n", ms / 1000, ms % 1000, buf);
         fflush(g_log);
     }
-    ReleaseSRWLockExclusive(&g_log_lock);
 }
 
 extern "C" void hw_fatal(const char* why) {
     hw_log("fatal: %s", why);
+#ifdef _WIN32
     if (IsDebuggerPresent()) __debugbreak();
+#endif
     if (debug::flag(debug::Hold)) {  // keep the window up showing the reason
         display::set_status(std::string("halted: ") + why);
-        for (;;) Sleep(1000);
+        for (;;) host::sleep_ms(1000);
     }
-    ExitProcess(1);
+    host::process_exit(1);
 }
 
 // Minidumps go beside the log as hwder-crash-YYYYMMDD-HHMMSS.dmp (empty dir: disabled, HWDER_NO_DUMP=1).
 // They stay on this machine; nothing is uploaded.
+#ifdef _WIN32
 static wchar_t g_dump_dir[MAX_PATH];
 static std::atomic<DWORD> g_dump_owner{0};   // thread that started the one dump of this process
 static std::atomic<DWORD> g_dump_worker{0};  // thread running MiniDumpWriteDump
@@ -288,7 +307,7 @@ static void write_crash_dump(EXCEPTION_POINTERS* ep) {
     DWORD self = GetCurrentThreadId(), none = 0;
     if (!g_dump_owner.compare_exchange_strong(none, self)) {
         if (none != self)
-            for (;;) Sleep(INFINITE);
+            for (;;) host::sleep_ms(INFINITE);
         return;
     }
     SYSTEMTIME st;
@@ -454,12 +473,93 @@ static void start_thread_dumper() {
     static int period = atoi(e);
     CreateThread(nullptr, 0, [](void*) -> DWORD {
         for (;;) {
-            Sleep(period * 1000);
+            host::sleep_ms(period * 1000);
             hw_log("---- thread dump ----");
             dump_threads();
         }
     }, nullptr, 0, nullptr);
 }
+
+#else
+extern "C" void hw_log_backtrace(const char* tag) {
+    hw_log("backtrace: %s", tag);
+    void* frames[48];
+    const int count = backtrace(frames, 48);
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+}
+static void start_thread_dumper() {
+    const char* setting = std::getenv("HWDER_THREAD_DUMP");
+    const int seconds = setting ? std::atoi(setting) : 0;
+    if (seconds <= 0) return;
+    std::thread([seconds] {
+        for (;;) {
+            host::sleep_ms(static_cast<unsigned>(seconds) * 1000);
+            hw_log("---- thread state (Linux: running register capture unavailable) ----");
+            for (const auto& thread : kern::all_threads())
+                hw_log("thread %llu entry %llx started %d exited %d", (unsigned long long)thread->id,
+                       (unsigned long long)thread->entry, (int)thread->started.load(), (int)thread->exited.load());
+        }
+    }).detach();
+}
+static int g_crash_fd = -1;  // the log's descriptor, for the signal handler
+
+// Async-signal-safe: hexadecimal into `out`, returns the length.
+static int crash_hex(char* out, unsigned long long v) {
+    char tmp[16];
+    int n = 0;
+    do tmp[n++] = "0123456789abcdef"[v & 15]; while ((v >>= 4) && n < 16);
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static void crash_write(const char* text, size_t size) {
+    ssize_t ignored = write(STDERR_FILENO, text, size);
+    if (g_crash_fd >= 0) ignored = write(g_crash_fd, text, size);
+    (void)ignored;
+}
+
+static void install_linux_crash_handlers() {
+    std::set_terminate([] {
+        hw_log_backtrace("std::terminate");
+        std::_Exit(3);
+    });
+    // The crash report goes into hwder.log (and stderr): signal, faulting address, host thread and a backtrace,
+    // whose names include the recompiled guest functions (f_<address>, the executable exports its symbols).
+    // Only async-signal-safe calls; backtrace() is called once here so its library is loaded before a crash.
+    // The default handler then produces the distribution's ordinary core dump, subject to its policy.
+    if (g_log) {
+        fflush(g_log);
+        g_crash_fd = fileno(g_log);
+    }
+    void* warm[1];
+    backtrace(warm, 1);
+    struct sigaction action{};
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESETHAND | SA_SIGINFO;
+    action.sa_sigaction = [](int signal, siginfo_t* info, void*) {
+        char line[160];
+        int n = 0;
+        auto put = [&](const char* s) { while (*s && n < (int)sizeof(line) - 1) line[n++] = *s++; };
+        put("\n[hwder] CRASH: signal ");
+        if (signal >= 10) line[n++] = (char)('0' + signal / 10 % 10);
+        line[n++] = (char)('0' + signal % 10);
+        put(" at address 0x");
+        n += crash_hex(line + n, (unsigned long long)(uintptr_t)(info ? info->si_addr : nullptr));
+        put(", host thread ");
+        n += crash_hex(line + n, (unsigned long long)syscall(SYS_gettid));
+        put(" (hex); backtrace:\n");
+        crash_write(line, (size_t)n);
+        void* frames[64];
+        const int count = backtrace(frames, 64);
+        backtrace_symbols_fd(frames, count, STDERR_FILENO);
+        if (g_crash_fd >= 0) backtrace_symbols_fd(frames, count, g_crash_fd);
+        constexpr char tail[] = "[hwder] end of crash report; the system's core dump policy applies\n";
+        crash_write(tail, sizeof(tail) - 1);
+        raise(signal);
+    };
+    for (int signal : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(signal, &action, nullptr);
+}
+#endif
 
 // ------------------------------------------------------------------ NSO loading
 static bool lz4_decompress(const u8* src, size_t src_size, u8* dst, size_t dst_size) {
@@ -514,7 +614,7 @@ static std::vector<u8> read_exefs(const std::string& exefs, const char* name) {
         hwfs::nsp::read_exefs(name, d);
         return d;
     }
-    return read_file(exefs + "\\" + name);
+    return read_file(exefs + "/" + name);
 }
 
 static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
@@ -528,12 +628,19 @@ static void load_module(const HwModuleInfo& mi, const std::string& exefs) {
         for (int i = 0; i < 16; i++) snprintf(id + 2 * i, 3, "%02x", nso[0x40 + i]);
         if (strcmp(id, mi.build_id) != 0) {
             hw_log("loader: %s has build id %s, but this build was made for %s", mi.name, id, mi.build_id);
+#ifdef _WIN32
             if (!debug::flag(debug::Mute))
                 MessageBoxW(nullptr,
                             L"This HWDER build was prepared for a different version of the game than the files it "
                             L"was given (for example with or without the game update).\n\n"
                             L"Open HWDER Setup and choose Prepare again with the files you want to play.",
                             L"HWDER", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#else
+            if (!debug::flag(debug::Mute))
+                display::show_message("This HWDER build was prepared for a different version of the game than the files it "
+                                      "was given (for example with or without the game update).\n\n"
+                                      "Run play-local.sh again with the files you want to play.");
+#endif
             hw_fatal("game module does not match the generated code");
         }
     }
@@ -592,6 +699,8 @@ void hw_config_load(const std::string& dir);
 // Hybrid CPUs (Intel P/E cores): keep the game's threads on the performance cores. In a big battle the GPU command
 // thread, the presenter and their helpers landing on efficiency cores cost about 10% of the 120 fps mode's frame rate
 // (stage-4 replay: 9.0 -> 7.6 ms per frame on the GPU thread). HWDER_ALL_CORES=1 keeps every core.
+// Windows only: Linux leaves placement to the scheduler (the Ally's Z1 Extreme has no efficiency cores).
+#ifdef _WIN32
 static void prefer_performance_cores() {
     if (debug::flag(debug::AllCores)) return;
     ULONG len = 0;
@@ -616,14 +725,20 @@ static void prefer_performance_cores() {
     if (SetProcessDefaultCpuSets(GetCurrentProcess(), ids.data(), (ULONG)ids.size()))
         hw_log("cpu: hybrid CPU, preferring its %zu performance logical processors (HWDER_ALL_CORES=1 to use all)", ids.size());
 }
+#endif
 
-int main(int argc, char** argv) {
+static int runtime_main(int argc, char** argv) {
     std::string dir = exe_dir();
-    SetCurrentDirectoryW(to_w(dir).c_str());  // caches, settings and saves live beside the exe
+#ifdef _WIN32
+    SetCurrentDirectoryW(to_w(dir).c_str());
+#else
+    if (chdir(dir.c_str()) != 0) { std::perror("chdir executable directory"); return 1; }
+#endif  // caches, settings and saves live beside the exe
     std::string log_path = env_u8("HWDER_LOG");
-    if (log_path.empty()) log_path = dir + "\\hwder.log";
+    if (log_path.empty()) log_path = dir + "/hwder.log";
     g_log = fopen_u8(log_path, "w");
     hw_log("HWDER %s (commit %s, built %s)", hw_version(), hw_commit(), hw_build_date());
+#ifdef _WIN32
     prefer_performance_cores();
     std::string no_dump = env_u8("HWDER_NO_DUMP");
     if (no_dump.empty() || no_dump == "0") {
@@ -671,18 +786,27 @@ int main(int argc, char** argv) {
     _set_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
         hw_log("CRT: invalid parameter on thread %lu", GetCurrentThreadId());
     });
+#else
+    install_linux_crash_handlers();
+#endif
     if (env_u8("HWDER_TEST_CRASH") == "1") {  // exercises the crash log + minidump path without game data
         hw_log("HWDER_TEST_CRASH=1: crashing on purpose");
         volatile int* p = nullptr;
         *p = 1;
     }
+#ifdef _WIN32
     timeBeginPeriod(1);
+#endif
     hw_config_load(dir);
 
     std::string exefs = env_u8("HWDER_EXEFS");
-    if (exefs.empty()) exefs = dir + "\\exefs";
+    if (exefs.empty()) exefs = dir + "/exefs";
     // Shift held at launch shows the startup screen even when it is set to be skipped.
+#ifdef _WIN32
     const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+#else
+    const bool shift = false;  // HWDER_PRELAUNCH=1 forces startup before a Linux window exists.
+#endif
     bool prelaunch = false;
     {
         // Game data: an NSP (decrypted in-process with the user's prod.keys) or an extracted exefs/ +
@@ -693,7 +817,8 @@ int main(int argc, char** argv) {
         hwfs::nsp::set_update(settings::launch().update_path);
         std::string err;
         bool nsp = hwfs::nsp::init(dir, err);
-        bool have_dir = GetFileAttributesW(to_w(exefs + "\\main").c_str()) != INVALID_FILE_ATTRIBUTES;
+        std::error_code path_error;
+        bool have_dir = std::filesystem::is_regular_file(std::filesystem::u8path(exefs) / "main", path_error);
         // The startup screen: always when the game file or keys are missing or fail their checks, else unless
         // skipped in the settings. Never in directory (dev) mode or in automated runs (HWDER_NO_PRELAUNCH, or
         // HWDER_MUTE with HWDER_OFFSCREEN); HWDER_PRELAUNCH=1 forces it for the latter.
@@ -706,7 +831,11 @@ int main(int argc, char** argv) {
                                             "(the .nsp) and your prod.keys next to hwder.exe.\n\n(Looked for *.nsp in: " + dir + ")"
                                           : "Cannot load the game from the NSP:\n\n" + err;
             hw_log("boot: %s", msg.c_str());
+#ifdef _WIN32
             if (!debug::flag(debug::Mute)) MessageBoxW(nullptr, to_w(msg).c_str(), L"HWDER", MB_ICONERROR | MB_OK);
+#else
+            if (!debug::flag(debug::Mute)) display::show_message(msg);
+#endif
             return 2;
         }
         if (!prelaunch) hw_log("boot: game data from %s", nsp ? hwfs::nsp::path().c_str() : exefs.c_str());
@@ -718,7 +847,7 @@ int main(int argc, char** argv) {
     if (prelaunch) {
         if (!prelaunch::run(dir)) {
             hw_log("boot: quit from the startup screen");
-            ExitProcess(0);
+            hw_exit_process(0);
         }
         hw_log("boot: game data from %s", hwfs::nsp::path().c_str());
     }
@@ -742,7 +871,16 @@ int main(int argc, char** argv) {
     kern::start_thread(t.get());
     start_thread_dumper();
     perf::start();
-    WaitForSingleObject(t->host_handle, INFINITE);
+    host::thread_join_release(t->host_handle);
+    t->host_handle = nullptr;
     hw_log("main thread exited");
-    return 0;
+    hw_exit_process(0);
+}
+
+int main(int argc, char** argv) {
+#ifdef _WIN32
+    return runtime_main(argc, argv);
+#else
+    return display::run_main(argc, argv, runtime_main);
+#endif
 }

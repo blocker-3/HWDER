@@ -9,6 +9,8 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
+import stat
 from pathlib import Path
 import re
 import shutil
@@ -105,7 +107,7 @@ def completed_stage(cache, category, key, produce):
 @contextmanager
 def setup_lock(cache):
     """Serialize coordinators sharing a cache; OS releases the lock after crash/interrupt."""
-    cache.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (cache / "setup.lock").open("a+b") as f:
         if not f.tell():
             f.write(b"0")
@@ -153,8 +155,9 @@ def check_prerequisites(root, managed=None):
     if managed is not None:
         import managed_tools
         return managed_tools.prerequisites(root, managed)
-    if os.name != "nt" or sys.maxsize <= 2**32 or sys.version_info < (3, 10):
-        raise ValueError("Setup requires Windows x64 and Python 3.10+ x64")
+    if ((os.name != "nt" and not sys.platform.startswith("linux")) or sys.maxsize <= 2**32
+            or sys.version_info < (3, 10) or platform.machine().lower() not in ("amd64", "x86_64")):
+        raise ValueError("Setup requires Windows or Linux x86-64 and Python 3.10+ x64")
     versions = {}
     for package in ("cryptography", "lz4"):
         try:
@@ -165,32 +168,87 @@ def check_prerequisites(root, managed=None):
                  "spirv-headers/include/spirv/unified1/spirv.hpp"):
         if not (root / "third_party" / path).is_file():
             raise ValueError("Missing pinned third-party sources: run git submodule update --init --recursive")
-    import msvc
-    from build import vs_tool
-    env = msvc.vs_env()
-    tools = {"clang-cl": shutil.which("clang-cl.exe", path=env["PATH"]),
-             "cmake": vs_tool(os.path.join("CMake", "bin"), "cmake.exe", env),
-             "ninja": vs_tool("Ninja", "ninja.exe", env)}
-    if not tools["clang-cl"]:
-        raise ValueError("Install Visual Studio's C++ Clang tools for Windows component (clang-cl)")
-    for variable, relative in (("INCLUDE", "Windows.h"), ("LIB", "kernel32.lib"), ("LIB", "libcmt.lib")):
-        if not any((Path(p) / relative).is_file() for p in env.get(variable, "").split(";") if p):
-            raise ValueError(f"Windows SDK / MSVC x64 prerequisites incomplete: missing {relative}")
+    from build import toolchain as build_toolchain
+    env, cmake, ninja, cc, cxx = build_toolchain()
+    tools = {"compiler": cc, "cmake": cmake, "ninja": ninja}
+    if os.name == "nt":
+        for variable, relative in (("INCLUDE", "Windows.h"), ("LIB", "kernel32.lib"), ("LIB", "libcmt.lib")):
+            if not any((Path(p) / relative).is_file() for p in env.get(variable, "").split(";") if p):
+                raise ValueError(f"Windows SDK / MSVC x64 prerequisites incomplete: missing {relative}")
+        versions["target_platform"] = "windows-x86_64"
+    else:
+        versions["target_platform"] = "linux-x86_64"
+        tools["compiler_cxx"] = cxx
+        pkg_config = shutil.which("pkg-config", path=env["PATH"])
+        if not pkg_config:
+            raise ValueError("Linux runtime development prerequisites require pkg-config")
+        for package in ("openssl >= 3.0", "libavcodec", "libavutil"):
+            result = subprocess.run([pkg_config, "--modversion", package], env=env, capture_output=True, text=True)
+            if result.returncode:
+                raise ValueError(f"Missing Linux development dependency: {package}")
+            versions[package] = result.stdout.strip()
     for name, path in tools.items():
         r = subprocess.run([path, "--version"], env=env, capture_output=True, text=True, check=True)
         versions[name] = {"path": path, "version": r.stdout.strip()}
     match = re.search(r"cmake version (\d+)\.(\d+)", versions["cmake"]["version"])
     if not match or tuple(map(int, match.groups())) < (3, 24):
         raise ValueError("CMake 3.24+ required")
+    if os.name != "nt" and any("clang" not in versions[name]["version"].lower() for name in ("compiler", "compiler_cxx")):
+        raise ValueError("Linux generated code requires Clang for both C and C++")
     versions.update({k: env.get(k) for k in ("VCToolsVersion", "WindowsSDKVersion", "WindowsSdkDir")})
     # Compiler/linker overrides and search paths affect output even when versions match.
     # Retain only their digest, never arbitrary environment variable contents.
     versions["compiler_environment_sha256"] = digest({
         k: env.get(k) for k in ("INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "LINK", "_LINK_",
-                              "CFLAGS", "CXXFLAGS", "LDFLAGS")})
+                              "CFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "CPATH", "C_INCLUDE_PATH",
+                              "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "PKG_CONFIG_PATH")})
     versions["python"] = sys.version
-    log("prerequisites verified: clang-cl, MSVC x64 libraries, Windows SDK, CMake, Ninja, cryptography, lz4")
+    log("prerequisites verified: " + versions["target_platform"] + ", Clang, CMake, Ninja, cryptography, lz4")
     return versions
+
+
+def target_name(toolchain):
+    target = toolchain.get("target_platform", "windows-x86_64")
+    if target not in ("windows-x86_64", "linux-x86_64"):
+        raise ValueError(f"Unsupported build target: {target}")
+    return "hwder.exe" if target == "windows-x86_64" else "hwder"
+
+
+def verify_executable(path, toolchain):
+    target = toolchain.get("target_platform", "windows-x86_64")
+    expected = "Windows executable" if target == "windows-x86_64" else "Linux x86-64 executable"
+    if not path.is_file():
+        raise ValueError(f"Build succeeded without a {expected}")
+    with path.open("rb") as stream:
+        header = stream.read(64)
+    if target == "windows-x86_64":
+        valid = header.startswith(b"MZ")
+    else:
+        # ELF64 little endian, current ABI version, executable/PIE, AMD64 machine.
+        valid = (len(header) == 64 and header[:7] == b"\x7fELF\x02\x01\x01"
+                 and struct.unpack_from("<HH", header, 16) in ((2, 62), (3, 62))
+                 and struct.unpack_from("<I", header, 20)[0] == 1)
+        if os.name != "nt":
+            valid = valid and bool(path.stat().st_mode & stat.S_IXUSR)
+    if not valid:
+        raise ValueError(f"Build succeeded without a {expected}")
+
+
+def executable_valid(path, toolchain):
+    try:
+        verify_executable(path, toolchain)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def default_cache():
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    else:
+        configured = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        base = configured if configured.is_absolute() else Path.home() / ".cache"
+    return base / "hwder" / "local-build-v1"
 
 
 def run_command(argv, cwd):
@@ -267,10 +325,11 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
     build_key = digest({"generated": gen_key, "generated_files": digest(generated_files),
                         "runtime": build_inputs, "toolchain": toolchain})
     bdir = cache / "builds" / build_key[:24]
-    exe = bdir / "hwder.exe"
+    name = target_name(toolchain)
+    exe = bdir / name
     marker = read_json(bdir / "complete.json")
     if (marker.get("schema") != SCHEMA or marker.get("key") != build_key or not exe.is_file()
-            or marker.get("exe_sha256") != file_hash(exe)):
+            or marker.get("exe_sha256") != file_hash(exe) or not executable_valid(exe, toolchain)):
         log("build: compiling complete native program via tools/build.py (shared machine build lock)")
         (bdir / "complete.json").unlink(missing_ok=True)
         # Ninja can consider a newer damaged/stale executable up to date. Force its relink
@@ -295,12 +354,7 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
                 bdir.rename(bdir.with_name(bdir.name + ".invalid-" + uuid.uuid4().hex[:8]))
         if not stable:
             raise ValueError("Cached build inputs changed during compilation; rerun")
-        if not exe.is_file():
-            raise ValueError("Build succeeded without a Windows executable")
-        with exe.open("rb") as f:
-            magic = f.read(2)
-        if magic != b"MZ":
-            raise ValueError("Build succeeded without a Windows executable")
+        verify_executable(exe, toolchain)
         if source_fingerprints(root) != (generation_inputs, build_inputs):
             raise ValueError("Build inputs changed during setup; rerun to build the new source version")
         if before != (nsp.stat().st_size, nsp.stat().st_mtime_ns):
@@ -309,6 +363,7 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
                   "game_sha256": game_hash, "profile": profile}
         atomic_json(bdir / "complete.json", marker)
     else:
+        verify_executable(exe, toolchain)
         log("build: verified complete cached executable")
     if source_fingerprints(root) != (generation_inputs, build_inputs):
         raise ValueError("Source inputs changed during setup; rerun")
@@ -329,13 +384,15 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         before_publish()  # UI commit permission: no stable play transaction has started yet.
     play = cache / "play"
     play.mkdir(parents=True, exist_ok=True)
-    target = play / "hwder.exe"
-    if not target.is_file() or file_hash(target) != marker["exe_sha256"]:
+    target = play / name
+    if not target.is_file() or file_hash(target) != marker["exe_sha256"] or not executable_valid(target, toolchain):
         tmp = play / ("hwder-" + uuid.uuid4().hex + ".tmp")
         previous = play / ("hwder-previous-" + uuid.uuid4().hex + ".tmp")
         published = False
         try:
             shutil.copyfile(exe, tmp)
+            if toolchain.get("target_platform") == "linux-x86_64":
+                shutil.copymode(exe, tmp)
             if file_hash(tmp) != marker["exe_sha256"]:
                 raise ValueError("Executable publication checksum mismatch")
             if target.is_file():
@@ -343,7 +400,7 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
                     os.link(target, previous)
                 except OSError:
                     # A cache may live on a filesystem without hard-link support.
-                    shutil.copyfile(target, previous)
+                    shutil.copy2(target, previous)
             os.replace(tmp, target)
             published = True
             atomic_json(cache / "last-success.json", marker)
@@ -372,7 +429,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--nsp", default=os.environ.get("HWDER_NSP"))
     ap.add_argument("--keys", default=os.environ.get("HWDER_KEYS"))
-    ap.add_argument("--cache", type=Path, default=Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "hwder" / "local-build-v1")
+    ap.add_argument("--cache", type=Path, default=default_cache())
     ap.add_argument("--jobs", type=int, default=max(1, min(8, os.cpu_count() or 1)))
     ap.add_argument("--check", action="store_true", help="check installed prerequisites only")
     ap.add_argument("--launch", action="store_true", help="launch only after successful verification/build")
