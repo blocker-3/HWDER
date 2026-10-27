@@ -274,6 +274,17 @@ class Folders(unittest.TestCase):
         self.assertTrue(first_run.read_json(cache / "steam-offer.json")["declined"])
         self.assertFalse((self.steam / "userdata/7/config/shortcuts.vdf").exists())
 
+    def test_game_paths_keep_other_settings(self):
+        cache = self.home / "cache"
+        (cache / "play").mkdir(parents=True)
+        settings = cache / "play" / "hwder_settings.ini"
+        settings.write_bytes(b"version=2\r\nnsp_path=/old.nsp\r\nupdate_path=/u\r\nsave_dir=/s\r\nfps120=1")
+        steam.store_game_paths(cache, cache / "play" / "hwder", self.home / "g.nsp", self.home / "k.keys")
+        self.assertEqual(settings.read_bytes(),
+                         b"version=2\r\nnsp_path=" + str((self.home / "g.nsp").resolve()).encode()
+                         + b"\r\nupdate_path=/u\r\nsave_dir=/s\r\nfps120=1\nkeys_path="
+                         + str((self.home / "k.keys").resolve()).encode() + b"\n")
+
     def test_container_launcher(self):
         play = self.home / "play"
         play.mkdir()

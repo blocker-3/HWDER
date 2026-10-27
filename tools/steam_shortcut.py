@@ -331,12 +331,37 @@ def installed_game(cache):
 
 def store_game_paths(cache, exe, nsp, keys):
     """Steam starts the game without HWDER_NSP/HWDER_KEYS, so its settings file has to name them (as the Windows
-    Setup does: setup_bridge.installed_paths)."""
+    Setup does in setup_bridge.installed_paths). Only nsp_path and keys_path change; every other line, including a
+    hand-set update_path or save_dir, is kept byte for byte."""
     import first_run
-    import setup_bridge
-    inputs = {"nsp": str(Path(nsp).resolve()), "keys": str(Path(keys).resolve())}
-    first_run.atomic_json(Path(cache) / "setup-inputs.json", inputs)
-    setup_bridge.installed_paths(cache, exe)
+    values = {"nsp_path": str(Path(nsp).resolve()), "keys_path": str(Path(keys).resolve())}
+    for key, value in values.items():
+        if any(c in value for c in "\r\n\0") or len((key + "=" + value).encode("utf-8")) >= 2046:
+            raise ValueError("The game or keys path cannot be stored in the game's settings. Use a shorter path.")
+    first_run.atomic_json(Path(cache) / "setup-inputs.json", {"nsp": values["nsp_path"], "keys": values["keys_path"]})
+    settings = Path(exe).parent / "hwder_settings.ini"
+    # A new file carries the game's first-run defaults (see setup_bridge.installed_paths).
+    original = settings.read_bytes() if settings.exists() else b"version=2\nface_labels=1\n"
+    result, seen = [], set()
+    for line in original.splitlines(keepends=True):
+        key = line.split(b"=", 1)[0].decode("utf-8", errors="replace")
+        if key in values:
+            if key not in seen:
+                result.append((key + "=" + values[key]).encode("utf-8") + (b"\r\n" if line.endswith(b"\r\n") else b"\n"))
+                seen.add(key)
+        else:
+            result.append(line)
+    if result and not result[-1].endswith((b"\r", b"\n")):
+        result.append(b"\n")
+    result.extend((key + "=" + value + "\n").encode("utf-8") for key, value in values.items() if key not in seen)
+    content = b"".join(result)
+    if content != original or not settings.exists():
+        temporary = settings.with_name(".steam-settings.tmp")
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, settings)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 # ---- Artwork (as Setup's nintendoArtwork / steamGridArtwork) ----------------------------------------------------
