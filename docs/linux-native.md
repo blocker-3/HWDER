@@ -122,16 +122,20 @@ Submitted Bazzite/Ubuntu 24.04.5 native evidence passed the FFmpeg 6.1.1 probe (
 
 ## Unattended autoplay runs on the Ally
 
-`tools/linux_autoplay.py` runs on the Bazzite host (outside the container). Each run gets its own folder under
-`HWDER-linux-native/runs/autoplay/` with a hard link of the play build, copies of its settings and pipeline caches
-and a copy of a fixed save (`runs/autoplay/fixtures/autoplay` = test-saves/autoplay 9038..., `busy-spot` = 38e7...).
-The play folder and its save are never written. The game runs in `hwder-dev` inside a headless gamescope
-(1920x1080, 120 Hz, nothing on screen; Max approved this 2026-10-24) and is stopped after `--seconds`. Keep the SSH
-session open for the whole run: Tailscale SSH ends host processes started from a session when it closes.
+`tools/linux_autoplay.py` runs on the Bazzite host. Each run gets its own folder under `<root>/runs/autoplay/` with a
+hard link of the play build, copies of its settings and pipeline caches and a copy of a fixed save
+(`<root>/runs/autoplay/fixtures`: `autoplay` = test-saves/autoplay 9038..., `busy-spot` = 38e7..., `heavy-fight`).
+The play folder and its save are never written. The game runs natively (the release build; `--container hwder-dev`
+ran the old distrobox dev builds) inside a headless gamescope (1920x1080, 120 Hz, nothing on screen; Max approved
+this 2026-10-24) and is stopped after `--seconds`. Keep the SSH session open for the whole run: Tailscale SSH ends
+host processes started from a session when it closes. Since 2026-10-27 the Ally test root is
+`/var/home/bazzite/Documents/HWDER-test` and the play build defaults to the installed release
+(`~/.local/share/HWDER/build/play`, see [Linux release](linux-release.md)); results below from before that date were
+measured in the retired `HWDER-linux-native` folder.
 
 ~~~sh
-cd /var/home/bazzite/Documents/HWDER-linux-native
-python3 hwder/tools/linux_autoplay.py --fixture busy-spot --mode 120 --seconds 90 --name busy120 [--stats 2000] [--filmstrip]
+python3 tools/linux_autoplay.py --root /var/home/bazzite/Documents/HWDER-test --fixture busy-spot --mode 120 \
+    --seconds 90 --name busy120 [--play <play folder>] [--stats 2000] [--filmstrip]
 ~~~
 
 Results 2026-10-25 (build cba01eb, Ally Z1 Extreme, RADV), 300-frame window averages in battle:
