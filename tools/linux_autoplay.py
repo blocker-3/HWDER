@@ -305,7 +305,14 @@ def main():
         outcome += "; the run wrote its save copy"
     summarize(run, args, flags, outcome)
     if recorder:
-        line = audio_gaps(run / "audio.raw")
+        # The recording alone missed the 2026-10-27 buzz (a null sink keeps its own timing); the game's own counters
+        # are the reliable part: any dry run or dropped mixer audio fails the check.
+        log = (run / "hwder.log").read_text(errors="replace") if (run / "hwder.log").exists() else ""
+        dry = sum(int(m) for m in re.findall(r"output ran dry (\d+) times", log))
+        dropped = sum(int(m) for m in re.findall(r"mixer chunks dropped (\d+) ms", log))
+        line = audio_gaps(run / "audio.raw") + f"; game log: output ran dry {dry} times, mixer audio dropped {dropped} ms"
+        if dry or dropped:
+            line = "FAIL (" + ("ran dry" if dry else "dropped audio") + "): " + line
         with open(run / "summary.txt", "a") as f:
             f.write("\naudio: " + line + "\n")
         print("audio:", line)
