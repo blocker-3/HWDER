@@ -96,6 +96,8 @@ def environment(args, run):
     if args.filmstrip:
         flags.update(HWDER_FILMSTRIP=str(run / "filmstrip"), HWDER_FILMSTRIP_BATTLE="10", HWDER_FILMSTRIP_FOR="3")
         (run / "filmstrip").mkdir()
+    if args.audio or args.record_audio:
+        del flags["HWDER_MUTE"]
     for kv in args.env:
         k, _, v = kv.partition("=")
         flags[k] = v
@@ -125,6 +127,60 @@ def stop(proc, run, deadline):
             return "stopped with SIGTERM"
     os.kill(pid, signal.SIGKILL)
     return "stopped with SIGKILL"
+
+
+class SilentRecorder:
+    """Switches the default output to a temporary null sink (so the game's stream never reaches the speakers) and
+    records that sink's monitor; close() restores the previous default and removes the sink."""
+
+    def __init__(self, path, env):
+        self.env = dict(env, XDG_RUNTIME_DIR=env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+        pactl = lambda *a: subprocess.run(["pactl", *a], env=self.env, capture_output=True, text=True, check=True).stdout.strip()
+        self.pactl = pactl
+        self.previous = pactl("get-default-sink")
+        self.module = pactl("load-module", "module-null-sink", "sink_name=hwder_test",
+                            "sink_properties=device.description=hwder_test")
+        try:
+            pactl("set-default-sink", "hwder_test")
+            time.sleep(1)
+            self.out = open(path, "wb")
+            self.proc = subprocess.Popen(["parec", "-d", "hwder_test.monitor", "--format=s16le", "--rate=48000",
+                                          "--channels=2", "--raw"], stdout=self.out, env=self.env)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        if getattr(self, "proc", None):
+            self.proc.terminate()
+            self.proc.wait(timeout=10)
+            self.out.close()
+            self.proc = None
+        try:
+            self.pactl("set-default-sink", self.previous)
+        finally:
+            subprocess.run(["pactl", "unload-module", self.module], env=self.env, capture_output=True)
+
+
+def audio_gaps(path, seconds=30):
+    """Silent gaps of 1 ms or more between sound in the last `seconds` of a s16le stereo 48 kHz recording. A clean run
+    has none; the buzzing PipeWire output of 2026-10-27 had many."""
+    import array
+    a = array.array("h", Path(path).read_bytes())
+    frames = len(a) // 2
+    start = max(0, frames - seconds * 48000)
+    gaps = longest = run = loud = 0
+    seen_sound = False
+    for i in range(start, frames):
+        if a[2 * i] == 0 and a[2 * i + 1] == 0:
+            run += 1
+            continue
+        if seen_sound and run >= 48:
+            gaps, longest = gaps + 1, max(longest, run)
+        run, seen_sound, loud = 0, True, loud + 1
+    verdict = "OK" if gaps == 0 and loud else "NO SOUND" if not loud else "GAPS (buzzing)"
+    return (f"{verdict}: last {seconds} s {100 * loud / max(1, frames - start):.0f}% with sound, {gaps} silent gaps of 1 ms "
+            f"or more (longest {longest / 48:.1f} ms), {frames / 48000:.0f} s recorded")
 
 
 def summarize(run, args, flags, outcome):
@@ -202,6 +258,11 @@ def main():
     ap.add_argument("--nsp", help="game .nsp (default: the play settings' nsp_path)")
     ap.add_argument("--keys", help="prod.keys (default: the play settings' keys_path)")
     ap.add_argument("--container", help="run inside this distrobox (old dev builds); default: natively")
+    ap.add_argument("--audio", action="store_true", help="keep audio output on (default: HWDER_MUTE); it plays on the default output")
+    ap.add_argument("--record-audio", action="store_true",
+                    help="audio on, but the default output is switched to a temporary silent sink for the run (restored "
+                         "afterwards; nothing reaches the speakers); its recording goes to audio.raw and the summary "
+                         "counts silent gaps inside the sound (the buzzing-audio check)")
     args = ap.parse_args()
     ROOT = (args.root or ROOT).resolve()
     PLAY = (args.play or PLAY).resolve()
@@ -226,18 +287,28 @@ def main():
     if not args.visible:
         w, h = args.size.split("x")
         game = ["/usr/bin/gamescope", "--backend", "headless", "-W", w, "-H", h, "-w", w, "-h", h, "-r", "120", "--"] + game
-    with open(run / "console.log", "wb") as console:
-        proc = subprocess.Popen(game, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                start_new_session=True)
-        outcome = stop(proc, run, time.time() + args.seconds)
-        try:
-            proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=10)
+    recorder = SilentRecorder(run / "audio.raw", env) if args.record_audio else None
+    try:
+        with open(run / "console.log", "wb") as console:
+            proc = subprocess.Popen(game, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+            outcome = stop(proc, run, time.time() + args.seconds)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+    finally:
+        if recorder:
+            recorder.close()
     if sha256(run / "save" / SAVE_LEAF / "zmha.bin") != FIXTURES[args.fixture]:
         outcome += "; the run wrote its save copy"
     summarize(run, args, flags, outcome)
+    if recorder:
+        line = audio_gaps(run / "audio.raw")
+        with open(run / "summary.txt", "a") as f:
+            f.write("\naudio: " + line + "\n")
+        print("audio:", line)
     if args.filmstrip:
         contact_sheet(run)
     os.remove(run / "hwder")  # the hard link only; the play build is unchanged

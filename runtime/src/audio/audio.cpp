@@ -44,10 +44,11 @@ struct OutputRing {
     static constexpr u32 kFrames = 48000 / 4;  // 250 ms
     s16 data[kFrames * 2];
     std::atomic<u32> write{0}, read{0};
+    std::atomic<u64> dropped{0}, short_frames{0};  // health counters (frames dropped, times run dry), logged by the output thread
     u32 fill() const { return (write.load() - read.load()) % kFrames; }
     void push(const s16* frames, u32 n) {
         u32 w = write.load();
-        if (fill() + n >= kFrames - 1) return;  // consumer stalled or absent: drop
+        if (fill() + n >= kFrames - 1) { dropped += n; return; }  // consumer stalled or absent: drop
         for (u32 i = 0; i < n; i++) {
             data[(w % kFrames) * 2] = frames[i * 2];
             data[(w % kFrames) * 2 + 1] = frames[i * 2 + 1];
@@ -159,8 +160,10 @@ static void output_thread() {
     }
 #else
     // SDL converts this application format to the default device's native format.
-    // Keep at most 20 ms in SDL in addition to the existing bounded mixer ring.
-    constexpr int queued_bytes = kTargetRate / 50 * 2 * sizeof(s16);
+    // Keep about 20 ms in SDL in addition to the existing bounded mixer ring, but never less than two device
+    // buffers: PipeWire's default quantum is 1024 frames (21 ms), and a queue shorter than one buffer made SDL
+    // pad every period with silence (a buzzing "robot" sound on the Ally).
+    constexpr int kMinQueuedBytes = kTargetRate / 50 * 2 * sizeof(s16);
     const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, int(kTargetRate)};
     auto discard = [] {
         s16 scratch[1024];
@@ -178,8 +181,17 @@ static void output_thread() {
             discard();host::sleep_ms(1000);continue;
         }
         discard();
-        hw_log("audio: SDL output open (stereo s16, 48000 Hz)");
-        u64 stalled_since = 0;
+        SDL_AudioSpec device{};
+        int device_frames = 0;
+        SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(stream), &device, &device_frames);
+        // device_frames are at the device's rate; queue twice that at ours.
+        const int device_bytes = device.freq > 0 ? int((long long)device_frames * kTargetRate / device.freq) * 2 * int(sizeof(s16)) : 0;
+        const int queued_bytes = std::max(kMinQueuedBytes, 2 * device_bytes);
+        hw_log("audio: SDL output open (stereo s16, 48000 Hz) via %s; device %d ch, %d Hz, format 0x%x, %d frame buffer; "
+               "keeping %d ms queued", SDL_GetCurrentAudioDriver(), device.channels, device.freq, (unsigned)device.format,
+               device_frames, queued_bytes * 1000 / (kTargetRate * 2 * int(sizeof(s16))));
+        u64 stalled_since = 0, last_report = host::ticks_ms();
+        bool starving = false;
         for (;;) {
             const int queued = SDL_GetAudioStreamQueued(stream);
             if (queued < 0) break;
@@ -190,14 +202,29 @@ static void output_thread() {
                 host::sleep_ms(2);continue;
             }
             stalled_since = 0;
-            const u32 frames = std::min<u32>(256, (queued_bytes - queued) / (2 * sizeof(s16)));
+            const u32 frames = std::min<u32>(256, u32(queued_bytes - queued) / (2 * sizeof(s16)));
             if (!frames) { host::sleep_ms(1);continue; }
+            // Only what the mixer has produced: padding a short pop with zeros put a few ms of silence into
+            // the stream every time the ring ran low, which sounded like a buzzing "robot" filter on PipeWire
+            // (Ally, 2026-10-27). With nothing ready, wait for the mixer; SDL plays silence itself if it starves.
             s16 samples[256 * 2]{};
-            g_ring.pop(samples, frames);
+            const u32 got = g_ring.pop(samples, frames);
+            if (!got && queued < queued_bytes / 2 && !starving) g_ring.short_frames++, starving = true;  // device about to starve
+            if (got) starving = false;
+            const u64 now = host::ticks_ms();
+            if (now - last_report >= 10000) {
+                last_report = now;
+                const u64 dropped = g_ring.dropped.exchange(0), short_frames = g_ring.short_frames.exchange(0);
+                if (dropped || short_frames || debug::flag(debug::GiLog))
+                    hw_log("audio: last 10 s: ring %u ms, mixer chunks dropped %llu ms, output ran dry %llu times",
+                           g_ring.fill() * 1000 / kTargetRate, (unsigned long long)(dropped * 1000 / kTargetRate),
+                           (unsigned long long)short_frames);
+            }
+            if (!got) { host::sleep_ms(1);continue; }
             const float gain = output_gain();
             if (gain <= 0.0f) memset(samples, 0, sizeof(samples));
             else if (gain < 1.0f) for (s16& sample : samples) sample = s16(sample * gain);
-            if (!SDL_PutAudioStreamData(stream, samples, int(frames * 2 * sizeof(s16)))) break;
+            if (!SDL_PutAudioStreamData(stream, samples, int(got * 2 * sizeof(s16)))) break;
         }
         hw_log("audio: SDL output lost or stalled - retrying");
         SDL_DestroyAudioStream(stream);
@@ -849,6 +876,7 @@ static void audio_thread() {
     host::Counter freq, next, now;
     host::counter_frequency(&freq);
     host::counter(&next);
+    hw_log("audio: renderer clock %lld Hz", (long long)freq.QuadPart);
     std::vector<s16> frame, resampled;
     double out_frac = 0;
     s16 last[2] = {};
@@ -885,6 +913,21 @@ static void audio_thread() {
             }
         }
         for (auto& r : rs) r->event()->signal();
+        // Closed loop: the renderer is timed by the host clock, the device by its own crystal, and every resync after a
+        // stall (below) loses time for good. Open loop, the mixer stayed slightly behind the device: on the Ally the
+        // ring sat at 0 ms and the output ran dry continually ("robot" audio, 2026-10-27). Steering the period by
+        // the ring's fill keeps the mixer at the device's real rate: at most +-2%, aiming for 60 ms buffered.
+        // HWDER_AUDIO_OPEN_LOOP=1 keeps the old timing for comparison.
+        // Linux only for now: Windows' WASAPI path has had no such report and is left as it was.
+#ifdef _WIN32
+        static const bool open_loop = true;
+#else
+        static const bool open_loop = getenv("HWDER_AUDIO_OPEN_LOOP") != nullptr;
+#endif
+        if (!open_loop) {
+            const double fill_ms = g_ring.fill() * 1000.0 / kTargetRate;
+            period_ticks = (s64)(period_ticks * std::clamp(1.0 + (fill_ms - 60.0) / 1000.0, 0.98, 1.02));
+        }
         next.QuadPart += period_ticks;
         host::counter(&now);
         s64 wait = next.QuadPart - now.QuadPart;
