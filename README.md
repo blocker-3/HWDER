@@ -1,5 +1,64 @@
 # HWDER - Hyrule Warriors: Definitive Edition Recomp
 
+*Hyrule Warriors: Definitive Edition* running natively on Windows PCs, recompiled from your own
+Switch copy. No emulator, and no game files in this repository.
+
+## What HWDER adds over the Switch version
+
+- **120 fps battles.** An optional 120 fps mode draws an extra in-between frame for every game
+  tick, and it holds a steady 120 even in the busiest battles (where it used to drop to about
+  73-85 fps). Menus stay at 60. The normal mode holds an exact 60.
+- **Higher resolution.** Render 3D at 0.5x to 3x of 1080p (up to 5760x3240), or turn on
+  Unlocked resolution to render at your window's full size.
+- **Ultrawide.** On 21:9 and wider screens the camera widens to fill the screen while the HUD
+  stays in a centred 16:9 area.
+- **Picture options.** Anisotropic texture filtering up to 16x, FXAA, sharpening, bloom and
+  contrast controls, VSync, borderless fullscreen (F11), and an option that keeps fences, rubble
+  and other small scenery from vanishing in big fights.
+- **Any controller, remappable.** Xbox, PlayStation, Switch Pro and other gamepads, plus keyboard.
+  Remap buttons per controller type, choose Switch-position or printed-label face buttons, and set
+  deadzones, stick inversion, rumble strength and gyro motion.
+- **Two-player co-op on one PC.** The game's local 2P mode with two controllers, or a controller
+  and the keyboard.
+- **More game memory.** Choose the Switch's 3.2 GB, 4 GB or 6 GB.
+- **Game update 1.0.1** is supported (optional; the base game works on its own).
+- **Easy saves.** Pick any `zmha.bin`, including an emulator export or backup; it is imported
+  after asking, with the replaced save backed up first.
+- **Launch from your desktop or Steam.** Setup creates a desktop shortcut or adds the game to
+  Steam with its name and box art.
+- **In-game HWDER menu** (F1, or hold View/Select on a controller) for all of the above, most of
+  it switchable while you play.
+- **Crash reports that help.** A log and crash dump are written beside the game, and a
+  [bug report form](https://github.com/sonsegajp/HWDER/issues/new?template=bug_report.yml)
+  asks for what we need.
+
+## Quickstart
+
+Windows 10/11 x64 with a Vulkan 1.2 graphics driver and an AVX2 CPU. You need your own game dump
+(`.nsp`) and `prod.keys` from your own Switch; HWDER ships neither.
+
+1. Download the latest `HWDER-setup-<version>.zip` from the
+   [Releases](https://github.com/sonsegajp/HWDER/releases) page.
+2. Extract the whole zip into a folder you will keep and open **HWDER Setup.exe**. If Windows
+   says "Windows protected your PC", choose **More info > Run anyway**.
+3. Choose your game file (`.nsp`), your `prod.keys` and, if you have it, the 1.0.1 game update.
+   Click **Next**.
+4. Click **Install** and confirm. Setup downloads its own private build tools (about 260 MB, no
+   admin rights).
+5. Click **Prepare**. Setup builds the game on your PC; this takes several minutes and several GB
+   of disk space.
+6. Click **Play**.
+7. Optional: **Create desktop shortcut** or **Add to Steam** to start the game without Setup next
+   time.
+8. In game, press **F1** and turn on Display > Frame rate > **120 fps (experimental)**.
+
+Keep your `.nsp` and `prod.keys` where they are: the game reads them every time it starts. Each
+step is explained in [Setup in detail](#setup-in-detail).
+
+---
+
+## About this project
+
 A static recompilation of *Hyrule Warriors: Definitive Edition* (Nintendo Switch) to a native
 Windows x64 executable. The game's ARM64 code is translated ahead of time to C and compiled with
 clang; everything the game expects underneath it (the Horizon kernel, system services, the GPU,
@@ -12,12 +71,12 @@ is produced on your machine from your own dump. First-run setup extracts the fiv
 ExeFS modules into your private local cache, generates C and builds the complete native program.
 The runtime reads ExeFS and RomFS from your own `.nsp` with your own `prod.keys` while you play.
 
----
-
 Native Linux x86-64 is an experimental port for Bazzite/ROG Ally on the `linux-native` branch; it is not part of a
 release. See [the Linux build and validation instructions](docs/linux-native.md).
 
-## Playing
+---
+
+## Setup in detail
 
 You do not need to clone this repository or install any developer tools. Windows 10/11 x64 only.
 
@@ -30,17 +89,19 @@ You do not need to clone this repository or install any developer tools. Windows
    your own copy of *Hyrule Warriors: Definitive Edition*: the game dumped from your cartridge or eShop
    purchase (the base game, without an update merged in), and the keys dumped from the same console
    with homebrew tools. HWDER ships neither and
-   cannot help you obtain them. The files are used where they are; keys are never copied.
+   cannot help you obtain them. The files are used where they are; keys are never copied. The optional
+   **Game update** field takes the 1.0.1 update (`.nsp` or `.nsz`); the game is then built from the
+   updated code.
 4. **Install**: after you confirm, Setup downloads pinned build tools (Python, LLVM-MinGW, CMake, Ninja
-   and four Python packages, each checked against a fixed SHA-256) from python.org, GitHub and PyPI into
+   and five Python packages, each checked against a fixed SHA-256) from python.org, GitHub and PyPI into
    its Data folder (default `%LOCALAPPDATA%\HWDER`). No administrator rights, system installs or PATH
    changes.
 5. **Prepare**: Setup checks that your dump is the supported version, extracts the game code, translates
    it to C and compiles `hwder.exe` on your PC. It shows the step (k of 6) and the time remaining; expect
    several minutes and several GB of disk space.
 6. **Play** starts the game. The first launch shows a startup screen that checks your game and keys.
-   Once it is ready, **Create desktop shortcut** and **Add to Steam** (a non-Steam game; close Steam
-   first) let you start the game from the shortcut, from Steam (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
+   Once it is ready, **Create desktop shortcut** and **Add to Steam** (a non-Steam game; Setup closes
+   and reopens Steam itself) let you start the game from the shortcut, from Steam (or `%LOCALAPPDATA%\HWDER\play\hwder.exe`) without opening Setup. Keep your `.nsp` and
    `prod.keys` where they are: the game reads them every time it starts.
 
 **The first minutes on a fresh install can hitch.** Each graphics pipeline is compiled the first time
@@ -60,6 +121,8 @@ PDB and generated C are made on your machine from your own dump and are never pa
 and `tools/make_setup_dist.py` create the source and setup kits, with no game dump, keys, generated
 program, saves or private shader cache.
 
+### Requirements, controls and files
+
 Requirements: Windows 10/11 x64, a Vulkan 1.2 driver (NVIDIA, AMD, Intel), an AVX2 CPU, and
 Media Foundation (built into Windows; "N" editions need the Media Feature Pack) for the movies.
 Without an AVX2 CPU or a Vulkan 1.2 driver the game shows a message saying which is missing and
@@ -67,7 +130,7 @@ closes; Setup's Check and Prepare also refuse a CPU without AVX2.
 
 In game: **F1** opens the options overlay (internal resolution scale, unlocked resolution for
 ultrawide, vsync, borderless, anisotropic filtering, FPS counter, opt-in 60 Hz monitor switch, and
-a save-file cheats tab). Settings > Display > Frame rate > "120 fps" draws an extra in-between frame per
+a save-file cheats tab). Settings > Display > Frame rate > "120 fps (experimental)" draws an extra in-between frame per
 battle tick (off by default, switchable while playing; menus stay at 60; see `docs/high-framerate.md`). **F11** toggles borderless fullscreen. SDL3 gamepads and XInput controllers work; two-player local co-op (the game's 2P mode): controllers take player slots in the order they connect, and the keyboard joins the first free slot by default (Settings > Input > Players chooses a fixed player or turns it off). Pressing the left stick on the warrior select answers the game's controller screen with the connected players;
 keyboard: WASD move, arrows camera, K/Enter = A, J/Backspace = B, I = X, L = Y, Q/E = L/R,
 U/O = ZL/ZR, Space = +, Tab = -, 1-4 = D-pad, Z/C = stick clicks.
@@ -407,8 +470,8 @@ candidate is integrated; their current absence is reported explicitly.
 ## Status
 
 Boots, menus, movies, Adventure/Legend mode battles, saves and audio work; gameplay runs at the
-game's native 60 Hz (30 Hz where the game itself drops to half rate) at native or scaled
-resolution. Known issues are tracked in the issue tracker.
+game's native 60 Hz (30 Hz where the game itself drops to half rate), or at 120 fps with the
+optional 120 fps mode, at native or scaled resolution. Known issues are tracked in the issue tracker.
 
 ## License
 
