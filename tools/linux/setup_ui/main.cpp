@@ -234,48 +234,7 @@ private:
     std::deque<std::string> lines_;
 };
 
-// ---- File browser (works with a controller and inside Game Mode, where system dialogs may not show) -------------
-
-struct Browser {
-    bool open = false;
-    int target = 0;  // 0 game, 1 keys, 2 update
-    std::string dir;
-    std::vector<std::string> exts;
-    std::vector<std::pair<std::string, bool>> entries;  // name, is_dir
-    std::string error;
-    bool focus_first = false;
-
-    void load(const std::string& path) {
-        DIR* d = opendir(path.c_str());
-        if (!d) { error = "Cannot open " + path; return; }
-        error.clear();
-        dir = path;
-        entries.clear();
-        while (dirent* e = readdir(d)) {
-            std::string name = e->d_name;
-            if (name == "." || name == ".." || name[0] == '.') continue;
-            std::string full = dir + (dir == "/" ? "" : "/") + name;
-            struct stat st{};
-            if (stat(full.c_str(), &st) != 0) continue;
-            bool is_dir = S_ISDIR(st.st_mode);
-            if (!is_dir) {
-                std::string lower = name;
-                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                bool match = exts.empty();
-                for (auto& x : exts)
-                    if (lower.size() >= x.size() && lower.compare(lower.size() - x.size(), x.size(), x) == 0) match = true;
-                if (!match) continue;
-            }
-            entries.emplace_back(name, is_dir);
-        }
-        closedir(d);
-        std::sort(entries.begin(), entries.end(), [](auto& x, auto& y) {
-            if (x.second != y.second) return x.second;
-            return strcasecmp(x.first.c_str(), y.first.c_str()) < 0;
-        });
-        focus_first = true;
-    }
-};
+// ---- Files: the system file dialog (xdg-desktop-portal: KDE's or GNOME's own picker), typing as the fallback -----
 
 std::string home() {
     const char* h = getenv("HOME");
@@ -313,11 +272,16 @@ struct App {
     bool result_ok = true;
     bool steam_confirm = false;
     bool quit = false;
-    Browser browser;
     std::deque<std::vector<std::string>> queue;  // commands waiting for the running one
-    std::string system_dialog_pick;  // set from SDL's dialog callback
-    int system_dialog_target = -1;
+    // The dialog answers on another thread: its result waits here for the UI thread.
     std::mutex dialog_mutex;
+    bool dialog_open = false;
+    int dialog_target = -1;          // set with dialog_pick when a file was chosen
+    std::string dialog_pick;
+    int dialog_failed_target = -1;   // the system dialog could not open: type the path instead
+    std::string dialog_error;
+    bool typing[3] = {false, false, false};
+    char typed[3][1024] = {};
 
     void run(const std::string& kind, std::vector<std::string> args) {
         if (task.running()) { queue.push_back(args); queue.back().insert(queue.back().begin(), kind); return; }
@@ -404,100 +368,73 @@ struct App {
             }
         }
         std::lock_guard lock(dialog_mutex);
-        if (system_dialog_target >= 0) {
-            files[system_dialog_target].path = system_dialog_pick;
-            system_dialog_target = -1;
+        if (dialog_target >= 0) {
+            files[dialog_target].path = dialog_pick;
+            typing[dialog_target] = false;
+            dialog_target = -1;
             check_files();
+        }
+        if (dialog_failed_target >= 0) {
+            int i = dialog_failed_target;
+            typing[i] = true;
+            snprintf(typed[i], sizeof typed[i], "%s", files[i].path.c_str());
+            push_log("The system file dialog is not available (" + dialog_error + "); type the path instead.");
+            dialog_failed_target = -1;
         }
     }
 };
 
 App* g_app = nullptr;
+ImVec2 g_probe_min, g_probe_max;  // the Close button, for HWDER_SETUP_SELFTEST
+bool g_probe_hovered = false;
+
+struct DialogRequest {
+    App* app;
+    int target;
+};
 
 void SDLCALL dialog_done(void* user, const char* const* list, int) {
-    auto* app = static_cast<App*>(user);
-    if (!list || !list[0]) return;
+    std::unique_ptr<DialogRequest> request(static_cast<DialogRequest*>(user));
+    App* app = request->app;
     std::lock_guard lock(app->dialog_mutex);
-    app->system_dialog_pick = list[0];
-    app->system_dialog_target = app->browser.target;
+    app->dialog_open = false;
+    if (!list) {  // no portal and no zenity
+        app->dialog_failed_target = request->target;
+        app->dialog_error = SDL_GetError();
+    } else if (list[0]) {
+        app->dialog_pick = list[0];
+        app->dialog_target = request->target;
+    }  // else: cancelled
 }
 
 const char* kLabels[3] = {"Game (.nsp)", "Keys (prod.keys)", "Update 1.0.1 (optional)"};
 
-void open_browser(App& app, int target) {
-    Browser& b = app.browser;
-    b.target = target;
-    b.exts = target == 0 ? std::vector<std::string>{".nsp"} : target == 1 ? std::vector<std::string>{".keys"}
-                                                                          : std::vector<std::string>{".nsp", ".nsz"};
-    std::string start = app.files[target].path.empty() ? "" : parent_of(app.files[target].path);
-    if (start.empty() || !is_dir(start)) {
-        for (int i = 0; i < 3 && start.empty(); ++i)
-            if (!app.files[i].path.empty() && is_dir(parent_of(app.files[i].path))) start = parent_of(app.files[i].path);
-    }
-    if (start.empty() || !is_dir(start)) start = home();
-    b.load(start);
-    b.open = true;
+// Starts where the file already is, else in ~/Documents/HWDER-files (where the Ally's files live) when it exists,
+// else next to another chosen file, else the home folder.
+std::string dialog_folder(const App& app, int target) {
+    std::vector<std::string> candidates;
+    if (!app.files[target].path.empty()) candidates.push_back(parent_of(app.files[target].path));
+    candidates.push_back(home() + "/Documents/HWDER-files");
+    for (auto& f : app.files)
+        if (!f.path.empty()) candidates.push_back(parent_of(f.path));
+    for (auto& c : candidates)
+        if (is_dir(c)) return c;
+    return home();
 }
 
-void draw_browser(App& app, SDL_Window* window) {
-    Browser& b = app.browser;
-    if (b.open) {
-        ImGui::OpenPopup("Choose a file");
-        b.open = false;
+void choose_file(App& app, SDL_Window* window, int target) {
+    static const SDL_DialogFileFilter filters[3][2] = {
+        {{"Game (.nsp)", "nsp"}, {"All files", "*"}},
+        {{"Keys (.keys)", "keys"}, {"All files", "*"}},
+        {{"Update (.nsp, .nsz)", "nsp;nsz"}, {"All files", "*"}}};
+    {
+        std::lock_guard lock(app.dialog_mutex);
+        if (app.dialog_open) return;
+        app.dialog_open = true;
     }
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.05f, vp->WorkPos.y + vp->WorkSize.y * 0.05f));
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x * 0.9f, vp->WorkSize.y * 0.9f));
-    if (!ImGui::BeginPopupModal("Choose a file", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) return;
-    ImGui::TextWrapped("%s: pick the file, or open a folder. B / Esc closes.", kLabels[b.target]);
-    ImGui::TextDisabled("%s", b.dir.c_str());
-    // Places: home folders, SD cards and USB drives (/run/media/<user>/...), /mnt.
-    std::vector<std::pair<std::string, std::string>> places{{"Home", home()}};
-    for (const char* sub : {"Downloads", "Documents", "Desktop", "Games"})
-        if (is_dir(home() + "/" + sub)) places.emplace_back(sub, home() + "/" + sub);
-    const char* user = getenv("USER");
-    std::string media = std::string("/run/media/") + (user ? user : "");
-    if (DIR* d = opendir(media.c_str())) {
-        while (dirent* e = readdir(d))
-            if (e->d_name[0] != '.') places.emplace_back(e->d_name, media + "/" + e->d_name);
-        closedir(d);
-    }
-    if (is_dir("/mnt")) places.emplace_back("/mnt", "/mnt");
-    places.emplace_back("/", "/");
-    if (ImGui::Button("Up")) b.load(parent_of(b.dir));
-    for (auto& [name, path] : places) {
-        ImGui::SameLine();
-        if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize(name.c_str()).x + 40) ImGui::NewLine();
-        if (ImGui::Button(name.c_str())) b.load(path);
-    }
-    if (!b.error.empty()) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", b.error.c_str());
-    float footer = ImGui::GetFrameHeightWithSpacing() * 1.4f;
-    ImGui::BeginChild("entries", ImVec2(0, -footer), ImGuiChildFlags_Borders);
-    std::string chosen_dir, chosen_file;
-    if (b.entries.empty()) ImGui::TextDisabled("No folders or matching files here.");
-    for (size_t i = 0; i < b.entries.size(); ++i) {
-        auto& [name, dir] = b.entries[i];
-        std::string label = (dir ? "[folder]  " : "") + name;
-        if (b.focus_first && i == 0) { ImGui::SetKeyboardFocusHere(); b.focus_first = false; }
-        if (ImGui::Selectable(label.c_str(), false))
-            (dir ? chosen_dir : chosen_file) = b.dir + (b.dir == "/" ? "" : "/") + name;
-    }
-    ImGui::EndChild();
-    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-    ImGui::SameLine();
-    if (ImGui::Button("Use the system file dialog")) {
-        static SDL_DialogFileFilter filters[3][1] = {{{"Game NSP", "nsp"}}, {{"prod.keys", "keys"}},
-                                                     {{"Update NSP/NSZ", "nsp;nsz"}}};
-        SDL_ShowOpenFileDialog(dialog_done, &app, window, filters[b.target], 1, b.dir.c_str(), false);
-        ImGui::CloseCurrentPopup();
-    }
-    if (!chosen_dir.empty()) b.load(chosen_dir);
-    if (!chosen_file.empty()) {
-        app.files[b.target].path = chosen_file;
-        app.check_files();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
+    std::string folder = dialog_folder(app, target) + "/";
+    SDL_ShowOpenFileDialog(dialog_done, new DialogRequest{&app, target}, window, filters[target], 2, folder.c_str(),
+                           false);
 }
 
 void section(const char* title) {
@@ -524,7 +461,7 @@ void draw(App& app, SDL_Window* window) {
         ImGui::PushID(i);
         FileState& f = app.files[i];
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Choose...")) open_browser(app, i);
+        if (ImGui::Button("Choose...")) choose_file(app, window, i);
         if (i == 2 && !f.path.empty()) {
             ImGui::SameLine();
             if (ImGui::Button("Remove")) { f.path.clear(); app.check_files(); }
@@ -540,6 +477,16 @@ void draw(App& app, SDL_Window* window) {
             ImGui::TextColored(f.ok ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ImVec4(1, 0.45f, 0.4f, 1), "%s %s",
                                f.ok ? "OK" : "Problem:", f.message.c_str());
             ImGui::TextDisabled("    %s", f.path.c_str());
+        }
+        if (app.typing[i]) {  // the system dialog could not open
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.75f);
+            bool enter = ImGui::InputTextWithHint("##path", "Type the full path of the file", app.typed[i],
+                                                  sizeof app.typed[i], ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            if (ImGui::Button("Use") || enter) {
+                f.path = app.typed[i];
+                app.check_files();
+            }
         }
         ImGui::PopID();
     }
@@ -594,6 +541,9 @@ void draw(App& app, SDL_Window* window) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Close")) app.quit = true;
+    g_probe_min = ImGui::GetItemRectMin();
+    g_probe_max = ImGui::GetItemRectMax();
+    g_probe_hovered = ImGui::IsItemHovered();
     if (ready) {
         std::string where = "In your application menu";
         if (steam["added"].truthy()) where += " and in Steam (also in Game Mode)";
@@ -618,7 +568,6 @@ void draw(App& app, SDL_Window* window) {
         if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
-    draw_browser(app, window);
 
     section("Details");
     ImGui::BeginChild("log", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
@@ -649,9 +598,24 @@ int main(int, char**) {
     }
     const char* desktop = getenv("XDG_CURRENT_DESKTOP");
     bool game_mode = getenv("GAMESCOPE_WAYLAND_DISPLAY") || (desktop && !strcasecmp(desktop, "gamescope"));
+    // No SDL_WINDOW_HIGH_PIXEL_DENSITY: with it, KDE's fractional scaling (150%) put the drawing and the pointer in
+    // different places (Max had to point below a button). Without it the window is one coordinate space and the
+    // compositor scales it; HWDER_SETUP_HIDPI=1 turns it back on for tests.
     SDL_Window* window = SDL_CreateWindow("HWDER Setup", 1280, 800,
-                                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
+                                          (getenv("HWDER_SETUP_HIDPI") ? SDL_WINDOW_HIGH_PIXEL_DENSITY : 0) |
                                           (game_mode ? SDL_WINDOW_FULLSCREEN : 0));
+    // Where the compositor does not scale us (X11/XWayland with a DPI setting), grow by the display scale; never
+    // larger than the screen.
+    float display_scale = window && !getenv("HWDER_SETUP_HIDPI") ? std::clamp(SDL_GetWindowDisplayScale(window), 1.0f, 3.0f) : 1.0f;
+    SDL_Rect usable{};
+    if (window && !game_mode && SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(window), &usable)) {
+        int w = std::min(int(1280 * display_scale), int(usable.w * 0.95f));
+        int h = std::min(int(800 * display_scale), int(usable.h * 0.92f));
+        SDL_SetWindowSize(window, w, h);
+        SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
+    if (window) SDL_ShowWindow(window);
     SDL_Renderer* renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
     if (!renderer) {
         fprintf(stderr, "HWDER Setup: %s\nRun it in a terminal instead: %s/hwder-setup --cli\n", SDL_GetError(),
@@ -672,15 +636,22 @@ int main(int, char**) {
     style.FrameRounding = 6;
     style.FramePadding = ImVec2(14, 8);
     style.ItemSpacing = ImVec2(12, 10);
+    style.ScaleAllSizes(display_scale);
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
     App app;
     g_app = &app;
     app.refresh();
-    // Test hook: HWDER_SETUP_SCREENSHOT=<file.bmp> saves the window once the status is shown, then quits.
+    // Test hooks: HWDER_SETUP_SCREENSHOT=<file.bmp> saves the window once the status is shown, then quits.
+    // HWDER_SETUP_SELFTEST=<prefix> also moves a synthetic pointer to the Close button's centre (window coordinates,
+    // as the compositor reports a real pointer) and writes <prefix>.txt: sizes, scales and whether ImGui saw the hover.
     const char* screenshot = getenv("HWDER_SETUP_SCREENSHOT");
+    const char* selftest = getenv("HWDER_SETUP_SELFTEST");
+    std::string selftest_bmp = selftest ? std::string(selftest) + ".bmp" : "";
+    if (selftest) screenshot = selftest_bmp.c_str();
     int settled_frames = 0;
+    const int probe_at = getenv("HWDER_SETUP_SELFTEST_DIALOG") ? 150 : 10;  // the dialog answers asynchronously
     while (!app.quit) {
         SDL_Event event;
         bool waited = SDL_WaitEventTimeout(&event, 50);
@@ -693,7 +664,8 @@ int main(int, char**) {
         // Text grows with the window: readable on a 7" handheld and on a TV.
         int w = 0, h = 0;
         SDL_GetWindowSize(window, &w, &h);
-        style.FontScaleMain = std::clamp(std::min(w / 1280.0f, h / 800.0f), 0.8f, 2.0f);
+        float fit = std::min(w / (1280.0f * display_scale), h / (800.0f * display_scale));
+        style.FontScaleMain = std::clamp(fit, 0.75f, 2.0f) * display_scale;
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -702,7 +674,37 @@ int main(int, char**) {
         SDL_SetRenderDrawColor(renderer, 20, 22, 26, 255);
         SDL_RenderClear(renderer);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
-        if (screenshot && app.have_status && !app.task.running() && ++settled_frames == 20) {
+        if (selftest && getenv("HWDER_SETUP_SELFTEST_DIALOG") && app.have_status && settled_frames == 2)
+            choose_file(app, window, 0);  // without a session bus: must fall back to typing the path
+        if (selftest && app.have_status && settled_frames == probe_at) {
+            SDL_Event motion{};
+            motion.type = SDL_EVENT_MOUSE_MOTION;
+            motion.motion.windowID = SDL_GetWindowID(window);
+            motion.motion.x = (g_probe_min.x + g_probe_max.x) / 2;
+            motion.motion.y = (g_probe_min.y + g_probe_max.y) / 2;
+            SDL_PushEvent(&motion);
+        }
+        if (selftest && app.have_status && settled_frames == probe_at + 9) {
+            int ww, wh, pw, ph, ow, oh;
+            float sx, sy;
+            SDL_GetWindowSize(window, &ww, &wh);
+            SDL_GetWindowSizeInPixels(window, &pw, &ph);
+            SDL_GetCurrentRenderOutputSize(renderer, &ow, &oh);
+            SDL_GetRenderScale(renderer, &sx, &sy);
+            if (FILE* f = fopen((std::string(selftest) + ".txt").c_str(), "w")) {
+                fprintf(f, "driver %s\nwindow %dx%d points, %dx%d pixels, render output %dx%d, render scale %.3f\n"
+                        "display scale %.3f, pixel density %.3f\nimgui display %.0fx%.0f, framebuffer scale %.3f\n"
+                        "close button %.0f,%.0f-%.0f,%.0f, pointer %.0f,%.0f, hovered %d\n",
+                        SDL_GetCurrentVideoDriver(), ww, wh, pw, ph, ow, oh, sx, SDL_GetWindowDisplayScale(window),
+                        SDL_GetWindowPixelDensity(window), io.DisplaySize.x, io.DisplaySize.y,
+                        io.DisplayFramebufferScale.x, g_probe_min.x, g_probe_min.y, g_probe_max.x, g_probe_max.y,
+                        io.MousePos.x, io.MousePos.y, g_probe_hovered ? 1 : 0);
+                fprintf(f, "dialog open %d, typing fallback %d %d %d, ui scale %.2f\n", app.dialog_open ? 1 : 0,
+                        app.typing[0], app.typing[1], app.typing[2], display_scale);
+                fclose(f);
+            }
+        }
+        if (screenshot && app.have_status && !app.task.running() && ++settled_frames == probe_at + 10) {
             if (SDL_Surface* shot = SDL_RenderReadPixels(renderer, nullptr)) {
                 SDL_SaveBMP(shot, screenshot);
                 SDL_DestroySurface(shot);
