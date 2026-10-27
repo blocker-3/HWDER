@@ -53,7 +53,9 @@ enum Id {
     IpcTrace,  // HWDER_IPC_TRACE
     Keys,  // HWDER_KEYS
     Log,  // HWDER_LOG
+    Mods,  // HWDER_MODS
     Mute,  // HWDER_MUTE
+    NoMods,  // HWDER_NO_MODS
     NoPrelaunch,  // HWDER_NO_PRELAUNCH
     Nsp,  // HWDER_NSP
     NvTrace,  // HWDER_NV_TRACE

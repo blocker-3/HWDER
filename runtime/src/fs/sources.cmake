@@ -5,4 +5,5 @@ list(APPEND RUNTIME_SOURCES
     runtime/src/fs/hostfs.cpp
     runtime/src/fs/nsp.cpp
     runtime/src/fs/save_dir.cpp
+    runtime/src/fs/mods.cpp
 )

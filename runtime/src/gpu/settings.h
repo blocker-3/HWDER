@@ -69,6 +69,8 @@ struct Launch {
     std::string save_copy_from;  // copy saves from this folder into save_dir at the next launch (set in the in-game menu)
     int game_memory_mb = 0;          // memory the game is told it has (TotalMemorySize); 0 = a Switch's 3285 MiB
     int game_memory_active_mb = 0;   // what this run told the game (set by the kernel at boot; not saved)
+    std::string mods_dir;            // mods folder; empty = the default (fs/mods.h, HWDER_MODS wins)
+    std::set<std::string> mods_off;  // mod folder names switched off in the menu (saved '/'-separated)
 };
 
 // Startup switches. Each is applied as its environment variable before the subsystems read it, so a
