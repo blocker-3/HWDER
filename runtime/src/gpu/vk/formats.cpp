@@ -57,7 +57,23 @@ const AstcRow kAstc[] = {{0x40, 4, 4},  {0x41, 5, 5},  {0x42, 6, 6},   {0x44, 8,
                          {0x46, 12, 12}, {0x50, 5, 4}, {0x51, 6, 5},   {0x52, 8, 6},  {0x53, 10, 8},
                          {0x54, 12, 10}, {0x55, 8, 5}, {0x56, 10, 5},  {0x57, 10, 6}};
 
+// Maxwell's Z24S8 family maps to D24_UNORM_S8_UINT, which AMD does not support (RADV reports no format features;
+// Mesa 26 then drops every depth-tested draw on the Ally, Mesa 25 happened to cope). Depth contents never travel
+// between guest memory and the host image (uploads and downloads skip depth), so the host format can be swapped for
+// D32_SFLOAT_S8_UINT; the guest layout (bpb) stays 4 bytes. Ported from drewb583's amd-fixes branch (1d78229).
+VkFormat host_depth_format(VkFormat f) {
+    if (f != VK_FORMAT_D24_UNORM_S8_UINT) return f;
+    static const VkFormat host = [] {
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((format_features(VK_FORMAT_D24_UNORM_S8_UINT) & need) == need) return VK_FORMAT_D24_UNORM_S8_UINT;
+        hw_log("vk: D24S8 depth is not supported by this GPU - using D32_SFLOAT_S8_UINT");
+        return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    }();
+    return host;
+}
+
 FormatInfo make(VkFormat f, u8 bpb, u8 bw = 1, u8 bh = 1) {
+    f = host_depth_format(f);
     FormatInfo fi;
     fi.vk = f;
     fi.bpb = bpb;
