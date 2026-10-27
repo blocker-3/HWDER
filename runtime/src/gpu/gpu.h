@@ -29,6 +29,8 @@ struct Submission {
 
 // The gi_tag of the submission the GPU thread is executing (GPU thread only).
 u64 exec_gi_tag();
+// Guest GPFIFO submissions the GPU thread has started executing (counts from 1).
+u64 exec_count();
 
 struct Channel;
 

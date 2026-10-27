@@ -1,6 +1,7 @@
 // Resource binding of the Vulkan renderer: dummy images, framebuffer resolution, dynamic rendering, descriptor
 // pools, TIC reads and filling a program's descriptor set. Moved text-for-text from vk_renderer.cpp.
 #include <optional>
+#include "gpu/settings.h"
 #include "vk_renderer.h"
 #include "debug_flags.h"
 
@@ -32,6 +33,15 @@ void VkRenderer::create_dummies() {
 }
 
 VkImageView VkRenderer::dummy_view(VkImageViewType t) {
+    // Every unbound texture slot starts from a dummy view: cache the few view types (a view-map lookup per texture
+    // cost ~2% of the GPU thread). The dummy images are never destroyed.
+    if ((u32)t < 8 && dummy_views_[t]) return dummy_views_[t];
+    VkImageView v = dummy_view_lookup(t);
+    if ((u32)t < 8) dummy_views_[t] = v;
+    return v;
+}
+
+VkImageView VkRenderer::dummy_view_lookup(VkImageViewType t) {
     switch (t) {
     case VK_IMAGE_VIEW_TYPE_3D: return tc_.view(dummy3d_, VK_FORMAT_UNDEFINED, t, 0, 1, 0, 1);
     case VK_IMAGE_VIEW_TYPE_1D: case VK_IMAGE_VIEW_TYPE_1D_ARRAY:
@@ -134,30 +144,45 @@ Framebuffer VkRenderer::resolve_framebuffer(const u32* regs, bool for_clear, u32
 void VkRenderer::begin_rendering(const Framebuffer& fb) {
     SlowTimer timer("begin_rendering", 30.0);
     if (g_rec.rendering && cur_fb_ == fb) return;
-    VkCommandBuffer cb = g_rec.cmd();  // ends a previous rendering instance
-    VkRenderingAttachmentInfo ca[8];
-    for (u32 i = 0; i < fb.num_colors; i++) {
-        ca[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        ca[i].imageView = fb.color_view[i];
-        ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    }
-    VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    da.imageView = fb.depth_view;
-    da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {fb.width, fb.height}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = fb.num_colors;
-    ri.pColorAttachments = ca;
-    if (fb.depth_view) {
-        ri.pDepthAttachment = &da;
-        if (fb.has_stencil) ri.pStencilAttachment = &da;
-    }
-    vkCmdBeginRendering(cb, &ri);
+    g_rec.cmd();  // ends a previous rendering instance
+    struct {
+        VkImageView color[8], depth;
+        u32 ncolor, width, height;
+        bool stencil;
+    } r;
+    for (u32 i = 0; i < fb.num_colors; i++) r.color[i] = fb.color_view[i];
+    r.depth = fb.depth_view;
+    r.ncolor = fb.num_colors;
+    r.width = fb.width;
+    r.height = fb.height;
+    r.stencil = fb.has_stencil;
+    gputime::mark(gputime::kPass, fb.width, fb.height, fb.num_colors ? (u32)fb.color_format[0] : 0, fb.depth_view ? (u32)fb.depth_format : 0,
+                  fb.num_colors);
+    g_rec.record([r](VkCommandBuffer cb) {
+        VkRenderingAttachmentInfo ca[8];
+        for (u32 i = 0; i < r.ncolor; i++) {
+            ca[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            ca[i].imageView = r.color[i];
+            ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        da.imageView = r.depth;
+        da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, {r.width, r.height}};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = r.ncolor;
+        ri.pColorAttachments = ca;
+        if (r.depth) {
+            ri.pDepthAttachment = &da;
+            if (r.stencil) ri.pStencilAttachment = &da;
+        }
+        vkCmdBeginRendering(cb, &ri);
+    });
     g_rec.rendering = true;
     cur_fb_ = fb;
 }
@@ -199,12 +224,23 @@ bool VkRenderer::read_tic(u64 pool_va, u32 limit, u32 index, u32* out) {
     return true;
 }
 
-// Fill descriptor set `set` for a program's resources. cbuf(index, offset) reads bound cbuf words;
-// cb_range(index, va_lo/hi...) gives the bound range of c[index]. pools: [tic va, tic limit, tsc va, tsc limit].
-bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet set,
-                                const std::function<u32(u32, u32)>& cbuf,
-                                const std::function<bool(u32, u64&, u32&)>& cb_range, const u32* pools,
-                                bool linked_tsc, std::vector<std::function<void()>>& post) {
+// Fill descriptor set `set` for a program's resources (VK_NULL_HANDLE: allocate one, or reuse an identical set).
+// cbs[0..ncbs) are the stage's constant buffer bindings. pools: [tic va, tic limit, tsc va, tsc limit].
+bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, VkDescriptorSet& set, const CbufBinding* cbs,
+                                u32 ncbs, const u32* pools, bool linked_tsc, std::vector<std::function<void()>>& post) {
+    // cbuf(index, offset) reads a bound cbuf word; cb_range(index, va, size) gives the bound range of c[index].
+    auto cbuf = [this, cbs, ncbs](u32 index, u32 offset) -> u32 {
+        if (index >= ncbs) return 0;
+        const CbufBinding& b = cbs[index];
+        if (!b.valid || offset + 4 > b.size) return 0;
+        return read_u32(b.va + offset);
+    };
+    auto cb_range = [cbs, ncbs](u32 index, u64& lo, u32& size) -> bool {
+        if (index >= ncbs) return false;
+        lo = cbs[index].va;
+        size = cbs[index].size;
+        return cbs[index].valid;
+    };
     DescWrite& dw = dw_;
     dw.writes.clear();
     dw.buffers.clear();
@@ -229,15 +265,48 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         dw.writes.push_back(w);
         return dw.writes.back();
     };
-    const auto& props = display::device().props.limits;
-    // constant buffers
+    static const VkPhysicalDeviceLimits& props = display::device().props.limits;
+    auto cb_bytes = [](const shader::ConstBufferUse& c, bool bound, u32 size) {
+        u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
+        if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
+        return bytes;
+    };
+    // Set reuse: a graphics stage whose constant buffer contents, textures and samplers equal those of the last set
+    // filled for its layout in this submission binds that set again (no staging copies, allocation or update).
+    // Draws repeat their material state much more often than their transforms.
+    g_rec.cmd_in_pass();
+    bool reuse = !set && res.storage_buffers.empty() && res.texel_buffers.empty() && res.images.empty() && !dumping() &&
+                 !drawlog_active();
+    u64 rkey = (u64)(uintptr_t)sl->layout * 0x9E3779B97F4A7C15ull;
+    for (const auto& c : res.const_buffers) {
+        if (!reuse) break;
+        u32 size = 0;
+        u64 va = 0;
+        const bool bound = cb_range(c.index, va, size);
+        if (bound && obj_candidate(c.index, cb_bytes(c, bound, size))) reuse = false;  // blended per draw
+    }
+    for (const auto& c : res.const_buffers) {
+        if (!reuse) break;
+        u32 size = 0;
+        u64 va = 0;
+        const bool bound = cb_range(c.index, va, size);
+        const u64 bytes = cb_bytes(c, bound, size), n = bound ? std::min<u64>(bytes, size) : 0;
+        const u8* p = n ? host(va) : nullptr;
+        if (n && (!p || mm_->contiguous_size(va, n) < n)) reuse = false;
+        else rkey = hash_bytes(p, n, rkey ^ (bytes << 1) ^ (bound ? 1 : 0));
+    }
+    if (!set && !reuse) {
+        ProfScope aps(kProfDescAlloc);
+        set = alloc_set(sl->layout);
+        g_prof_sets++;
+    }
+    auto stage_cbufs = [&] {
     for (const auto& c : res.const_buffers) {
         ProfScope ps(kProfCbuf);
         u32 size = 0;
         u64 va = 0;
         bool bound = cb_range(c.index, va, size);
-        u64 bytes = std::min<u64>(std::max<u32>(c.size, 16), 0x10000);
-        if (bound && size) bytes = std::min<u64>(bytes, ((u64)size + 15) & ~15ull);
+        u64 bytes = cb_bytes(c, bound, size);
         Slice s = g_rec.stage(bytes, props.minUniformBufferOffsetAlignment);
         g_prof_cbufs++;
         g_prof_cbuf_bytes += bytes;
@@ -277,6 +346,10 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
         dw.buffers.push_back({s.buf, s.offset, bytes});
         add_write(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1).pBufferInfo = &dw.buffers.back();
     }
+    };
+    // constant buffers (with set reuse: after the textures, which complete the key; bindings stay in order)
+    if (reuse) binding = (u32)res.const_buffers.size();
+    else stage_cbufs();
     // storage buffers
     for (const auto& sb : res.storage_buffers) {
         u64 va = cbuf(sb.cbuf_index, sb.cbuf_offset) | ((u64)cbuf(sb.cbuf_index, sb.cbuf_offset + 4) << 32);
@@ -378,11 +451,19 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
                 u64 tkey = 0;
                 TicEntry* te = nullptr;
                 if (!dumping()) {
-                    tkey = hash_bytes((const u8*)tic, 32) ^ ((u64)vt * 0x9E3779B97F4A7C15ull);
-                    auto it = tic_cache_.find(tkey);
-                    if (it != tic_cache_.end() && it->second.gen == tc_.tex_gen && it->second.vt == vt &&
-                        memcmp(it->second.tic, tic, 32) == 0)
-                        te = &it->second;
+                    // Direct-mapped by TIC index in front of the hashed cache: most draws bind the same few handles.
+                    TicEntry& f = tic_fast_[tic_id & (kTicFast - 1)];
+                    if (f.img && f.gen == tc_.tex_gen && f.vt == vt && memcmp(f.tic, tic, 32) == 0) {
+                        te = &f;
+                    } else {
+                        tkey = hash_bytes((const u8*)tic, 32) ^ ((u64)vt * 0x9E3779B97F4A7C15ull);
+                        auto it = tic_cache_.find(tkey);
+                        if (it != tic_cache_.end() && it->second.gen == tc_.tex_gen && it->second.vt == vt &&
+                            memcmp(it->second.tic, tic, 32) == 0) {
+                            f = it->second;
+                            te = &f;
+                        }
+                    }
                 }
                 if (te) {
                     ProfScope hps(kProfTexHit);
@@ -494,13 +575,45 @@ bool VkRenderer::bind_resources(const shader::Resources& res, StageLayout* sl, V
             }
             {
                 ProfScope sps(kProfSampler);
-                if (read_tic(((u64)pools[3] << 32) | pools[4], pools[5], tsc_id, tsc)) ii.sampler = tc_.sampler(tsc);
+                if (read_tic(((u64)pools[3] << 32) | pools[4], pools[5], tsc_id, tsc)) {
+                    // Direct-mapped by TSC index: the sampler is a function of the TSC words and the anisotropy setting.
+                    SamplerFast& f = sampler_fast_[tsc_id & (kSamplerFast - 1)];
+                    const int aniso = settings::video().aniso;
+                    if (!f.sampler || f.aniso != aniso || memcmp(f.tsc, tsc, 32) != 0) {
+                        f.sampler = tc_.sampler(tsc);
+                        f.aniso = aniso;
+                        memcpy(f.tsc, tsc, 32);
+                    }
+                    ii.sampler = f.sampler;
+                }
             }
             dw.images.push_back(ii);
         }
         w.pImageInfo = &dw.images[first];
     }
     texs.reset();
+    if (reuse) {
+        for (const VkDescriptorImageInfo& ii : dw.images) {  // (not the struct bytes: its padding is undefined)
+            const u64 kv[3] = {(u64)(uintptr_t)ii.sampler, (u64)(uintptr_t)ii.imageView, (u64)ii.imageLayout};
+            rkey = hash_bytes(kv, sizeof(kv), rkey);
+        }
+        if (sl->last_set && sl->last_key == rkey && sl->last_serial == g_rec.serial()) {
+            set = sl->last_set;
+            g_prof_sets_reused++;
+            return true;
+        }
+        {
+            ProfScope aps(kProfDescAlloc);
+            set = alloc_set(sl->layout);
+            g_prof_sets++;
+        }
+        for (VkWriteDescriptorSet& w : dw.writes) w.dstSet = set;
+        binding = 0;
+        stage_cbufs();
+        sl->last_set = set;
+        sl->last_key = rkey;
+        sl->last_serial = g_rec.serial();
+    }
     // storage images
     for (const auto& im : res.images) {
         VkWriteDescriptorSet& w = add_write(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1);

@@ -51,9 +51,12 @@ void write_image_bmp(VkImage image, u32 w, u32 h, VkFormat fmt, const char* path
     VkBufferImageCopy c{};
     c.imageSubresource = {aspect, 0, 0, 1};
     c.imageExtent = {w, h, 1};
-    VkCommandBuffer cb = g_rec.cmd();
-    full_barrier(cb);
-    vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, 1, &c);
+    g_rec.cmd();
+    const VkBuffer rbuf = rb.buf;
+    g_rec.record([image, rbuf, c](VkCommandBuffer cb) {
+        full_barrier(cb);
+        vkCmdCopyImageToBuffer(cb, image, VK_IMAGE_LAYOUT_GENERAL, rbuf, 1, &c);
+    });
     g_rec.wait_idle();
     {  // raw texels next to the BMP (floats are not representable in a BMP)
         std::string raw = std::string(path) + ".raw";
@@ -131,7 +134,7 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
     static bool pending[3] = {};
     static int slot = 0;
     static FILE* index = nullptr;
-    VkCommandBuffer cb = g_rec.cmd();
+    g_rec.cmd();
     if (!simg) {
         VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ci.imageType = VK_IMAGE_TYPE_2D;
@@ -160,7 +163,9 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
         b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        g_rec.record([b](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        });
         for (auto& bf : bufs) bf = create_buffer(SW * SH * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, true);
         { std::error_code mkdir_ec; std::filesystem::create_directory(dir, mkdir_ec); }
         char path[512];
@@ -179,19 +184,23 @@ void filmstrip_capture(VkImage src, u32 w, u32 h, const char* dir) {
         }
         pending[sl] = false;
     }
-    full_barrier(cb);
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.srcOffsets[1] = {(s32)w, (s32)h, 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.dstOffsets[1] = {(s32)SW, (s32)SH, 1};
-    vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, simg, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
-    full_barrier(cb);
     VkBufferImageCopy c{};
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.imageExtent = {SW, SH, 1};
-    vkCmdCopyImageToBuffer(cb, simg, VK_IMAGE_LAYOUT_GENERAL, bufs[sl].buf, 1, &c);
-    full_barrier(cb);
+    const VkImage si = simg;
+    const VkBuffer dbuf = bufs[sl].buf;
+    g_rec.record([src, si, dbuf, blit, c](VkCommandBuffer cb) {
+        full_barrier(cb);
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, si, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+        full_barrier(cb);
+        vkCmdCopyImageToBuffer(cb, si, VK_IMAGE_LAYOUT_GENERAL, dbuf, 1, &c);
+        full_barrier(cb);
+    });
     serials[sl] = g_rec.serial();
     static u64 cap_seq = 0;  // capture sequence: several outputs per game frame with interpolation
     presents[sl] = cap_seq;

@@ -9,7 +9,7 @@ namespace gpu::diag {
 
 double g_prof[kProfCount];
 uint32_t g_prof_draws;
-uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets, g_prof_vtx_bytes, g_prof_vtx_copies, g_prof_idx_bytes, g_prof_idx_scanned;
+uint64_t g_prof_cbuf_bytes, g_prof_cbufs, g_prof_sets, g_prof_sets_reused, g_prof_vtx_bytes, g_prof_vtx_copies, g_prof_idx_bytes, g_prof_idx_scanned;
 static double g_prof_win[kProfCount];
 static uint64_t g_prof_win_draws;
 
@@ -18,12 +18,12 @@ void prof_window_log(unsigned frames, double busy_ms) {
     char line[768];
     int o = snprintf(line, sizeof(line), "vk: thread profile per frame: busy %.2f ms, %.0f draws, ms:", busy_ms / frames,
                      (double)g_prof_win_draws / frames);
-    o += snprintf(line + o, sizeof(line) - o, " | %.0f cbufs %.0f KiB, %.0f sets |", (double)g_prof_cbufs / frames,
-                  g_prof_cbuf_bytes / 1024.0 / frames, (double)g_prof_sets / frames);
+    o += snprintf(line + o, sizeof(line) - o, " | %.0f cbufs %.0f KiB, %.0f sets (%.0f reused) |", (double)g_prof_cbufs / frames,
+                  g_prof_cbuf_bytes / 1024.0 / frames, (double)g_prof_sets / frames, (double)g_prof_sets_reused / frames);
     o += snprintf(line + o, sizeof(line) - o, " %.0f vertex copies %.0f KiB, index %.0f KiB, %.0f indices scanned |",
                   (double)g_prof_vtx_copies / frames, g_prof_vtx_bytes / 1024.0 / frames, g_prof_idx_bytes / 1024.0 / frames,
                   (double)g_prof_idx_scanned / frames);
-    g_prof_cbufs = g_prof_cbuf_bytes = g_prof_sets = g_prof_vtx_bytes = g_prof_vtx_copies = g_prof_idx_bytes = g_prof_idx_scanned = 0;
+    g_prof_cbufs = g_prof_cbuf_bytes = g_prof_sets = g_prof_sets_reused = g_prof_vtx_bytes = g_prof_vtx_copies = g_prof_idx_bytes = g_prof_idx_scanned = 0;
     for (int i = 0; i < kProfCount; i++)
         if (g_prof_win[i] / frames >= 0.005) o += snprintf(line + o, sizeof(line) - o, " %s %.2f", kProfNames[i], g_prof_win[i] / frames);
     hw_log("%s", line);

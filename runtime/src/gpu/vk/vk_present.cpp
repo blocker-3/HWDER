@@ -111,20 +111,24 @@ void VkRenderer::post_picture(Image* img) {
         ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &ib);
+        g_rec.cmd();
+        g_rec.record([ib](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        });
         post_.w = w;
         post_.h = h;
     }
     // The picture's bytes into the copy (same texel size, so a raw copy; R/B order stays consistent because
     // the pass also writes through an R8G8B8A8 view of the picture).
     g_rec.barrier();
-    VkCommandBuffer cb = g_rec.cmd();
     VkImageCopy c{};
     c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.extent = {w, h, 1};
-    vkCmdCopyImage(cb, img->image, VK_IMAGE_LAYOUT_GENERAL, post_.copy, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    {
+        const VkImage si = img->image, di = post_.copy;
+        g_rec.record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
+    }
     g_rec.barrier();
     VkDescriptorSet set = alloc_set(post_.dsl);
     VkDescriptorImageInfo ii[2] = {{post_.sampler, post_.copy_view, VK_IMAGE_LAYOUT_GENERAL},
@@ -139,12 +143,21 @@ void VkRenderer::post_picture(Image* img) {
         wr[i].pImageInfo = &ii[i];
     }
     vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
-    cb = g_rec.cmd();
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pipe);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, post_.pl, 0, 1, &set, 0, nullptr);
-    float pc[4] = {1.0f / w, 1.0f / h, settings::video().fxaa ? 1.0f : 0.0f, settings::video().sharpen / 100.0f};
-    vkCmdPushConstants(cb, post_.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), pc);
-    vkCmdDispatch(cb, (w + 7) / 8, (h + 7) / 8, 1);
+    g_rec.cmd();
+    struct {
+        float pc[4];
+        VkPipeline pipe;
+        VkPipelineLayout pl;
+        VkDescriptorSet set;
+        u32 gx, gy;
+    } d{{1.0f / w, 1.0f / h, settings::video().fxaa ? 1.0f : 0.0f, settings::video().sharpen / 100.0f}, post_.pipe, post_.pl, set,
+        (w + 7) / 8, (h + 7) / 8};
+    g_rec.record([d](VkCommandBuffer cb) {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, d.pl, 0, 1, &d.set, 0, nullptr);
+        vkCmdPushConstants(cb, d.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(d.pc), d.pc);
+        vkCmdDispatch(cb, d.gx, d.gy, 1);
+    });
     g_rec.barrier();
     rs_.pc_layout = VK_NULL_HANDLE;  // the game's next draw pushes its constants again
     tc_.mark_modified(img);
@@ -194,8 +207,10 @@ int VkRenderer::capture_for_present(Image* img, u32 w, u32 h) {
         ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         ib.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(g_rec.cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &ib);
+        g_rec.cmd();
+        g_rec.record([ib](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        });
         hd.w = w;
         hd.h = h;
         hd.fmt = fmt;
@@ -205,7 +220,11 @@ int VkRenderer::capture_for_present(Image* img, u32 w, u32 h) {
     c.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.extent = {w, h, 1};
-    vkCmdCopyImage(g_rec.cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, hd.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    g_rec.cmd();
+    {
+        const VkImage si = img->image, di = hd.image;
+        g_rec.record([si, di, c](VkCommandBuffer cb) { vkCmdCopyImage(cb, si, VK_IMAGE_LAYOUT_GENERAL, di, VK_IMAGE_LAYOUT_GENERAL, 1, &c); });
+    }
     g_rec.barrier();
     hold_next_ = (i + 1) % 3;
     return (int)i;
@@ -349,7 +368,11 @@ void VkRenderer::present(const FramebufferInfo& fb) {
                     a.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
                     VkClearRect rr[2] = {{{{0, 0}, {band, ih}}, 0, 1}, {{{(s32)(iw - band), 0}, {band, ih}}, 0, 1}};
                     begin_rendering(f);
-                    vkCmdClearAttachments(g_rec.cmd_in_pass(), 1, &a, 2, rr);
+                    struct {
+                        VkClearAttachment a;
+                        VkClearRect rr[2];
+                    } c2{a, {rr[0], rr[1]}};
+                    g_rec.record([c2](VkCommandBuffer cb) { vkCmdClearAttachments(cb, 1, &c2.a, 2, c2.rr); });
                 }
             }
         }
@@ -469,7 +492,16 @@ void VkRenderer::present(const FramebufferInfo& fb) {
         wait_serial(capture_serial);  // the copy has run: the guest buffer is no longer needed
         fb.on_captured();
     }
-    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, g_rec.serial() - 1, fb.release_hz);
+    // The present waits for this serial on the same queue: it must not go in before the serial's own submit
+    // (the queue would wait for a signal queued behind it, a GPU hang).
+    // Read once: the GPU thread may flush (advance the serial) meanwhile.
+    const u64 wait_for = g_rec.serial() - 1;
+    wait_submitted(wait_for);
+    if (submitted_serial() < wait_for) {  // cannot happen after wait_submitted: catches a broken ordering
+        static int n = 0;
+        if (n++ < 5) hw_log("vk: ERROR: present queued before serial %llu was submitted", (unsigned long long)wait_for);
+    }
+    display::present_image(image, w, h, fb.swap_interval, g_s.timeline, wait_for, fb.release_hz);
     if (hold >= 0) hold_[hold].ticket = display::last_present_ticket();
 }
 

@@ -196,3 +196,210 @@ change (112 both, same-binary A/B). At the busy spot the tick is now bound by th
 GPU thread: per tick the guest's real frame takes ~8.8 ms, its in-between draw ~4.8 ms and waiting to present it
 ~3.4 ms (16.9 ms against 16.7), while the GPU thread needs 2 x ~7.8 ms. Closing the last ~3% needs faster
 recompiled guest code (the game's own draw submission on MainThread) as well as translator work.
+
+Round 8 (2026-10-25, branch `draw-path-perf`): the game's own draw submission on MainThread.
+`HWDER_SAMPLE_US` now samples MainThread too (from the first battle tick), with each sample tagged by tick phase
+(update, extra draw, extra present, real frame, split again at QueueBuffer) into `<log>.samples-main.txt`.
+`HWDER_TIMELINE=<s>` writes 0.5 s of frame-loop events (MainThread phases, GPU thread busy/idle, GPFIFO
+submissions, syncpoints, vi queue/dequeue, compositor) to `<log>.timeline.txt`.
+
+What they showed at the busy spot: MainThread's ~95% "busy" is mostly a `sched_yield` spin in the SDK's fence
+wait (f_10026c8364): 81% of its extra-present samples and 28% of its real-frame samples. Its real CPU per tick
+is about 12 of 16.7 ms. The game submits each frame as two GPFIFO entries at its end and, before recording the
+next frame, waits until the previous frame's syncpoints are reached (signalled when the GPU finished it). The GPU
+thread takes ~8.4 ms (wall) per frame and idles ~1.7 ms in every real frame, because the real frame's recording
+(~6.4 ms) plus the previous frame's GPU completion (2-4 ms after translation) is longer than one translation.
+The GPU is 84-86% busy at ~1.5 GHz sclk (package ~30 W, cores ~4.0 GHz). Hottest guest code on MainThread: the
+SDK memcpy (f_10027971c4, 7.6% of all samples, 11% of the extra draw), then hw_dispatch/hw_call (4.4%), then a
+flat list of draw-path functions (vtable-call loops at ~1-2% each).
+
+Kept: the SDK's memcpy/memmove/memset/bzero/strlen run as host C library calls (gen_main.py
+`LIBC_INTRINSICS`; `HWDER_GUEST_LIBC=1` runs the translated bodies), and the recompiler keeps guest registers in
+C locals that are written back only at calls and exits (gen.py `regcache_emit`; `--no-regcache` restores the
+old output). Same binary, interleaved, three runs each: host libc cut the extra draw 5.1-5.2 -> 4.7-4.8 ms
+(frame 8.90-8.95 -> 8.70-8.87 ms); register caching then 4.7-4.9 -> 4.5 ms (frame within noise, 8.78 -> 8.73).
+The time saved on MainThread mostly turns into more waiting in present: MainThread is no longer critical.
+Measured neutral and not kept: early syncpoint signalling (the wait moves to vi buffer slots and the 120 Hz
+release grid), blocking waits instead of the guest yield spin and the object worker's spin, an inline per-site
+lookup for indirect calls, batched ConstBufferData writes.
+
+Final dev build against the play build (a83c4a8), interleaved, three runs each at the busy spot at 120: frame
+8.80-8.88 -> 8.71-8.75 ms (113 -> 114-115 fps), extra draw 4.94-5.02 -> 4.35-4.59 ms, GPU thread unchanged
+(7.6-7.8 ms per frame). Autoplay fixture at 120 (two runs each), 60 fps runs on both saves: same ranges as the
+play build, no errors, thumbnails normal. Still short of 120 at the busy spot.
+
+GPU thread, same round: the per-phase profile puts descriptor-set allocation and update at only ~0.3 ms per frame
+(desc-alloc 0.17, desc-update 0.13 of the GPU thread's ~8.4 ms with the profiler on), so set caching was not
+attempted. Texture write-watch queries are now keyed by guest GPFIFO submission (~2 per frame) instead of the
+recorder serial (~24 per frame); `HWDER_WATCH_PER_SERIAL=1` restores the old keying. Same binary, three runs
+each: GPU thread 7.68-7.76 -> 7.59-7.61 ms per frame, frame unchanged (8.65-8.72 ms either way).
+At `HWDER_RES_SCALE=0.5` the GPU drops to 59% busy, the cores clock up from ~4.0 to ~4.6 GHz, the GPU thread to
+5.6 ms per frame and MainThread's extra draw to 3.1 ms, and late in the run the busy spot reaches ~120: at the
+busy spot the Ally is limited by the shared ~30 W package budget (CPU clocks against GPU load) more than by any
+one thread. Remaining candidates: less GPU work per frame, and burning less power in MainThread's fence-wait
+spin and the object thread's spin (single runs of blocking variants showed no change; worth a power-aware
+retest with more runs).
+
+Round 9 (2026-10-25): `HWDER_GPU_TIMING=<s>` logs GPU busy/idle per frame and the costliest render passes from
+GPU timestamps, and the 120-frame `gpu thread busy` line is followed by the GPU thread's waits for the GPU
+(submission fences, pushbuffer syncpoints, semaphore acquires). The GPU thread never waits on the GPU at the busy
+spot: it spends 7.7-8.3 ms of real CPU per frame translating. Removing the end-of-pass barriers saved only
+~0.2 ms of GPU time per frame and was dropped, as was a no-clear probe (both were measurement-only switches).
+
+Round 10 (2026-10-25): GPU-thread CPU cost per draw. Sampled at the busy spot the thread spent its time in
+bind_resources (11%), RADV (13%), write-watch ioctls (7%), command decode (~10%: pushbuffer words, method
+dispatch, macros), per-draw hashing of register blocks and pipeline keys (~5%) and texture checks.
+Kept, each measured interleaved, three runs each (GPU thread per frame):
+- per-draw lookups: the program, framebuffer and pipeline caches compare the previous draw's registers/key
+  word for word before hashing; the pipeline-result lock is taken only when a worker has published results;
+  unbound texture slots use cached dummy views; texture headers and samplers go through small direct-mapped
+  caches by TIC/TSC index in front of the hashed ones; bind_resources takes the stage's constant-buffer bindings
+  instead of std::function callbacks; the slow-op timer is cheaper. Against 61c2571: 8.14-8.24 -> 7.52-7.59 ms.
+- command decode: plain 3D register writes (every method outside method_3d's switch) are stored inline by the
+  pushbuffer and macro loops (HWDER_GPU_TRACE=2/3 keeps the full path), the pushbuffer is prefetched, and macro
+  parameter buffers keep their capacity: 7.41-7.75 -> 7.25-7.37 ms.
+- no slow-op timer per draw (a slow draw still shows as a slow pushbuffer entry); vertex/index staging computes
+  its sample hash and per-submission cache lookup only when the persistent geometry cache misses, and the index
+  range scan trusts an unchanged persistent range first: 7.28-7.38 -> 7.24-7.27 ms (small, pure removals).
+- descriptor-set reuse: a graphics stage whose constant-buffer contents (hashed), textures and samplers equal
+  the last set filled for its layout in the same queue submission binds that set again, without staging copies,
+  allocation or update; `vkCmdBindDescriptorSets` is skipped for a set already bound with the same layout. About
+  40% of stage sets are reused (705-730 of ~1800 per frame): 7.17-7.27 -> 6.99-7.00 ms.
+Measured and dropped: one write-watch query over runs of adjacent 2 MiB blocks (280k -> 119k ioctls per run but
+1.88 -> 1.62 s of kernel time: the cost is the page walk, not the call), and a host-cached staging ring (GPU
+thread 7.38-7.43 -> 7.43-7.66 ms).
+
+Total at the busy spot at 120: GPU thread 8.14-8.24 -> 6.99-7.00 ms per frame (-15%), frame 8.72-8.83 ->
+8.51-8.57 ms (113-115 -> 117-118 fps). The frame gains less because the cycle is now a chain: the GPU thread
+translates the in-between frame (~6.8 ms), the GPU finishes it ~3.7 ms later, and only then does MainThread
+record the next in-between frame (~7 ms with its waits); the GPU thread idles ~3-4 ms per two frames.
+Regression: autoplay at 120 8.36-8.80 ms (before 8.35-9.09), 60 fps on both saves 58-60 fps, no errors,
+thumbnails as before, host tests pass. The 60 fps runs' one long frame entering the battle (~44 s) was
+170-183 ms against 154-161 ms before.
+
+Round 11 (2026-10-26): the in-between frame chain and more GPU-thread cuts. With `HWDER_GPU_TIMING` the GPU is
+busy 6.45 ms per frame with 2.1 ms idle between submissions; its biggest pass is the 1920x1080 G-buffer pass
+(~830 draws, 2.8 ms), one rendering instance, so the GPU starts it only after the GPU thread has translated all
+of it. Measured and dropped (same binary, interleaved, three runs each):
+- submitting at render-pass boundaries once 100/300 draws were recorded: no change (the game's wait-for-idle
+  methods already split each frame into ~24 short command buffers; the kick hardly fired);
+- also splitting inside a pass every 150/300 draws (ending and resuming rendering): frame 8.52-8.59 ->
+  8.46-8.47 ms, but one of the six runs hit a GPU hang ("GPU timeout waiting for serial", then 61 fps). The only
+  GPU timeout in this work; not worth ~0.08 ms.
+Kept:
+- FlatMap marks empty slots with key 0 instead of a separate occupancy array (one cache line per probe; the
+  geometry cache holds up to 200k entries), GeomEntry without padding (80-byte slots), macro writes inlined into
+  the interpreter loop: GPU thread 7.05-7.08 -> 6.96-7.00 ms against ddfed10.
+  A second run of the FlatMap change alone: 7.00-7.06 -> 6.94-7.02 ms. Small, but both A/Bs point the same way.
+Also dropped: skipping TextureCache::validate on a texture-header cache hit within the same guest submission
+(6.96-7.01 -> 6.89-6.99 ms against the same build without it: noise). A first measurement had looked better
+because the build also contained the write-watch run queries dropped in round 10 by mistake; ddfed10 itself
+only carried those two unused members in a header, its write-watch code is the measured one.
+Frame time is unchanged by these (8.48-8.57 ms either way): at the busy spot the GPU thread no longer
+sets the pace; the chain of game recording, translation and the GPU's own work does, near the 120 Hz grid
+(~117-118 fps, most frames on time).
+The battle-load frame of the 60 fps runs is the first battle submission compiling pipelines synchronously
+(empty shader cache in every test run). Side by side the same day: autoplay save 61c2571 168-169 ms, round-11
+builds 167-179 ms; busy-spot save 61c2571 172-178 ms, this build 180-187 ms (the submission 125-130 -> 129-137 ms).
+So round 10's 154-161 ms was a different session; what remains is a few ms (~5%) on a one-time hitch, within the
+spread of the compiles but in one direction in both pairs, not investigated further.
+Regression on the final build: busy spot at 120 8.40-8.74 ms windows (GPU thread 6.91 ms), autoplay at 120
+8.38-9.05 ms, 60 fps on both saves 58-60 fps, no errors or GPU timeouts, thumbnails normal, host tests pass.
+
+Round 12 (2026-10-26): GPU work. Probes with `HWDER_GPU_TIMING` (same binary, two or three runs each):
+translating Maxwell's FMZ multiplies (0 times anything is 0) as plain multiplies changed nothing (GPU busy
+6.43-6.52 against 6.47-6.48 ms per frame), so shader ALU is not the limit; `RADV_DEBUG=nodcc,nohiz` raised GPU
+time 6.46 -> 7.2 ms, so colour/depth compression is in use. The full-screen clears were not fast clears: images
+live in GENERAL layout, where RADV never fast-clears, and the game's colour clears cost ~0.6 ms of GPU time per
+frame at the busy spot (four G-buffer targets 0.36 ms, three effect targets 0.25 ms), depth clears 0.34 ms.
+Kept: a colour clear of a whole single-level, single-layer image is a load-op clear in COLOR_ATTACHMENT_OPTIMAL
+layout, between two layout barriers (vk_draw.cpp `fast_clear_color`). Busy spot at 120, interleaved, three
+runs each against f3496cd: GPU busy 80-81% -> 73%, GPU thread 7.01-7.10 -> 6.66-6.78 ms, frame 8.50-8.56 ->
+8.47-8.50 ms. Depth clears done the same way stayed at 0.34 ms (these depth images cannot fast-clear) and were
+left as they are. Regression: autoplay 120 8.39-9.14 ms windows, 60 fps on both saves, no errors or GPU
+timeouts, thumbnails as before.
+The remaining gap to 120 was not average speed but a hitch: one frame every 300 was 20-39 ms late. Logging every
+frame over 20 ms put each one at the geometry cache's sweep, which rebuilt the whole table every 300 frames to
+drop ranges not drawn for 300 frames: 17-22 ms on the GPU thread for ~40k entries (also present before this
+work). The sweep now deletes stale entries in place (backward-shift deletion, `FlatMap::sweep`), a 32nd of the
+table per frame; the eviction rule is unchanged. FlatMap passes a randomized test against std::unordered_map
+under ASan/UBSan (`runs/drawperf/flatmap_test.cpp`, 40 rounds of 200k operations). Busy spot at 120,
+interleaved against 61f2661, three runs each: frame 8.47-8.50 -> 8.36-8.38 ms (118 -> 119-120 fps), worst frame
+per 300-frame window 18-39 -> 12-18 ms. Autoplay at 120 8.32-8.40 ms windows (119-120 fps, worst 18 ms); 60 fps
+on both saves 58-60 fps with per-window worst frames 19-22 ms (32-47 ms in round 8's build). No errors or GPU
+timeouts, thumbnails normal, host tests pass. Also seen: `save_pipeline_cache` (every 600 presents) takes 5-6 ms
+on the present path when there are new pipelines or warmup records (early in a session), mostly the warmup
+snapshot copy; left as it is.
+
+Round 13 (2026-10-26): Max's playtest of f207fc9 (no bugs; "still some dips to 60 fps"). Its log: menus and loading
+at 60 Hz by design, the first battle frame compiling shaders (184 ms), then dips in stretches where the pipeline
+count grew (103 -> 183 pipelines during the session, one synchronous compile of 46 ms) and in heavy scenes where
+the GPU thread needed 8.4-9.6 ms per frame (1400-1750 draws, ~2500 descriptor sets, 18% reused, against ~1300
+draws and 40% at the busy spot). The session started with "prewarm early load: incompatible, 0 recipes": the
+warmup cache's compatibility tag included the build commit, so every rebuild started cold and also replaced the
+accumulated recipes with that session's. The tag no longer includes the commit (epoch "ABI 2"): a stored program
+is adopted only when its whole record equals this build's translation, a pipeline only for an equal key, and
+prewarm compiles it with this build's code, so the commit added no protection. `tools/linux_autoplay.py
+--caches-from <run>` seeds a test run's pipeline caches from another run. Busy spot, a cold run then a warm run
+from its caches, twice: 112-115 recipes loaded and adopted, 0 mismatched, draws skipped for a missing pipeline
+174-186 -> 0-4, battle-load frame 161-170 -> 147-160 ms; steady frame rate the same (8.33-8.37 ms windows).
+Autoplay warm run: 134 of 136 adopted, 119-120 fps, thumbnails normal. The next build after this one still
+starts cold once (the tag format changed); later rebuilds keep their recipes.
+
+Round 14 (2026-10-26): a heavy test case and the real play setup. Max's mid-battle save from 2026-10-26 is the
+`heavy-fight` fixture (`linux_autoplay.py --fixture heavy-fight`; `HWDER_AUTOPLAY_X=1` presses X once 1 s into the
+battle, which starts the special attack whose frames dropped). Max plays in Game Mode (TDP setting 25 W, Steam frame
+limit 120, VRR on, tearing off). Headless runs are not slowed by Game Mode running in the background (only a run
+during the switch itself was). A run launched outside Steam into Game Mode's gamescope got a small window
+(rendered at 0.667x) and is not comparable; `Test HWDER heavy.sh` (in the project folder, added to Steam as a
+non-Steam game and started by Max) runs an on-screen A/B the way Steam launches the game: 1920x1080, VRR, the
+120 limit, 21-26 W. On screen, e7bb3ff and 3f32766 alike: the special attack 8.5-9.2 ms per 300-frame window
+(109-118 fps) for ~10 s, then 8.32-8.40 ms (120); headless gives nearly the same (8.4-8.95 ms). An earlier visible
+run on the GNOME desktop (Xwayland) ran the attack at 10.3-12.0 ms. The dips to 60 in Max's sessions were mostly
+the first session of each new build compiling the attack's pipelines (cold warmup cache, fixed in e7bb3ff).
+Sweeping a 256th of the geometry cache per frame (a 32nd cost ~4% of the GPU thread in this battle): GPU thread
+6.75-6.82 -> 6.57-6.74 ms per frame headless, no visible difference on screen.
+The special attack's dip to 60-70 (Max saw 69 on Steam's counter in an on-screen run, and in his own play):
+the extra frame was skipped as a camera cut whenever the projection changed, and the attack animates the field
+of view every tick (a zoom; up to 0.13 rad per tick at fov 0.88, ~15%), so for ~10 s every in-between frame
+was dropped and the attack ran at 60 Hz. It shows when the attack starts after fighting (`linux_autoplay.py
+--fixture heavy-fight --fight`), rarely when it starts standing still (1-4 skips), which is why the idle tests
+missed it. The gi log now splits cuts into camera jumps, field of view (largest change) and other projection
+state. A field-of-view change of up to 20% per tick with nothing else in the projection changing is blended
+halfway for the extra frame (Camera_Update rebuilds proj from it); larger changes and other projection changes
+are still cuts. Heavy save fighting, two runs each: in-between frames drawn during the attack 106-112 ->
+283-285 per 5 s, attack windows 10.87-13.37 -> 8.51-8.88 ms; busy spot unchanged (120 fps); thumbnails of the
+zoom normal.
+Max's session on 1e4ad64 ("better, some dips to 89"): the attack's zoom frames were blended (110-210 per 5 s),
+no field-of-view cuts left; the remaining dips were in his heaviest moments (2,100-3,700 draws per frame), where
+the GPU thread needed 8.2-9.4 ms per frame and extra frames were skipped "behind the 60 Hz grid" (30-67 per 5 s).
+Vulkan command recording now runs on a worker thread ("HWDER vk record", vk_sched.cpp): the GPU thread queues each
+command, or a draw's whole changed state and the draw itself (vk_draw.cpp `DrawRec`), as a closure in 64 KiB
+chunks; the worker records them in order and ends and submits the command buffers (it replaces the submit
+thread). Descriptor updates and staging writes still happen on the GPU thread before the commands that use them
+are queued. `HWDER_VK_SYNC_SUBMIT=1` records and submits on the GPU thread (fallback, A/B). Interleaved against
+1e4ad64, three runs each: GPU thread 6.18-6.31 -> 5.76-5.91 ms per frame on the heavy-fight save (fighting,
+special attack), 6.78-6.85 -> 6.01-6.21 ms at the busy spot; frame times unchanged there (both builds at or near
+120). Autoplay at 120 8.33-8.43 ms windows, 60 fps on both saves, no errors or GPU timeouts, thumbnails normal,
+host tests pass; the synchronous fallback runs (GPU thread 7.36 ms at the busy spot).
+The first Play install of c216e45 froze ~45 s into a headless heavy-fight check ("GPU timeout waiting for
+serial"): the present, which waits on the render timeline for the last flushed serial on the same queue, could
+be queued before the worker had submitted that serial, so the queue waited for a signal queued behind it. The
+present now waits until the worker has submitted the serial (`wait_submitted`). Heavy-fight save fighting,
+interleaved: 1 hang in 8 runs without the fix, 0 in 16 with it. The previous submit thread had the same race
+with a much smaller window (likely the one hang in the round-11 mid-pass split experiment). The Play build was
+rolled back to 1e4ad64 at once.
+That fix still read the recorder serial three times in present() while the GPU thread could advance it; a check
+in present() (an error is logged when the serial waited for is not yet submitted) fired 5 times in each of 5
+heavy-fight runs. The serial is now read once (and atomic): 10 heavy-fight runs with 0 check firings and 0
+hangs; regression runs and host tests pass.
+
+## No extra frames while the game runs at 30 fps (2026-10-26)
+
+Max saw a flashing text box during cutscenes. His 34deaf1 play log shows the video cutscene (nvdec/vic active,
+226-288 s) ticking at 30 fps: only every other tick drew an extra frame (75 drawn, 75 "behind the 60 Hz grid"
+per 5 s), so the screen got 2 real + 1 extra image per two ticks at uneven gaps (22 ms average, 45 ms worst).
+Extra frames are now off while the smoothed tick interval is above 26 ms and back on below 21 ms (logged as
+"gi: game frame rate ..."); `HWDER_GI_KEEP_30=1` keeps them for comparison. Busy-spot and heavy-fight runs
+against 34deaf1: same extra-frame counts and frame time (8.36 / 8.40 ms), the rule never switched on in battle.
+Not yet confirmed in the cutscene itself (autoplay cannot reach it): needs a playtest.

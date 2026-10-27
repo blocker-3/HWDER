@@ -35,11 +35,13 @@ static bool prewarm_enabled() {
     return !value || strcmp(value, "0") != 0;
 }
 static u64 warmup_compatibility() {
-    // Bump the renderer ABI epoch for changes to translation/layout semantics not
-    // already separated by the compiled build identity. No guest path is trusted.
-    constexpr char epoch[] = "HWDER graphics warmup ABI 1";
+    // Recipes stay valid across builds: a stored program is used only when its whole record (SPIR-V and
+    // resources of every stage) equals what this build translates (prepare_program cancels the others), a stored
+    // pipeline only for an equal key, and prewarm compiles it with this build's own pipeline code. Keyed by the
+    // build commit, every rebuild started cold and compiled ~180 pipelines during the first battles. Bump the
+    // epoch when the recipe format or what a key or record means changes. No guest path is trusted.
+    constexpr char epoch[] = "HWDER graphics warmup ABI 2";
     u64 tag = hash_bytes(epoch, sizeof(epoch));
-    tag = hash_bytes(HWDER_COMMIT, sizeof(HWDER_COMMIT), tag);
     const auto& p = display::device().props;
     const u32 host[] = {p.vendorID, p.deviceID, p.driverVersion, sizeof(shader::PushConstants)};
     tag = hash_bytes(host, sizeof(host), tag);
@@ -146,10 +148,32 @@ GfxProgram* VkRenderer::get_program(const u32* regs, u64* key_out) {
     // same address is re-validated (quick hash) once per frame per state by the slow path.
     u32 rtf[8];
     for (u32 i = 0; i < 8; i++) rtf[i] = regs[RenderTarget + i * 16 + 4];
+    // Consecutive draws mostly keep the program: compare the registers with the previous draw's before hashing them.
+    u32 st[kProgStateWords];
+    memcpy(st, regs + Pipelines, 6 * 16 * 4);
+    memcpy(st + 96, regs + VertexAttribFormat, 32 * 4);
+    memcpy(st + 128, regs + ProgramRegion, 2 * 4);
+    memcpy(st + 130, rtf, sizeof(rtf));
+    st[138] = regs[RtControl];
+    st[139] = regs[DepthMode];
+    st[140] = regs[BindlessTextureConstBufferSlot];
+    if (last_prog_ && last_prog_frame_ == g_s.present_count && memcmp(st, last_prog_state_, sizeof(st)) == 0) {
+        *key_out = last_prog_key_;
+        return last_prog_;
+    }
+    GfxProgram* gp = get_program_hashed(regs, rtf, key_out);
+    last_prog_ = gp;
+    last_prog_key_ = *key_out;
+    last_prog_frame_ = g_s.present_count;
+    memcpy(last_prog_state_, st, sizeof(st));
+    return gp;
+}
+
+GfxProgram* VkRenderer::get_program_hashed(const u32* regs, const u32* rtf, u64* key_out) {
     u64 skey = hash_bytes(regs + Pipelines, 6 * 16 * 4, 0x5151);
     skey = hash_bytes(regs + VertexAttribFormat, 32 * 4, skey);
     skey = hash_bytes(regs + ProgramRegion, 2 * 4, skey ^ regs[RtControl] ^ ((u64)regs[DepthMode] << 32));
-    skey = hash_bytes(rtf, sizeof(rtf), skey ^ regs[BindlessTextureConstBufferSlot]);
+    skey = hash_bytes(rtf, 8 * 4, skey ^ regs[BindlessTextureConstBufferSlot]);
     auto sit = prog_state_cache_.find(skey);
     if (sit != prog_state_cache_.end() && sit->second.frame == g_s.present_count) {
         *key_out = sit->second.key;
@@ -685,16 +709,25 @@ void VkRenderer::adopt_pipeline_results() {
         if (jp) record_pipeline(prog, key);
     }
     pipe_done_.clear();
+    pipe_done_n_.store(0, std::memory_order_relaxed);
 }
 
 VkPipeline VkRenderer::get_pipeline(GfxProgram* prog, const PipelineKey& key) {
-    u64 h = hash_bytes(&key, sizeof(key));
-    {   // adopt pipelines finished by the worker threads
+    if (pipe_done_n_.load(std::memory_order_acquire)) {  // adopt pipelines finished by the worker threads
         std::lock_guard<std::mutex> l(pipe_m_);
         adopt_pipeline_results();
     }
+    // The previous draw's key again (compared instead of hashed); pipelines are never dropped once created.
+    if (last_pipe_ && memcmp(&key, &last_pipe_key_, sizeof(key)) == 0) return last_pipe_;
+    u64 h = hash_bytes(&key, sizeof(key));
     auto it = pipelines_.find(h);
-    if (it != pipelines_.end()) return it->second;
+    if (it != pipelines_.end()) {
+        if (it->second) {
+            last_pipe_ = it->second;
+            last_pipe_key_ = key;
+        }
+        return it->second;
+    }
     // A driver compile takes 50-250 ms. Instead of stalling the whole frame, build new pipelines on
     // worker threads and skip the draw until the pipeline exists (a one-or-two-frame pop-in, the usual
     // "async shaders" trade). HWDER_SYNC_PIPELINES=1 restores the synchronous behaviour.
@@ -839,6 +872,7 @@ void VkRenderer::pipeline_worker() {
                    (unsigned long long)job.hash, (unsigned long long)pending_ms, pipe != VK_NULL_HANDLE);
         }
         pipe_done_.push_back({job.hash, pipe, job.prog, job.key});
+        pipe_done_n_.store((u32)pipe_done_.size(), std::memory_order_release);
         pipe_done_cv_.notify_one();
     }
 }

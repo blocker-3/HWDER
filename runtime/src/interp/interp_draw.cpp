@@ -16,7 +16,9 @@
 // rate, while unpaired frames and menus carry native 60 Hz pacing. HWDER_FPS is ignored in this mode.
 //
 // Settings > Display enables it; HWDER_GAME_INTERP=0/1 overrides that request for tests.
-// HWDER_GI_LOG=1 logs a summary every 5 s.
+// HWDER_GI_LOG=1 logs a summary every 5 s. While the game ticks at 30 fps (video cutscenes) no extra frames are drawn;
+// HWDER_GI_KEEP_30=1 keeps them for comparison.
+#include "host/sampler.h"
 #include "host/timing.h"
 
 #include <cmath>
@@ -84,6 +86,10 @@ u64 g_tick = 0;           // newest published tick when the current frame began
 
 struct Stats {
     u64 extra = 0, begin_failed = 0, no_pair = 0, cut = 0, mismatch = 0, no_present = 0;
+    u64 zoom = 0;                                  // extra frames with a blended field of view
+    u64 half_rate = 0;                             // skipped: the game runs at a 30 fps base
+    u64 cut_move = 0, cut_fov = 0, cut_other = 0;  // cut reasons: eye/at jump, field of view, other projection state
+    float cut_fov_max = 0, cut_fov_at = 0;         // largest per-tick field-of-view change seen, and the fov there
     u64 pair_ticks = 0, pair_gap = 0;  // why no pair: tick not consecutive, > 250 ms apart
     u64 pair_addr = 0;                 // pairs whose ticks used different render buffer slots (blended anyway)
     u64 late = 0;                      // skipped: the previous tick ran late
@@ -111,6 +117,11 @@ void report() {
                "%llu camera moved since its tick, %llu behind the 60 Hz grid; %llu pairs across buffer slots",
                g_st.extra, g_st.extra ? g_st.ms / g_st.extra : 0.0, g_st.no_present, g_st.begin_failed, g_st.no_pair,
                g_st.pair_ticks, g_st.pair_gap, g_st.cut, g_st.mismatch, g_st.late, g_st.pair_addr);
+    if (on && g_st.zoom) hw_log("gi: %llu extra frames with a blended field of view (zoom)", g_st.zoom);
+    if (on && g_st.half_rate) hw_log("gi: %llu extra frames skipped at a 30 fps game frame rate", g_st.half_rate);
+    if (on && g_st.cut)
+        hw_log("gi: cuts: %llu camera jump, %llu field of view (largest change %.4f at fov %.4f), %llu other projection state",
+               g_st.cut_move, g_st.cut_fov, g_st.cut_fov_max, g_st.cut_fov_at, g_st.cut_other);
     if (on && g_st.ticks)
         hw_log("gi: per tick (mean/max ms): update %.2f/%.1f, extra draw %.2f/%.1f, extra present %.2f/%.1f, "
                "real frame %.2f/%.1f, loop %.2f/%.1f; %.0f draws per frame", g_st.t_update / g_st.ticks, g_st.m_update,
@@ -151,11 +162,42 @@ void extra_frame(const Ctx* c) {
         else g_st.pair_gap++;
         return;
     }
+    // At a 30 fps base (ticks ~33 ms apart, e.g. scenes the game runs at half rate) the extra frame would blend
+    // twice as much motion: skip it and show the game's own frames. Smoothed tick interval with hysteresis
+    // (on above 26 ms, off below 21 ms) so a single slow tick does not switch it.
+    {
+        static const bool keep = debug::flag(debug::GiKeep30);
+        static double tick_ms = 16.7;
+        static bool half_rate = false;
+        tick_ms += (s[0].t_ms - s[1].t_ms - tick_ms) * 0.2;
+        const bool was = half_rate;
+        if (!half_rate && tick_ms > 26.0) half_rate = true;
+        else if (half_rate && tick_ms < 21.0) half_rate = false;
+        if (half_rate != was)
+            hw_log("gi: game frame rate %s (ticks %.1f ms apart): extra frames %s", half_rate ? "30 fps" : "back to 60 fps",
+                   tick_ms, half_rate ? "off" : "on");
+        if (half_rate && !keep) {
+            g_st.half_rate++;
+            return;
+        }
+    }
     if (s[0].addr != s[1].addr) g_st.pair_addr++;
     const interp::CamSnap &a = s[1], &b = s[0];
-    if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f || a.fov != b.fov || a.aspect != b.aspect ||
+    // A smooth zoom (only the field of view changing, by up to 20% per tick: the special attacks animate it every
+    // tick) is blended like the camera position instead of being treated as a cut, which showed those attacks at
+    // 60 fps. A larger change is still a cut.
+    const bool zoom = a.fov != b.fov && std::fabs(a.fov - b.fov) <= 0.2f * std::max(std::fabs(a.fov), std::fabs(b.fov));
+    if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f || (a.fov != b.fov && !zoom) || a.aspect != b.aspect ||
         a.near_ != b.near_ || a.far_ != b.far_ || a.proj_extra != b.proj_extra || a.proj_flags != b.proj_flags) {
         g_st.cut++;
+        if (dist(a.eye, b.eye) > 500.0f || dist(a.at, b.at) > 500.0f) g_st.cut_move++;
+        else if (a.aspect != b.aspect || a.near_ != b.near_ || a.far_ != b.far_ || a.proj_extra != b.proj_extra ||
+                 a.proj_flags != b.proj_flags) g_st.cut_other++;
+        else {
+            g_st.cut_fov++;
+            const float d = std::fabs(a.fov - b.fov);
+            if (d > g_st.cut_fov_max) g_st.cut_fov_max = d, g_st.cut_fov_at = b.fov;
+        }
         return;
     }
     game::Camera* cam = game::at<game::Camera>(b.addr);
@@ -184,6 +226,10 @@ void extra_frame(const Ctx* c) {
     memcpy(cam->at, at, 12);
     memcpy(cam->up, up, 12);
     cam->roll = roll;
+    if (zoom) {
+        cam->fov = a.fov + (b.fov - a.fov) * 0.5f;  // Camera_Update below rebuilds proj from it (proj dirty)
+        g_st.zoom++;
+    }
     Ctx u = *c;
     u.x[0] = b.addr;
     u.x[1] = 1;
@@ -220,6 +266,7 @@ void extra_frame(const Ctx* c) {
         ok = call(&e, f_GfxDevice_EndFrame, kEndFrameRet);
     }
     g_xdraw = now_ms();
+    host::set_sample_phase(3);
     if (ok) {
         u8 skip_present = game::read<u8>(game::deref(state + game::frame_state::kDevicePtr) + game::frame_state::kSkipPresent);
         if (skip_present) {
@@ -312,11 +359,13 @@ HW_HOOK(GfxDevice_BeginFrame) {
             interp::CamSnap n[1];
             if (interp::snapshots(n, 1) == 1) hw_gi_submit_tag = n[0].tick << 1;
         }
+        host::set_sample_phase(2);
         if (behind) {
             g_st.late++;
         } else {
             extra_frame(c);
         }
+        host::set_sample_phase(4);
         if (g_tick_in > 0) {
             g_st.ticks++;
             g_st.draws += hw_last_frame_draws.load();
@@ -335,10 +384,27 @@ HW_HOOK(Battle_Tick) {
         HW_ORIG(Battle_Tick)(c);
         return;
     }
+    // HWDER_SAMPLE_US: MainThread too, its samples tagged by tick phase.
+    static const bool sample = [] {
+        const int us = debug::value(debug::SampleUs, 0);
+        if (us <= 0) return false;
+        host::name_sample_phase(1, "update (tick entry to BeginFrame)");
+        host::name_sample_phase(2, "extra draw");
+        host::name_sample_phase(3, "extra present");
+        host::name_sample_phase(4, "real frame (draw and present)");
+        host::name_sample_phase(5, "extra present after QueueBuffer");
+        host::name_sample_phase(6, "real frame after QueueBuffer");
+        const char* log = debug::str(debug::Log);
+        host::sample_current_thread(us, std::string(log && *log ? log : "hwder.log") + ".samples-main.txt");
+        return true;
+    }();
+    (void)sample;
+    host::set_sample_phase(1);
     double in = now_ms();
     if (g_tick_out > 0 && in - g_tick_out < 100.0) add(g_st.t_loop, g_st.m_loop, in - g_tick_out);
     g_tick_in = in;
     HW_ORIG(Battle_Tick)(c);
+    host::set_sample_phase(0);
     g_tick_out = now_ms();
     if (g_xpresent > 0 && g_tick_out - g_xpresent < 100.0) add(g_st.t_real, g_st.m_real, g_tick_out - g_xpresent);
 }

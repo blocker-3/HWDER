@@ -17,6 +17,7 @@ enum Id {
     AutoplayCam,  // HWDER_AUTOPLAY_CAM
     AutoplayCircle,  // HWDER_AUTOPLAY_CIRCLE
     AutoplayIdle,  // HWDER_AUTOPLAY_IDLE
+    AutoplayX,  // HWDER_AUTOPLAY_X
     AutoplayPlus,  // HWDER_AUTOPLAY_PLUS
     AutoplaySkip,  // HWDER_AUTOPLAY_SKIP
     CacheProfile,  // HWDER_CACHE_PROFILE
@@ -37,12 +38,15 @@ enum Id {
     FsSelftest,  // HWDER_FS_SELFTEST
     FsTrace,  // HWDER_FS_TRACE
     GameInterp,  // HWDER_GAME_INTERP
+    GiKeep30,  // HWDER_GI_KEEP_30
     GiLog,  // HWDER_GI_LOG
     GiLogMs,  // HWDER_GI_LOG_MS
     GiNoObjects,  // HWDER_GI_NO_OBJECTS
     GiObjSync,  // HWDER_GI_OBJ_SYNC
     GiObjTrace,  // HWDER_GI_OBJ_TRACE
     GpuTrace,  // HWDER_GPU_TRACE
+    GpuTiming,  // HWDER_GPU_TIMING
+    GuestLibc,  // HWDER_GUEST_LIBC
     Hold,  // HWDER_HOLD
     IpcBt,  // HWDER_IPC_BT
     IpcDump,  // HWDER_IPC_DUMP
@@ -75,6 +79,7 @@ enum Id {
     SyncTrace,  // HWDER_SYNC_TRACE
     ThreadDump,  // HWDER_THREAD_DUMP
     ThreadStats,  // HWDER_THREAD_STATS
+    Timeline,  // HWDER_TIMELINE
     TotalMemMb,  // HWDER_TOTAL_MEM_MB
     Update,  // HWDER_UPDATE
     UsedMemMb,  // HWDER_USED_MEM_MB
@@ -95,6 +100,7 @@ enum Id {
     VkVerbose,  // HWDER_VK_VERBOSE
     VkWhiteTex,  // HWDER_VK_WHITE_TEX
     WaitTrace,  // HWDER_WAIT_TRACE
+    WatchPerSerial,  // HWDER_WATCH_PER_SERIAL
     kCount
 };
 

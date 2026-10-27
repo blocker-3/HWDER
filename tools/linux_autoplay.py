@@ -28,6 +28,7 @@ SAVE_LEAF = Path("0100AE00096EA000/48574445525F55530000000000000001")
 FIXTURES = {  # fixed saves copied from hywar/test-saves (sha256 of zmha.bin)
     "autoplay": "9038321106d28444dc26864749274c8403ef3222b741008f60349a21dc07bfbe",
     "busy-spot": "38e73f2680b232572ba4a2548645ab8ca8f52825512133f080dedf6d6a33467a",
+    "heavy-fight": "8eec90e953a32ecc9ce08ae1afd8f654ae9bff94877f3797599b8a76f464cba5",
 }
 
 
@@ -55,9 +56,10 @@ def prepare(args, run):
     run.mkdir(parents=True)
     exe = owned(Path(args.exe)) if args.exe else PLAY / "hwder"
     os.link(exe, run / "hwder")  # exe_dir() is the run folder: settings, saves and caches stay here
+    caches = owned(Path(args.caches_from)) if args.caches_from else PLAY
     for name in ("pipeline_cache.bin", "pipeline_warmup.bin"):
-        if (PLAY / name).exists():
-            shutil.copy2(PLAY / name, run / name)
+        if (caches / name).exists():
+            shutil.copy2(caches / name, run / name)
     settings = (PLAY / "hwder_settings.ini").read_text().splitlines()
     forced = {"save_dir": "", "save_copy_from": "", "debug_env": "", "skip_prelaunch": "1", "show_fps": "0"}
     lines = [l for l in settings if l.partition("=")[0] not in forced] + [f"{k}={v}" for k, v in forced.items()]
@@ -80,6 +82,10 @@ def environment(args, run):
              "HWDER_AUTOPLAY": "2", "HWDER_GAME_INTERP": "1" if args.mode == 120 else "0", "HWDER_GI_LOG": "1"}
     if args.fixture == "busy-spot":
         flags["HWDER_AUTOPLAY_IDLE"] = "1"  # mid-battle save: stand still so every run sees the same scene
+    if args.fixture == "heavy-fight":  # mid-battle save; X once starts the special attack with the heavy frames
+        flags["HWDER_AUTOPLAY_X"] = "1"
+        if not args.fight:  # standing still: the attack mostly keeps its camera; fighting first brings its zoom
+            flags["HWDER_AUTOPLAY_IDLE"] = "1"
     if args.stats:
         flags["HWDER_THREAD_STATS"] = str(args.stats)
     if args.filmstrip:
@@ -183,6 +189,8 @@ def main():
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--env", action="append", default=[], help="extra NAME=VALUE for the game")
     ap.add_argument("--exe", help="another build of hwder inside the folder (default: the play build)")
+    ap.add_argument("--fight", action="store_true", help="heavy-fight: run and attack instead of standing still")
+    ap.add_argument("--caches-from", help="folder inside the project to copy the pipeline caches from (default: the play build's)")
     args = ap.parse_args()
     if running_games():
         raise SystemExit("hwder is already running; not starting a test")
