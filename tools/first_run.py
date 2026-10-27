@@ -449,6 +449,23 @@ def record_update_path(exe, update_dir):
         os.replace(temp, settings)
 
 
+def offer_steam(cache, exe, nsp, keys, add=None, ask=None):
+    """Linux "Add to Steam" step (Windows has Setup's button). add=True adds without asking (closing and restarting
+    a running Steam), False skips; None asks once on a terminal, unless the entry exists or the player said no."""
+    import steam_shortcut
+    declined = cache / "steam-offer.json"
+    if add is None:
+        if steam_shortcut.entry_present(exe) or read_json(declined).get("declined"):
+            return
+        if not (steam_shortcut.ask if ask is None else ask)(
+                "Add HWDER to Steam, so it starts from your library (and Game Mode)?"):
+            atomic_json(declined, {"declined": True})
+            log("not added to Steam; add it later with: python3 tools/steam_shortcut.py --add")
+            return
+    steam_shortcut.store_game_paths(cache, exe, nsp, keys)
+    steam_shortcut.add_to_steam(exe, assume_yes=True if add else None)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--nsp", default=os.environ.get("HWDER_NSP"))
@@ -458,6 +475,10 @@ def main():
     ap.add_argument("--jobs", type=int, default=max(1, min(8, os.cpu_count() or 1)))
     ap.add_argument("--check", action="store_true", help="check installed prerequisites only")
     ap.add_argument("--launch", action="store_true", help="launch only after successful verification/build")
+    steam = ap.add_mutually_exclusive_group()
+    steam.add_argument("--add-to-steam", action="store_true",
+                       help="Linux: add the game to Steam without asking (closes and restarts a running Steam)")
+    steam.add_argument("--no-steam", action="store_true", help="Linux: do not offer to add the game to Steam")
     a = ap.parse_args()
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
@@ -472,6 +493,11 @@ def main():
             exe = prepare(ROOT, cache, nsp, keys, a.jobs, toolchain,
                           **({"update": a.update.resolve()} if a.update else {}))
             record_update_path(exe, read_json(cache / "last-success.json").get("update_dir"))
+            if os.name != "nt" and not a.no_steam:
+                try:
+                    offer_steam(cache, exe, nsp, keys, True if a.add_to_steam else None)
+                except (OSError, ValueError) as e:
+                    log(f"Add to Steam failed ({e}); the game is unaffected. Retry: python3 tools/steam_shortcut.py --add")
             if a.launch:
                 env = dict(os.environ, HWDER_NSP=str(nsp), HWDER_KEYS=str(keys))
                 env.pop("HWDER_EXEFS", None)
