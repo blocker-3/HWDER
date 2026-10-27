@@ -24,6 +24,8 @@ Switch copy. No emulator, and no game files in this repository.
 - **Game update 1.0.1** is supported (optional; the base game works on its own).
 - **Easy saves.** Pick any `zmha.bin`, including an emulator export or backup; it is imported
   after asking, with the replaced save backed up first.
+- **Mods.** Drop translation, texture or data mods (Switch LayeredFS layouts work as they are)
+  into a `mods` folder; the menu's Mods tab turns each on or off. Your game file is never changed.
 - **Launch from your desktop or Steam.** Setup creates a desktop shortcut or adds the game to
   Steam with its name and box art.
 - **In-game HWDER menu** (F1, or hold View/Select on a controller) for all of the above, most of
