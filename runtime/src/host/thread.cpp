@@ -11,6 +11,7 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <csetjmp>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/syscall.h>
@@ -76,6 +77,10 @@ struct Thread {
 void signal_complete(void* opaque) {
     event_signal(&static_cast<Thread*>(opaque)->complete);
 }
+// thread_exit jumps back here, like ExitThread on Windows: no unwinding of the frames in between. pthread_exit's
+// forced unwind runs glibc's libgcc_s unwinder through our C++ personality routine, which crashes when the C++
+// runtime brings its own unwinder (the Linux release links LLVM's libc++/libunwind statically).
+thread_local std::jmp_buf* t_exit_jump = nullptr;
 void* thread_entry(void* opaque) {
     auto thread = *static_cast<std::shared_ptr<Thread>*>(opaque);
     delete static_cast<std::shared_ptr<Thread>*>(opaque);
@@ -84,7 +89,12 @@ void* thread_entry(void* opaque) {
     pthread_cleanup_push(signal_complete, thread.get());
     thread->tid = thread_id();
     event_wait(&thread->start);
-    thread->entry(thread->argument);
+    std::jmp_buf exit_jump;
+    if (!setjmp(exit_jump)) {
+        t_exit_jump = &exit_jump;
+        thread->entry(thread->argument);
+    }
+    t_exit_jump = nullptr;
     pthread_cleanup_pop(1);
     return nullptr;
 }
@@ -133,7 +143,10 @@ void thread_join_release(void* opaque) {
     // The worker retains its own shared state until after signal_complete returns.
     delete handle;
 }
-[[noreturn]] void thread_exit() { pthread_exit(nullptr); }
+[[noreturn]] void thread_exit() {
+    if (t_exit_jump) std::longjmp(*t_exit_jump, 1);
+    pthread_exit(nullptr);  // a thread not started by thread_create
+}
 [[noreturn]] void process_exit(int code) { std::_Exit(code); }
 std::uint32_t thread_id() { return static_cast<std::uint32_t>(syscall(SYS_gettid)); }
 std::uint32_t thread_os_id(void* opaque) {

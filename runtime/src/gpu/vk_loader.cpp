@@ -3,11 +3,11 @@
 #include <dlfcn.h>
 #endif
 
-#define HW_VK_DEFINE(fn) PFN_##fn fn;
+#define HW_VK_DEFINE(fn) HW_VK_HIDDEN PFN_##fn fn;
 HW_VK_GLOBAL_FUNCS(HW_VK_DEFINE)
 HW_VK_INSTANCE_FUNCS(HW_VK_DEFINE)
 HW_VK_DEVICE_FUNCS(HW_VK_DEFINE)
-PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
+HW_VK_HIDDEN PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 
 bool hw_vk_load_global() {
 #ifdef _WIN32
