@@ -71,6 +71,7 @@ void load() {
     g_input.face_labels = false;
     for (int fam = 0; fam < kPadFamilies; fam++) hid::default_remap(g_input.remap[fam], fam, false);
     int version = 1;  // files without a version line predate versioning
+    bool remap_seen[kPadFamilies] = {};
     char line[2048];  // long enough for the file paths
     while (fgets(line, sizeof(line), f)) {
         char* eq = strchr(line, '=');
@@ -108,7 +109,7 @@ void load() {
         else if (k == "keyboard_slot") g_input.keyboard_slot = std::clamp(atoi(v), -1, 2);  // off, automatic, player 1 or 2
         else if (k.rfind("remap_", 0) == 0) {
             for (int fam = 0; fam < kPadFamilies; fam++)
-                if (k == kFamilyKeys[fam]) parse_remap(v, g_input.remap[fam]);
+                if (k == kFamilyKeys[fam]) parse_remap(v, g_input.remap[fam]), remap_seen[fam] = true;
         }
         else if (k == "menu_scale") g_video.menu_scale = std::clamp(atoi(v), 50, 300);
         else if (k == "contrast") g_video.contrast = std::clamp(atoi(v), 50, 150);
@@ -146,6 +147,10 @@ void load() {
         // unknown keys (e.g. v1's unused "refresh") are ignored and dropped on the next save
     }
     fclose(f);
+    // A family without a saved layout follows face_labels: Setup's first-run file is just "face_labels=1", and the
+    // menus and the game must then confirm with the button labelled A, not the one in A's position.
+    for (int fam = 0; fam < kPadFamilies; fam++)
+        if (!remap_seen[fam]) hid::default_remap(g_input.remap[fam], fam, g_input.face_labels);
     if (version < 2) {
         // v1 auto-enabled the 60 Hz monitor switch on non-60-multiple panels, so a saved 1 was most likely that
         // default rather than a choice. It is opt-in now.

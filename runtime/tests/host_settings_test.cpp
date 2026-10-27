@@ -6,8 +6,9 @@
 #include <cstring>
 
 namespace hid {
-void default_remap(int* out, int, bool) {
+void default_remap(int* out, int, bool by_label) {
     for (int i = 0; i < settings::kRemapSlots; ++i) out[i] = -1;
+    out[0] = by_label ? 100 : 200;  // marks which default layout was applied
 }
 }
 
@@ -28,7 +29,8 @@ int main() {
 #endif
     FILE* f = std::fopen("hwder_settings.ini", "w");
     check(f != nullptr, "open isolated settings");
-    std::fputs("version=3\nasync_shaders=0\ndebug_env=HWDER_SETTINGS_TEST_ABSENT,HWDER_SETTINGS_TEST_EXTERNAL,HWDER_SETTINGS_TEST_EMPTY\n", f);
+    std::fputs("version=3\nasync_shaders=0\ndebug_env=HWDER_SETTINGS_TEST_ABSENT,HWDER_SETTINGS_TEST_EXTERNAL,HWDER_SETTINGS_TEST_EMPTY\n"
+               "face_labels=1\nremap_playstation=1,0,3,2,9,10,26,27,6,4,7,8,11,12,13,14\n", f);
     check(std::fclose(f) == 0, "write isolated settings");
     settings::load();
     auto equals = [](const char* name, const char* expected) {
@@ -41,6 +43,10 @@ int main() {
 #ifndef _WIN32
     check(equals("HWDER_SETTINGS_TEST_EMPTY", ""), "explicitly empty external value wins");
 #endif
+    // Setup's first-run file names only face_labels: families without a saved layout follow it.
+    check(settings::input().face_labels, "face_labels read");
+    check(settings::input().remap[0][0] == 100, "unsaved layout follows face_labels (by label)");
+    check(settings::input().remap[1][0] == 1, "saved layout is kept as written");
     check(std::remove("hwder_settings.ini") == 0, "remove test settings");
     std::puts("settings environment precedence passed");
 }
