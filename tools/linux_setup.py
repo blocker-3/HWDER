@@ -290,11 +290,12 @@ def safe_extract_zip(archive, destination):
                 os.chmod(target, mode | 0o600)
 
 
-def write_wrappers(tc):
+def write_wrappers(tc, final=None):
     """Zig's clang, archiver and ranlib as plain commands for CMake: C/C++ target glibc 2.35 so the game runs on
-    any distribution from Ubuntu 22.04 / SteamOS 3 on."""
+    any distribution from Ubuntu 22.04 / SteamOS 3 on. `final` is where the toolchain folder ends up (the wrappers
+    are written while it is still being assembled)."""
     paths = tool_paths(tc)
-    zig = shlex.quote(str(paths["zig"]))
+    zig = shlex.quote(str(tool_paths(final or tc)["zig"]))
     (Path(tc) / "bin").mkdir(exist_ok=True)
     scripts = {
         "cc": f'if [ "$1" = --version ]; then exec {zig} cc --version; fi\nexec {zig} cc -target x86_64-linux-gnu.2.35 "$@"\n',
@@ -311,6 +312,7 @@ def write_wrappers(tc):
 def install_toolchain(report, root=ROOT):
     """Downloads, checks and unpacks the pinned tools once; later runs only check the completion marker."""
     if toolchain_ready(root):
+        write_wrappers(toolchain_dir(root))  # cheap; repairs wrappers of a moved data folder
         return toolchain_dir(root)
     value = manifest(root)
     tc = toolchain_dir(root)
@@ -358,7 +360,7 @@ def install_toolchain(report, root=ROOT):
             for required in artifact["required"]:
                 if not (site[0] / required).exists():
                     raise SetupError(f"{artifact['id']} is missing {required} after unpacking")
-        write_wrappers(staging)
+        write_wrappers(staging, tc)
         check = subprocess.run([str(tool_paths(staging)["python"]), "-I", "-c",
                                 "import cryptography.hazmat.primitives.ciphers, lz4.block, zstandard; print('ok')"],
                                capture_output=True, text=True)

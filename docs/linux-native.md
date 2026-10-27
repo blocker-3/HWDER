@@ -18,7 +18,7 @@ python3 tools/build.py --generated-dir build/link-check-generated --build-dir bu
 - Crash handling: no minidumps. Linux writes a crash report into hwder.log (signal, faulting address, host thread, backtrace with the recompiled guest function names) and leaves core dumps to the system.
 - Hybrid-CPU P-core preference is Windows-only (the Z1 Extreme has no efficiency cores).
 - Error dialogs: the no-game-data, wrong-game-version, save-copy and missing-Vulkan dialogs use SDL message boxes on Linux.
-- The native Setup window and setup kits are Windows-only; Linux uses `tools/first_run.py` / `play-local.sh`. Add to Steam has a Linux equivalent (see [Add to Steam](#add-to-steam-linux)).
+- Players install from the Linux release tarball with its own Setup window and terminal setup, no container: see [Linux release](linux-release.md). This page covers the developer flow (`tools/first_run.py` / `play-local.sh` against system packages).
 - XInput fallback is Windows-only; SDL handles every pad on Linux.
 - The save picker's "choose zmha.bin" file mode and the 60 Hz monitor switch need checking on the device.
 

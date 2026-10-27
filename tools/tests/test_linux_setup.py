@@ -155,9 +155,10 @@ class LinuxSetupTests(unittest.TestCase):
     def test_wrappers_target_glibc_235(self):
         tc = self.dir / "tc"
         tc.mkdir()
-        linux_setup.write_wrappers(tc)
+        linux_setup.write_wrappers(tc, self.dir / "final")
         cc = (tc / "bin" / "zig-cc").read_text()
         self.assertIn("cc -target x86_64-linux-gnu.2.35", cc)
+        self.assertIn(str(self.dir / "final" / "zig" / "zig"), cc)  # where the folder ends up, not the staging one
         self.assertTrue((tc / "bin" / "zig-ar").stat().st_mode & 0o100)
 
     def test_install_app_copies_verified_release_and_skips_checkouts(self):

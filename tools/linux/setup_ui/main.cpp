@@ -569,6 +569,7 @@ void draw(App& app, SDL_Window* window) {
             app.log.clear();
             app.run("prepare", args);
         }
+        if (!ready) ImGui::SetItemDefaultFocus();  // the controller starts on the next step
         ImGui::EndDisabled();
         if (!files_ok) { ImGui::SameLine(); ImGui::TextDisabled("Choose the game and keys first."); }
         if (st["game_running"].truthy()) { ImGui::SameLine(); ImGui::TextDisabled("Close HWDER first."); }
@@ -580,6 +581,7 @@ void draw(App& app, SDL_Window* window) {
     section("3  Play");
     ImGui::BeginDisabled(!ready || busy);
     if (ImGui::Button("Play")) app.run("play", {});
+    if (ready) ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
     const Json& steam = st["steam"];
     if (ImGui::Button(steam["added"].truthy() ? "Update Steam entry" : "Add to Steam")) {
@@ -597,7 +599,8 @@ void draw(App& app, SDL_Window* window) {
         if (steam["added"].truthy()) where += " and in Steam (also in Game Mode)";
         else if (!steam["installed"].truthy()) where += " (Steam was not found)";
         ImGui::TextDisabled("%s. Run HWDER Setup again to update, change files or rebuild.", where.c_str());
-        ImGui::TextDisabled("Saves: %s/save    Mods: %s", st["data_dir"].str().c_str(), st["mods_dir"].str().c_str());
+        ImGui::TextDisabled("Saves: %s/save", st["data_dir"].str().c_str());
+        ImGui::TextDisabled("Mods:  %s", st["mods_dir"].str().c_str());
     }
 
     if (app.steam_confirm) { ImGui::OpenPopup("Add to Steam"); app.steam_confirm = false; }
@@ -675,6 +678,9 @@ int main(int, char**) {
     App app;
     g_app = &app;
     app.refresh();
+    // Test hook: HWDER_SETUP_SCREENSHOT=<file.bmp> saves the window once the status is shown, then quits.
+    const char* screenshot = getenv("HWDER_SETUP_SCREENSHOT");
+    int settled_frames = 0;
     while (!app.quit) {
         SDL_Event event;
         bool waited = SDL_WaitEventTimeout(&event, 50);
@@ -696,6 +702,13 @@ int main(int, char**) {
         SDL_SetRenderDrawColor(renderer, 20, 22, 26, 255);
         SDL_RenderClear(renderer);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+        if (screenshot && app.have_status && !app.task.running() && ++settled_frames == 20) {
+            if (SDL_Surface* shot = SDL_RenderReadPixels(renderer, nullptr)) {
+                SDL_SaveBMP(shot, screenshot);
+                SDL_DestroySurface(shot);
+            }
+            app.quit = true;
+        }
         SDL_RenderPresent(renderer);
     }
     if (app.task.running() && app.task_kind == "prepare") app.task.stop();
