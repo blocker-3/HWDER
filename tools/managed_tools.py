@@ -221,9 +221,26 @@ def unpack(archive, destination, item, cancelled=lambda: False, progress=None):
     return base
 
 
-def identity(value, source):
-    # The embedded _pth binds generator children to this exact source/tools path.
-    return first_run.digest({"manifest": value, "source": str(Path(source).resolve())})
+def identity(value):
+    # One toolset per manifest, shared by every kit folder: an Update unpacked next to the previous kit reuses it.
+    # The kit's tools/ directory reaches the private Python through KIT_TOOLS (see environment and KIT_HOOK).
+    return first_run.digest({"manifest": value, "shared": 1})
+
+
+def legacy_identity(value, source_text):
+    # Older Setups keyed the toolset by the kit folder too (its tools/ path was written into python313._pth).
+    return first_run.digest({"manifest": value, "source": source_text})
+
+
+KIT_TOOLS = "HWDER_KIT_TOOLS"
+# Our own site hook (wheel .pth files are still rejected): adds the running kit's tools/ to the private Python.
+KIT_HOOK = ("import os, sys; t = os.environ.get('" + KIT_TOOLS + "'); "
+            "t and t not in sys.path and sys.path.append(t)\n")
+
+
+def write_python_paths(python):
+    (python / "python313._pth").write_text("python313.zip\n.\nLib/site-packages\nimport site\n", encoding="utf-8")
+    (python / "Lib/site-packages/hwder_kit_tools.pth").write_text(KIT_HOOK, encoding="utf-8")
 
 
 STAMP_SCHEMA = 2
@@ -253,8 +270,9 @@ def stamp(directory, value=None):
 
 def complete(directory, key, progress=None, value=None, repair=False):
     """True when the toolset at `directory` is installed for `key`. Normally a stamp comparison (key binaries'
-    size and mtime). A certificate from before the stamp (per-file hashes) is verified in full once and then
-    gains the stamp; repair=True always does the full per-file check (Repair tools)."""
+    size and mtime). A certificate from before the stamp (per-file hashes) was verified when it was written: it
+    gains the stamp when its key binaries are present and recorded, without re-hashing. repair=True does the full
+    per-file check of such a certificate (Repair tools)."""
     directory = Path(directory)
     certificate = first_run.read_json(directory / "complete.json")
     output = directory / "output"
@@ -272,11 +290,48 @@ def complete(directory, key, progress=None, value=None, repair=False):
             if (info.st_size, info.st_mtime_ns) != (size, mtime_ns):
                 return False
         return True
-    if not certificate.get("files") or certificate["files"] != tool_hashes(output, progress):
+    if not certificate.get("files"):
+        return False
+    current = stamp(directory, value)
+    if current is None or not set(current) <= set(certificate["files"]):
+        return False
+    if repair and certificate["files"] != tool_hashes(output, progress):
         return False
     first_run.atomic_json(directory / "complete.json",
-                          {**certificate, "stamp_schema": STAMP_SCHEMA, "stamp": stamp(directory, value)})
+                          {**certificate, "stamp_schema": STAMP_SCHEMA, "stamp": current})
     return True
+
+
+def adopt(root, key, value):
+    """Moves a toolset installed by an older Setup (one copy per kit folder) to the shared folder for `key`, without
+    re-hashing: its certificate key proves it was installed for this manifest. None when there is none to adopt."""
+    target = root / key[:24]
+    candidates = []
+    for directory in root.iterdir():
+        certificate = first_run.read_json(directory / "complete.json") if directory.is_dir() else {}
+        if len(directory.name) == 24 and certificate.get("owner") == OWNER and certificate.get("key"):
+            candidates.append((directory.stat().st_mtime, directory, certificate))
+    for _, directory, certificate in sorted(candidates, key=lambda c: c[0], reverse=True):
+        python = directory / "output/python"
+        try:
+            lines = (python / "python313._pth").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        sources = [str(Path(line).parent) for line in lines if Path(line).is_absolute() and Path(line).name == "tools"]
+        if len(sources) != 1 or legacy_identity(value, sources[0]) != certificate["key"]:
+            continue
+        if not complete(directory, certificate["key"], value=value):
+            continue
+        try:
+            directory.rename(target)
+        except OSError:  # in use by a running Setup of the older kit
+            continue
+        write_python_paths(target / "output/python")
+        first_run.atomic_json(target / "complete.json",
+                              {"owner": OWNER, "key": key, "abi": value["abi"], "stamp_schema": STAMP_SCHEMA,
+                               "stamp": stamp(target, value), "adopted_from": directory.name})
+        return target
+    return None
 
 
 def tool_hashes(root, progress=None):
@@ -332,10 +387,12 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
     with first_run.setup_lock(data):
         root = owned_path(data / "managed-tools", data)
         root.mkdir(exist_ok=True)
-        key = identity(value, source)
+        key = identity(value)
         final = root / key[:24]
         owned_path(final, data)
         phase("checking_installation")
+        if not final.exists():
+            adopt(root, key, value)
         if not repair and complete(final, key, lambda count,done:phase("verify_existing",files=count,finished=done), value):
             phase("installed_ready")
             return final
@@ -373,8 +430,7 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
                     if entry.name.endswith(".pth") or (packages / entry.name).exists():
                         raise ValueError("Unsupported/colliding wheel layout")
                     entry.rename(packages / entry.name)
-        (python / "python313._pth").write_text(
-            "python313.zip\n.\nLib/site-packages\n" + str(source / "tools") + "\nimport site\n", encoding="utf-8")
+        write_python_paths(python)
         phase("imports")
         validate(output)
         phase("imports_done")
@@ -407,8 +463,12 @@ def paths(directory, value=None):
 def installed(data, source, value=None, progress=None):
     value = value or manifest()
     data = plain_path(data)
-    key = identity(value, source)
+    key = identity(value)
     directory = owned_path(data / "managed-tools" / key[:24], data)
+    if not directory.exists() and (data / "managed-tools").is_dir():
+        with first_run.setup_lock(data):
+            if not directory.exists():
+                adopt(data / "managed-tools", key, value)
     if not complete(directory, key, progress, value):
         raise ValueError("Private tools are missing or changed. Choose Install private tools, then recheck.")
     return directory
@@ -418,7 +478,7 @@ def prerequisites(source, directory):
     """Exact tool/package identity for the existing first_run build cache key."""
     source, directory = Path(source).resolve(), Path(directory).resolve()
     value = manifest()
-    key = identity(value, source)
+    key = identity(value)
     def checked(count,done):
         first_run.log(f"private-tools: Checking private tool files: {count} files hashed" + (" (scan complete)" if done else ""))
     if not complete(directory, key, checked, value):
@@ -433,7 +493,7 @@ def prerequisites(source, directory):
         if not (source/"third_party"/relative).is_file():
             raise ValueError("Missing pinned third-party sources; extract the complete release kit")
     selected = paths(directory, value)
-    env = environment(directory, value)
+    env = environment(directory, value, kit=source)
     for name in ("cc","cmake","ninja"):
         result = subprocess.run([str(selected[name]),"--version"],env=env,check=True,capture_output=True,text=True)
         info = os.stat(filesystem_path(selected[name]))  # identity is the stamp; no re-hash on every Prepare
@@ -456,7 +516,7 @@ def game_image(path):
     return record
 
 
-def environment(directory, value=None, temporary=None):
+def environment(directory, value=None, temporary=None, kit=None):
     selected = paths(directory, value)
     directory = Path(directory).absolute()
     temporary_root = directory.parent.parent if temporary is not None else directory
@@ -479,6 +539,7 @@ def environment(directory, value=None, temporary=None):
     env["PATH"] = os.pathsep.join(map(str, [selected["cc"].parent, selected["cmake"].parent,
                                            selected["ninja"].parent, windows / "System32", windows]))
     env.update({name:str(temporary) for name in ("TEMP","TMP","TMPDIR")})
+    env[KIT_TOOLS] = str(Path(kit or MANIFEST.parent.parent).resolve() / "tools")
     return env
 
 
@@ -520,7 +581,7 @@ def main():
         event("stage",phase_message(kind,**fields),stage="tools",phase=kind,**fields)
     if args.bridge_action:
         try:
-            event("stage","Verifying private tool files (every file is checked)",stage="tools")
+            event("stage","Checking private tools",stage="tools")
             directory=installed(args.data,args.source,value,
                                 progress=lambda count,done:phase("verify_existing",files=count,finished=done))
             command=[str(paths(directory,value)["python"]),"-B","-X","utf8","-u",
@@ -533,7 +594,7 @@ def main():
                 command+=["--keys",args.keys]
             if args.update:
                 command+=["--update",args.update]
-            return subprocess.run(command,env=environment(directory,value)).returncode
+            return subprocess.run(command,env=environment(directory,value,kit=args.source)).returncode
         except (ValueError,OSError,subprocess.SubprocessError) as error:
             event("log",str(error))
             event("failed","Private tools are not installed for this kit yet. Choose Install (about 260 MB, no administrator access).",next="install")

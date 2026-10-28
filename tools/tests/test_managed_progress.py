@@ -95,7 +95,7 @@ class Progress(unittest.TestCase):
                           phase=lambda name,**f:events.append(name))
         self.assertIn("imports",events)
         for name in ("imports_done","verify_new","finalize","installed_ready"):self.assertNotIn(name,events)
-        self.assertFalse((self.data/"managed-tools"/tools.identity(value,self.source)[:24]).exists())
+        self.assertFalse((self.data/"managed-tools"/tools.identity(value)[:24]).exists())
 
     def test_main_nonce_bound_real_phase_fields_and_bridge_count_status(self):
         def install(*args,**kwargs):

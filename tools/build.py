@@ -29,14 +29,14 @@ def toolchain(managed=None, temporary=None):
     if managed:
         import managed_tools
         value = managed_tools.manifest()
-        key = managed_tools.identity(value, ROOT)
+        key = managed_tools.identity(value)
         if not managed_tools.complete(managed, key):
             raise RuntimeError("Private toolchain certificate is missing or changed; run setup tools verification")
         selected = managed_tools.paths(managed, value)
         for path in selected.values():
             if not path.is_file():
                 raise RuntimeError("Private toolchain is incomplete: " + str(path))
-        return (managed_tools.environment(managed, value, temporary), str(selected["cmake"]), str(selected["ninja"]),
+        return (managed_tools.environment(managed, value, temporary, kit=ROOT), str(selected["cmake"]), str(selected["ninja"]),
                 str(selected["cc"]), str(selected["cxx"]))
     if os.name == "nt":
         import msvc
