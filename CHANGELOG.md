@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0
+
+- **Linux release.** HWDER now runs natively on Linux (tested on a ROG Ally with Bazzite, Game Mode included). Download `HWDER-linux-x86_64-<version>.tar.gz`, extract it and run `hwder-setup`: a Setup window (or `hwder-setup --cli` in a terminal) picks your game, keys and update 1.0.1, downloads the pinned build tools and builds the game on your machine. No container or extra packages; it adds menu entries and a Steam shortcut. Saves live in `~/.local/share/HWDER/save`.
+- **Mods.** A `mods` folder (LayeredFS) is laid over the game's files on Windows and Linux; see the README.
+- **Setup offers Update.** When you open a newer Setup over an existing install, the main button says Update (the line above names the installed and the new version) instead of starting the old game.
+- **Faster Setup.** The private build tools are checked once against their published SHA-256 when downloaded, then only by a quick stamp, and one copy is shared by every Setup you unpack, so an Update no longer installs or re-checks them. *Repair private tools* re-checks everything on request.
+- **Linux fixes:** battles render on newer Mesa drivers (depth format fallback); steady audio on PipeWire; A/B follow the button-label setting.
+
 ## v0.2.2
 
 - **Fix: Setup's Prepare builds the game again.** The new AVX2 startup check in v0.2.1 did not compile with the compiler Setup installs, so Prepare stopped with an error. Everything else is the same as v0.2.1.
