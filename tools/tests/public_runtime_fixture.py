@@ -14,13 +14,17 @@ import sys
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/"tools"))
 OWNER="HWDER-public-runtime-link-NOT-A-GAME-v1"
+# Reviewed 2026-10-28: 9730d33 named the hooks (HW_HOOK/HW_GUEST, tools/recomp/symbols.txt) and dropped the
+# pass-through hooks, d93c83d removed the 120 fps research hooks, df6c056 added the stage-prop LOD hook.
 GUESTS=tuple("f_"+name for name in (
-    "10001763bc_orig","1000176490_orig","10001766a4_orig","100017672c_orig",
-    "10001767e8_orig","10001dee94_orig","10002acb54_orig","10002d96b4_orig",
-    "10002d9878_orig","10003878d0_orig","1000387f9c","10003d0a74_orig",
-    "10003d2da4_orig","10003d45cc_orig","10003d7028_orig","100045de0c_orig",
-    "100051e67c","100051e9c4_orig","100051ea20_orig","100052ab10_orig",
-    "100052f6bc_orig","100057cb78","100057cee0_orig"))
+    "10002acb54_orig","1000387f9c","10003cf0e8","10003d45cc_orig",
+    "100044660c_orig","10004555d0","100051e67c","100051e9c4_orig",
+    "100051ea20","100052f6bc","100057cb78","100057cee0_orig"))
+
+
+def named_symbols(root):
+    from recomp.gen_main import read_symbols
+    return {name:(address,is_func,hook) for address,name,is_func,hook in read_symbols(str(root/"tools/recomp/symbols.txt"))}
 
 
 def sha(path):
@@ -28,9 +32,18 @@ def sha(path):
 
 
 def public_bindings(root):
-    declared={};defined=set()
+    declared={};defined=set();symbols=None
     for path in sorted((root/"runtime/src").rglob("*.cpp")):
         source=path.read_text(encoding="utf-8")
+        # game/hook.h: HW_HOOK(Name) defines f_<addr> and needs the generated f_<addr>_orig; HW_GUEST(Name) needs f_<addr>.
+        for kind,name in re.findall(r'^\s*(HW_GUEST|HW_HOOK)\((\w+)\)',source,re.M):
+            symbols=symbols if symbols is not None else named_symbols(root)
+            if name not in symbols:
+                raise ValueError("Public guest-ID allowlist changed; review required ("+name+" is not in symbols.txt)")
+            guest="f_%010x"%symbols[name][0]
+            if kind=="HW_HOOK":
+                defined.add(guest);guest+="_orig"
+            declared.setdefault(guest,set()).add(path.relative_to(root).as_posix())
         for name,end in re.findall(r'extern\s+"C"\s+void\s+(f_[0-9a-f]{10}(?:_orig)?)\s*\(Ctx\*\s*\w+\)\s*([;{])',source):
             if end=="{":defined.add(name)
             else:declared.setdefault(name,set()).add(path.relative_to(root).as_posix())
@@ -48,15 +61,30 @@ def directory(path):
     return owned_path(path,ROOT/"build/private-toolchain-data/probes")
 
 
+def symbols_header():
+    """generated/symbols.h as gen_main.py writes it, from the public tools/recomp/symbols.txt (names only, no code)."""
+    lines=["#pragma once",'#include "hwder/cpu.h"','#ifdef __cplusplus','extern "C" {',"#endif"]
+    for name,(address,is_func,hook) in named_symbols(ROOT).items():
+        guest="f_%010x"%address
+        lines.append("#define HW_ADDR_%s 0x%xULL"%(name,address))
+        if is_func:
+            lines+=["#define f_%s %s"%(name,guest),"void %s(Ctx* c);"%guest]
+            if hook:
+                lines+=["#define f_%s_orig %s_orig"%(name,guest),"void %s_orig(Ctx* c);"%guest]
+    return "\n".join(lines+["#ifdef __cplusplus","}","#endif",""])
+
+
 def payloads():
-    return {"sources.cmake":
+    return {"symbols.h":symbols_header(),
+        "sources.cmake":
         'if(NOT HWDER_PUBLIC_RUNTIME_LINK_ONLY)\n  message(FATAL_ERROR "Public link fixture is NOT game code")\nendif()\n'
         'set(RECOMP_SOURCES "${GEN_DIR}/rc_public_link_only.c")\n',
         "rc_public_link_only.c":'#include "hwder/cpu.h"\n'+
         '\n'.join('void '+name+'(Ctx* c) { (void)c; }' for name in GUESTS)+'\n',
         "functable.c":'#include "hwder/dispatch.h"\n'
         'const HwFuncEntry hw_func_table[1]={{0,0}};\nconst unsigned hw_func_count=0;\n'
-        'const unsigned long long hw_resumable[1]={0};\nconst unsigned hw_resumable_count=0;\n',
+        'const unsigned long long hw_resumable[1]={0};\nconst unsigned hw_resumable_count=0;\n'
+        'const HwSymbol hw_symbols[1]={{0,0}};\nconst unsigned hw_symbol_count=0;\n',
         "module_info.c":'#include "hwder/module.h"\n'
         'const HwModuleInfo hw_modules[1]={{0,0,0,0,0}};\nconst unsigned hw_module_count=0;\n'}
 
@@ -79,7 +107,7 @@ def verify(path):
     record=json.loads((path/"public-link-fixture.json").read_text())
     if record.get("owner")!=OWNER or record.get("never_execute") is not True or record.get("guest_bindings")!=public_bindings(ROOT):
         raise ValueError("Not the reviewed public link fixture")
-    if set(record.get("files",{}))!={"sources.cmake","rc_public_link_only.c","functable.c","module_info.c"}:
+    if set(record.get("files",{}))!={"symbols.h","sources.cmake","rc_public_link_only.c","functable.c","module_info.c"}:
         raise ValueError("Unexpected fixture source set")
     if set(p.name for p in path.iterdir())!=set(record["files"])|{"public-link-fixture.json"}:
         raise ValueError("Extra fixture files")

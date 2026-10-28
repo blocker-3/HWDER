@@ -47,7 +47,9 @@ class FileProgress:
 
 def filesystem_path(path):
     """Use Win32 extended paths locally; never change the host long-path policy."""
-    path = Path(path).absolute()
+    path = Path(path)
+    if not str(path).startswith("\\\\?\\"):
+        path = Path(os.path.abspath(path))  # a \\?\ path does not resolve "..": normalize first (links not followed)
     if os.name == "nt" and not str(path).startswith("\\\\?\\"):
         return Path("\\\\?\\" + str(path))
     return path
