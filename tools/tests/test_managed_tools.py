@@ -100,7 +100,7 @@ class Managed(unittest.TestCase):
     def test_transaction_reuse_hashes_and_notices(self):
         value, fetch = self.fixture()
         result = self.install(value, fetch)
-        self.assertTrue(tools.complete(result, tools.identity(value, self.source)))
+        self.assertTrue(tools.complete(result, tools.identity(value)))
         self.assertEqual((result / "output/python/LICENSE.txt").read_bytes(), b"fixture notice")
         result2 = self.install(value, lambda *a:self.fail("must reuse verified archive/output"))
         self.assertEqual(result, result2)
@@ -110,8 +110,74 @@ class Managed(unittest.TestCase):
         result = self.install(value, fetch)
         (result / "output/python/python.exe").write_bytes(b"tampered")
         self.install(value, lambda *a:self.fail("verified download cache should be reused"))
-        self.assertTrue(tools.complete(result, tools.identity(value, self.source)))
+        self.assertTrue(tools.complete(result, tools.identity(value)))
         self.assertEqual(len(list(result.parent.glob(result.name + ".invalid-*"))), 1)
+
+    def test_old_certificate_is_stamped_without_rehash_and_repair_reinstalls(self):
+        value, fetch = self.fixture()
+        result = self.install(value, fetch)
+        key = tools.identity(value)
+        certificate = tools.first_run.read_json(result / "complete.json")
+        self.assertEqual(certificate["stamp_schema"], tools.STAMP_SCHEMA)
+        self.assertNotIn("files", certificate)
+        # A certificate written before the stamp (per-file hashes, verified then): stamped without re-hashing.
+        old = {k: v for k, v in certificate.items() if k not in ("stamp_schema", "stamp")}
+        old["files"] = tools.tool_hashes(result / "output")
+        tools.first_run.atomic_json(result / "complete.json", old)
+        with patch.object(tools, "tool_hashes", lambda *a, **k: self.fail("old certificate re-hashed")):
+            self.assertTrue(tools.complete(result, key, value=value))
+        self.assertEqual(tools.first_run.read_json(result / "complete.json")["stamp_schema"], tools.STAMP_SCHEMA)
+        with patch.object(tools, "tool_hashes", lambda *a, **k: self.fail("stamped toolset re-hashed")):
+            self.assertTrue(tools.complete(result, key))
+        # Repair re-extracts from the cached, SHA-256 checked archives instead of trusting the installation.
+        again = tools.install(self.data, self.source, value, fetch=lambda *a: self.fail("cached archives reused"),
+                              validate=lambda path: None, repair=True)
+        self.assertEqual(again, result)
+        self.assertEqual(len(list(result.parent.glob(result.name + ".invalid-*"))), 1)
+        self.assertTrue(tools.complete(result, key))
+        # An old certificate whose key binary is missing is not trusted.
+        old["files"] = {"other.exe": "0" * 64}
+        tools.first_run.atomic_json(result / "complete.json", old)
+        self.assertFalse(tools.complete(result, key, value=value))
+
+    def test_update_in_a_new_kit_folder_reuses_tools_and_adopts_old_per_kit_install(self):
+        value, fetch = self.fixture()
+        result = self.install(value, fetch)
+        python = result / "output/python"
+        self.assertNotIn(str(self.source), (python / "python313._pth").read_text(encoding="utf-8"))
+        env = tools.environment(result, kit=self.source)
+        self.assertEqual(env[tools.KIT_TOOLS], str(self.source.resolve() / "tools"))
+        self.assertIn(tools.KIT_TOOLS, (python / "Lib/site-packages/hwder_kit_tools.pth").read_text(encoding="utf-8"))
+        # The next kit, unpacked into another folder, uses the same tools: nothing downloaded or extracted.
+        other = self.root / "source-next"
+        (other / "tools").mkdir(parents=True)
+        with patch.object(tools, "unpack", lambda *a, **k: self.fail("tools extracted again")):
+            self.assertEqual(tools.install(self.data, other, value, fetch=lambda *a: self.fail("downloaded again"),
+                                           validate=lambda p: None), result)
+        # An older Setup kept one copy per kit folder, keyed with the kit path written into its _pth.
+        kit = str(self.source.resolve())
+        legacy = result.parent / tools.legacy_identity(value, kit)[:24]
+        result.rename(legacy)
+        (legacy / "output/python/python313._pth").write_text(
+            "python313.zip\n.\nLib/site-packages\n" + kit + "\\tools\nimport site\n", encoding="utf-8")
+        old = tools.first_run.read_json(legacy / "complete.json")
+        old = {"owner": old["owner"], "abi": old["abi"], "key": tools.legacy_identity(value, kit),
+               "files": tools.tool_hashes(legacy / "output")}
+        tools.first_run.atomic_json(legacy / "complete.json", old)
+        with patch.object(tools, "tool_hashes", lambda *a, **k: self.fail("adopted tools re-hashed")), \
+             patch.object(tools, "unpack", lambda *a, **k: self.fail("tools extracted again")):
+            self.assertEqual(tools.installed(self.data, other, value), result)
+        self.assertFalse(legacy.exists())
+        certificate = tools.first_run.read_json(result / "complete.json")
+        self.assertEqual((certificate["key"], certificate["adopted_from"]), (tools.identity(value), legacy.name))
+        self.assertNotIn(kit, (result / "output/python/python313._pth").read_text(encoding="utf-8"))
+        # A folder whose _pth does not match its key (another manifest) is left alone.
+        stray = result.parent / ("f" * 24)
+        (stray / "output/python").mkdir(parents=True)
+        (stray / "output/python/python313._pth").write_text(kit + "\\tools\n", encoding="utf-8")
+        tools.first_run.atomic_json(stray / "complete.json", {"owner": tools.OWNER, "key": "f" * 64, "files": {"x": "0"}})
+        self.assertIsNone(tools.adopt(result.parent, "e" * 64, value))
+        self.assertTrue(stray.exists())
 
     def test_checksum_failure_never_promotes_and_previous_stays_verified(self):
         good, fetch = self.fixture()
@@ -121,8 +187,8 @@ class Managed(unittest.TestCase):
             Path(target).write_bytes(b"wrong bytes")
         with self.assertRaisesRegex(ValueError, "checksum mismatch"):
             self.install(changed, invalid)
-        self.assertTrue(tools.complete(previous, tools.identity(good, self.source)))
-        self.assertFalse((previous.parent / tools.identity(changed, self.source)[:24]).exists())
+        self.assertTrue(tools.complete(previous, tools.identity(good)))
+        self.assertFalse((previous.parent / tools.identity(changed)[:24]).exists())
 
     def test_cancel_before_promotion_preserves_previous(self):
         good, fetch = self.fixture()
@@ -134,8 +200,8 @@ class Managed(unittest.TestCase):
         with self.assertRaises(InterruptedError):
             tools.install(self.data, self.source, changed, fetch=new_fetch,
                           validate=validate, cancelled=lambda:bool(done))
-        self.assertTrue(tools.complete(previous, tools.identity(good, self.source)))
-        self.assertFalse((previous.parent / tools.identity(changed, self.source)[:24]).exists())
+        self.assertTrue(tools.complete(previous, tools.identity(good)))
+        self.assertFalse((previous.parent / tools.identity(changed)[:24]).exists())
 
     def test_probe_failure_cannot_certify_tools(self):
         value, fetch = self.fixture()
@@ -143,7 +209,7 @@ class Managed(unittest.TestCase):
             raise RuntimeError("synthetic import failure")
         with self.assertRaisesRegex(RuntimeError, "import failure"):
             tools.install(self.data, self.source, value, fetch=fetch, validate=invalid)
-        self.assertFalse((self.data / "managed-tools" / tools.identity(value, self.source)[:24]).exists())
+        self.assertFalse((self.data / "managed-tools" / tools.identity(value)[:24]).exists())
 
     def test_bad_members_preflight_before_any_extraction(self):
         names = ["../outside", "/absolute", "C:/drive", "x\\y", "x:stream", "CON.txt",
@@ -203,7 +269,8 @@ class Managed(unittest.TestCase):
         self.assertEqual(tools.owned_path(tools.filesystem_path(destination), self.root), destination)
         tools.first_run.atomic_json(destination.parent / "complete.json",
             {"owner":tools.OWNER,"key":"long-fixture","files":tools.tool_hashes(destination)})
-        self.assertTrue(tools.complete(destination.parent, "long-fixture"))
+        flat = {**value, "artifacts": [{**item, "id": "", "archive_root": ""}]}  # required file directly in output
+        self.assertTrue(tools.complete(destination.parent, "long-fixture", value=flat))
         with self.assertRaises(ValueError):
             tools.owned_path(tools.filesystem_path(self.root / "../outside"), self.root)
 

@@ -139,6 +139,28 @@ def recovery(detail):
     return "Setup did not finish: " + line.rstrip(".") + ". Fix that, then Retry.", "prepare"
 
 
+def kit_version(root=None):
+    """The version this setup kit carries (version.txt, written into every release zip), or None in a source
+    checkout."""
+    try:
+        line = (Path(root or first_run.ROOT) / "version.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+        return line or None
+    except (OSError, IndexError):
+        return None
+
+
+def stale_build(data, root=None):
+    """The kit's version differs from the one that prepared the installed game (newer, older or another branch):
+    Setup offers "Update to <version>" instead of Play, so the kit's code is actually built (before, a new kit
+    landed on Play and kept running the old game). Installs prepared before the version was recorded count as
+    different once. Returns (kit version, installed version or None), or None when they match."""
+    version = kit_version(root)
+    if version is None:
+        return None
+    built = first_run.read_json(Path(data) / "setup-inputs.json").get("built_version")
+    return None if built == version else (version, built)
+
+
 def checked_ready(data):
     data = Path(data).resolve()
     marker = first_run.read_json(data / "last-success.json")
@@ -240,6 +262,12 @@ def discovered_game(exe):
 def ready_status(data, managed=None, identity=process_identity):
     with first_run.setup_lock(Path(data)):
         exe, _, _ = checked_ready(data)
+        stale = stale_build(data)
+        if stale:
+            installed = stale[1] or "an earlier release"
+            emit("update_available", f"Your game was prepared with {installed}; this setup is {stale[0]}. "
+                 f"Choose Update to build it; your saves and settings are kept.", kit=stale[0], installed=installed)
+            return
         if managed is not None:
             import managed_tools
             managed_tools.game_image(exe)
@@ -312,7 +340,8 @@ def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=Non
         if first_run.file_hash(exe) != backend.read_json(data / "last-success.json").get("exe_sha256"):
             raise ValueError("Prepared executable certificate did not match.")
         backend.atomic_json(data / "setup-inputs.json", {"nsp": str(nsp), "keys": str(keys),
-                            **({"update": str(update)} if update else {})})
+                            **({"update": str(update)} if update else {}),
+                            **({"built_version": kit_version()} if kit_version() else {})})
         installed_paths(data, exe)
     emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe), paths_ready="yes")
 

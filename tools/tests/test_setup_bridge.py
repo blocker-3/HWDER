@@ -74,6 +74,27 @@ class Bridge(unittest.TestCase):
         bridge.installed_paths(self.data, exe)
         self.assertIn("update_path=\n", (exe.parent / "hwder_settings.ini").read_text())
 
+    def test_kit_version_differing_from_the_installed_build_offers_update(self):
+        self.fixture()
+        kit = self.data / "kit"
+        kit.mkdir()
+        self.assertIsNone(bridge.stale_build(self.data, kit))  # source checkout: no version.txt, no check
+        (kit / "version.txt").write_text("v0.2.3-5-gabc\nabcdef1234\n")
+        self.assertEqual(bridge.stale_build(self.data, kit), ("v0.2.3-5-gabc", None))  # prepared before versions were kept
+        inputs = bridge.first_run.read_json(self.data / "setup-inputs.json")
+        for installed in ("v0.2.2", "v0.2.4"):  # older or newer: both differ
+            bridge.first_run.atomic_json(self.data / "setup-inputs.json", {**inputs, "built_version": installed})
+            self.assertEqual(bridge.stale_build(self.data, kit), ("v0.2.3-5-gabc", installed))
+        bridge.first_run.atomic_json(self.data / "setup-inputs.json", {**inputs, "built_version": "v0.2.3-5-gabc"})
+        self.assertIsNone(bridge.stale_build(self.data, kit))
+        bridge.first_run.atomic_json(self.data / "setup-inputs.json", {**inputs, "built_version": "v0.2.2"})
+        out = io.StringIO()
+        with patch.object(bridge, "kit_version", lambda root=None: "v0.2.3-5-gabc"), contextlib.redirect_stdout(out):
+            bridge.ready_status(self.data)
+        events = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual([e["type"] for e in events], ["update_available"])
+        self.assertEqual((events[0]["kit"], events[0]["installed"]), ("v0.2.3-5-gabc", "v0.2.2"))
+
     def test_avx2_check_trusts_only_new_windows_and_maps_to_a_sentence(self):
         bridge.require_avx2(present=lambda feature: True, build=22631)
         bridge.require_avx2(present=lambda feature: False, build=17763)  # pre-2004 Windows cannot report AVX2

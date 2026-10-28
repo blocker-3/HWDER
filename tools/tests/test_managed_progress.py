@@ -67,22 +67,25 @@ class Progress(unittest.TestCase):
             tools.unpack(archive,self.root/"cancelled",item,cancelled=lambda:cancel[0],progress=progress)
         self.assertFalse(any(done for n,done in events))
 
-    def test_install_phase_order_and_cached_reuse_still_hashes(self):
+    def test_install_phase_order_and_cached_reuse_checks_only_the_stamp(self):
         _,_,value,fetch=self.fixture();events=[]
         def phase(kind,**fields):events.append((kind,fields))
         def validate(path):events.append(("actual_validation",{}))
         installed=tools.install(self.data,self.source,value,fetch=fetch,validate=validate,phase=phase)
         names=[n for n,f in events]
-        for earlier,later in zip(("archive_check","download_checksum","extract","packages","imports","actual_validation","imports_done","verify_new","finalize"),
-                                 ("download_checksum","extract","packages","imports","actual_validation","imports_done","verify_new","finalize","installed_ready")):
+        for earlier,later in zip(("archive_check","download_checksum","extract","packages","imports","actual_validation","imports_done","finalize"),
+                                 ("download_checksum","extract","packages","imports","actual_validation","imports_done","finalize","installed_ready")):
             self.assertLess(names.index(earlier),names.index(later))
-        count=len(tools.tool_hashes(installed/"output"))
-        self.assertIn(("verify_new",{"files":count,"finished":True}),events)
+        self.assertNotIn("verify_new",names)  # archives are SHA-256 checked; the extracted files are not re-hashed
         events.clear()
-        self.assertEqual(tools.install(self.data,self.source,value,fetch=lambda *a:self.fail("cached fetch"),
-                                       validate=lambda *a:self.fail("cached re-import"),phase=phase),installed)
-        self.assertIn(("verify_existing",{"files":count,"finished":True}),events)
+        hashed=[]
+        original=tools.tool_hashes
+        with patch.object(tools,"tool_hashes",lambda *a,**k:hashed.append(1) or original(*a,**k)):
+            self.assertEqual(tools.install(self.data,self.source,value,fetch=lambda *a:self.fail("cached fetch"),
+                                           validate=lambda *a:self.fail("cached re-import"),phase=phase),installed)
+        self.assertEqual(hashed,[])  # reuse: stamp only
         self.assertNotIn("extract",[n for n,f in events])
+        self.assertIn("installed_ready",[n for n,f in events])
 
     def test_failed_import_has_no_finalize_or_success_event(self):
         _,_,value,fetch=self.fixture();events=[]
@@ -92,7 +95,7 @@ class Progress(unittest.TestCase):
                           phase=lambda name,**f:events.append(name))
         self.assertIn("imports",events)
         for name in ("imports_done","verify_new","finalize","installed_ready"):self.assertNotIn(name,events)
-        self.assertFalse((self.data/"managed-tools"/tools.identity(value,self.source)[:24]).exists())
+        self.assertFalse((self.data/"managed-tools"/tools.identity(value)[:24]).exists())
 
     def test_main_nonce_bound_real_phase_fields_and_bridge_count_status(self):
         def install(*args,**kwargs):

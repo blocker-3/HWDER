@@ -500,9 +500,11 @@ void draw(App& app, SDL_Window* window) {
             ImGui::ProgressBar(app.progress, ImVec2(-1, 0), app.progress_text.c_str());
         if (app.task_kind == "prepare" && ImGui::Button("Stop")) app.task.stop();
     } else {
-        if (ready && st["rebuild_needed"].truthy())
-            ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "This release is newer than your build (%s): prepare again.",
-                               st["built_version"].str().c_str());
+        const bool update = ready && st["rebuild_needed"].truthy();
+        if (update)
+            ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "Installed: %s. This release is %s: update to build it; "
+                               "your saves and settings are kept.", st["built_version"].str().c_str(),
+                               st["version"].str().c_str());
         else if (ready)
             ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "The game is ready%s.",
                                st["update_in_build"].truthy() ? " (with update 1.0.1)" : "");
@@ -510,13 +512,14 @@ void draw(App& app, SDL_Window* window) {
             ImGui::TextWrapped("Takes about 15 minutes on a ROG Ally. The first time, the build tools are downloaded "
                                "too (about 200 MB, each file checked).");
         ImGui::BeginDisabled(!files_ok || st["game_running"].truthy());
-        if (ImGui::Button(ready ? "Prepare again" : "Prepare the game")) {
+        const std::string main_label = update ? "Update" : ready ? "Prepare again" : "Prepare the game";
+        if (ImGui::Button(main_label.c_str())) {
             std::vector<std::string> args{"--nsp", app.files[0].path, "--keys", app.files[1].path};
             if (!app.files[2].path.empty()) { args.push_back("--update"); args.push_back(app.files[2].path); }
             app.log.clear();
             app.run("prepare", args);
         }
-        if (!ready) ImGui::SetItemDefaultFocus();  // the controller starts on the next step
+        if (!ready || update) ImGui::SetItemDefaultFocus();  // the controller starts on the next step
         ImGui::EndDisabled();
         if (!files_ok) { ImGui::SameLine(); ImGui::TextDisabled("Choose the game and keys first."); }
         if (st["game_running"].truthy()) { ImGui::SameLine(); ImGui::TextDisabled("Close HWDER first."); }
@@ -528,7 +531,7 @@ void draw(App& app, SDL_Window* window) {
     section("3  Play");
     ImGui::BeginDisabled(!ready || busy);
     if (ImGui::Button("Play")) app.run("play", {});
-    if (ready) ImGui::SetItemDefaultFocus();
+    if (ready && !st["rebuild_needed"].truthy()) ImGui::SetItemDefaultFocus();
     ImGui::SameLine();
     const Json& steam = st["steam"];
     if (ImGui::Button(steam["added"].truthy() ? "Update Steam entry" : "Add to Steam")) {

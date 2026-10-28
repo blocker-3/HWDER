@@ -43,7 +43,6 @@ def git(*args):
 
 def certify(out, toolset):
     """Write bootstrap-certificate.json for the Setup.exe in `out` (the old runs/ certify-rN-ui.py)."""
-    marker = json.loads((toolset/"complete.json").read_text(encoding="utf-8"))
     llvm = next(i for i in managed_tools.manifest()["artifacts"] if i["id"] == "llvm")
     lic = "llvm/" + llvm["archive_root"] + "/"
     notices = {"runtime-notices/LLVM-LICENSE.TXT": lic+"LICENSE.TXT",
@@ -53,13 +52,18 @@ def certify(out, toolset):
         raise ValueError("Setup link map lacks the expected static MinGW/C++ runtime")
     if "pthread" in maptext.lower():
         raise ValueError("Setup links winpthreads; review its notice before packaging")
-    for destination, source in notices.items():
-        data = managed_tools.filesystem_path(toolset/"output"/source).read_bytes()
-        if hashlib.sha256(data).hexdigest() != marker["files"][source]:
-            raise ValueError("Toolset notice changed: " + source)
-        target = out/destination
-        target.parent.mkdir(exist_ok=True)
-        target.write_bytes(data)
+    # The toolset certificate holds a stamp, not per-file hashes: compare each notice with the pinned LLVM archive.
+    archive = toolset.parent/"downloads"/(llvm["sha256"] + ".zip")
+    if sha(archive) != llvm["sha256"]:
+        raise ValueError("Cached LLVM archive does not match its pinned SHA-256")
+    with zipfile.ZipFile(archive) as pinned:
+        for destination, source in notices.items():
+            data = managed_tools.filesystem_path(toolset/"output"/source).read_bytes()
+            if data != pinned.read(source.removeprefix("llvm/")):
+                raise ValueError("Toolset notice changed: " + source)
+            target = out/destination
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(data)
     exe = out/"HWDER Setup.exe"
     pe = pe_dependencies.inspect(exe)
     extra = [n for n in pe["imports"]+pe["delay_imports"]

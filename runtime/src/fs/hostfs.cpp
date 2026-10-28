@@ -1,5 +1,6 @@
 #include <cstring>
 // IFileSystem / IFile / IDirectory backed by a host directory (save data, SD card).
+#include "fs/host_root.h"
 #include "host/file.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -395,8 +396,7 @@ private:
 
 ServicePtr make_host_filesystem(const HostPath& root, bool read_only, const std::string& label) {
     auto fs = std::make_shared<FsRoot>();
-    fs->root = root;
-    fs->root = root.lexically_normal();
+    fs->root = host_root(root);  // never lexically_normal() a Windows long path (host_root.h)
     fs->read_only = read_only;
     fs->label = label;
     if (!read_only) create_dirs(fs->root);

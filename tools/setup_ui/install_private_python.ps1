@@ -2,7 +2,8 @@
 param([string]$DataRoot, [string]$SourceRoot,
       [ValidateSet('tools','check','prepare','launch','status')][string]$Action='tools',
       [string]$Nonce='', [string]$Nsp='', [string]$Keys='', [string]$Update='',
-      [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail, [switch]$PreviewLifecycle, [switch]$PreviewRace)
+      [switch]$Preview, [string]$PreviewPython='', [switch]$PreviewFail, [switch]$PreviewLifecycle, [switch]$PreviewRace,
+      [switch]$Repair)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
@@ -251,7 +252,7 @@ function Invoke-PrivateBootstrap {
     $arguments=@('-I','-B','-X','utf8','-u','-c',("import runpy;runpy.run_path('"+$entry+"',run_name='__main__')"),
                  '--data',$DataRoot,'--source',$source)
     if ($Nonce) { $arguments+=@('--nonce',$Nonce) }
-    if ($Action -eq 'tools') { $arguments+='--install' } else { $arguments+=@('--bridge-action',$Action) }
+    if ($Action -eq 'tools') { $arguments+='--install'; if ($Repair) { $arguments+='--repair' } } else { $arguments+=@('--bridge-action',$Action) }
     if ($Nsp) { $arguments+=@('--nsp',$Nsp) }
     if ($Keys) { $arguments+=@('--keys',$Keys) }
     if ($Update) { $arguments+=@('--update',$Update) }

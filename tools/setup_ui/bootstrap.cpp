@@ -108,7 +108,10 @@ Step step(){
     if(!demo&&(toolsMissingHint||!toolsPresent()))return Step::Install;
     return retryHint?Step::Retry:Step::Prepare;
 }
-const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:return L"Prepare";case Step::Retry:return L"Retry";default:return L"Play";}}
+// A kit whose version differs from the installed game's offers "Update" (bridge event update_available; the status line names both versions).
+std::wstring updateTo,installedVersion;
+bool repairTools=false;  // the Advanced tools button repairs once tools are installed
+const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:return updateTo.empty()?L"Prepare":L"Update";case Step::Retry:return L"Retry";default:return L"Play";}}
 std::wstring hint(Step s){
     switch(s){
     case Step::Inputs:return L"Pick your game file (.nsp) and your prod.keys, plus the game update if you have it. They stay where they are.";
@@ -134,6 +137,7 @@ void controls(){
     SetWindowTextW(locationBox,bound?(L"Installed game: "+installedExe.wstring()+(pathsReady?L"\r\nThe installed game needs no setup kit; a Desktop shortcut starts it directly.":L"\r\nGame running. The installed shortcut handoff finishes when it closes.")).c_str():L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.");
     EnableWindow(cancelButton,busy&&!publishing&&!launching);
     for(int id:{Game,Keys,Update,Data,BrowseGame,BrowseKeys,BrowseUpdate,BrowseData,Check,Components,PythonSite,ToolsSite,Advanced,Details})EnableWindow(GetDlgItem(window,id),!busy);
+    SetWindowTextW(GetDlgItem(window,Components),!demo&&toolsPresent()?L"Repair private tools":L"Install private tools");
 }
 void refresh(){controls();if(!busy&&failureMessage.empty())state(hint(step()));}
 std::wstring elapsedText(unsigned long long ms){wchar_t b[32];unsigned s=(unsigned)(ms/1000);swprintf(b,32,L"%u:%02u",s/60,s%60);return b;}
@@ -171,6 +175,7 @@ void run(std::wstring action){
     if(demo)command+=L" -Preview -PreviewPython "+quote(previewPython.wstring());
     if(demoFail)command+=L" -PreviewFail";
     if(lifecyclePreview)command+=L" -PreviewLifecycle";if(lifecycleRace)command+=L" -PreviewRace";
+    if(action==L"tools"&&repairTools)command+=L" -Repair";  // Repair private tools: re-extract from the checked archives
     if(action==L"prepare")command+=L" -Nsp "+quote(text(gameBox))+L" -Keys "+quote(text(keyBox));
     if(action==L"prepare"&&!text(updateBox).empty())command+=L" -Update "+quote(text(updateBox));
     if(text(dataBox)!=root.wstring())SetWindowTextW(dataBox,root.c_str());activeData=root.wstring();activeAction=action;
@@ -420,7 +425,7 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,562,790,185);
         statusBox=control(L"STATIC",L"",0,28,226,790,54); // created last: the tests read the final STATIC as the status line
         layout();refresh();return 0;}
-    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Update||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseUpdate||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components)run(L"tools");else if(id==Shortcut)shortcut();else if(id==Steam)addToSteam();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
+    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Update||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseUpdate||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components){repairTools=toolsPresent();run(L"tools");}else if(id==Shortcut)shortcut();else if(id==Steam)addToSteam();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
         else if(id==Advanced){advanced=!advanced;layout();}
         else if(id==Details){detailsShown=SendMessageW(GetDlgItem(h,Details),BM_GETCHECK,0,0)==BST_CHECKED;layout();}
         else if(id==PythonSite){MessageBoxW(h,L"HWDER uses its own pinned Python, LLVM-MinGW, CMake and Ninja, plus cryptography, lz4, zstandard, cffi and pycparser.\n\nInstall is the only action that downloads. Prepare, Check and Play only verify existing tools.\n\nTools and full license notices live in the Data folder. No global PATH, registry or administrator installation is needed.",L"About private tools",MB_OK|MB_ICONINFORMATION);}
@@ -431,13 +436,14 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
             if(activeAction==L"tools"&&p->exit==0&&!cancelRequested){toolsMissingHint=false;retryHint=false;state(L"Private tools installed and verified. Choose Prepare next.");}
             if(cancelRequested){failureMessage=committed?L"The safe update finished before closing. Open setup again to verify and play.":hadPublishPermission?L"Setup ended after the safe update boundary. Choose Retry to verify the playable version.":L"Cancelled. Nothing was changed; choose "+std::wstring(activeAction==L"tools"?L"Install":L"Prepare")+L" to continue.";if(hadPublishPermission)retryHint=true;state(failureMessage);}
             else if(p->exit!=0||!failureMessage.empty()){ready=false;if(failureMessage.empty())failureMessage=activeAction==L"status"?L"Your installed game could not be verified. Choose Prepare to rebuild it; saves and settings are kept.":activeAction==L"tools"?L"The tool installation did not finish. Choose Install to try again.":L"Setup did not finish. Open Advanced, Details for the error, then Retry.";
-                if(failureNext==L"install")toolsMissingHint=true;else if(failureNext==L"prepare"||(failureNext.empty()&&activeAction==L"prepare"))retryHint=true;state(failureMessage);}
+                if(failureNext==L"install")toolsMissingHint=true;else if((failureNext==L"prepare"&&activeAction!=L"status")||(failureNext.empty()&&activeAction==L"prepare"))retryHint=true;state(failureMessage);}  // status (e.g. a newer kit): Prepare, not Retry
             else if(activeAction==L"check")state(L"Requirements ready. Private tools and this kit check out.");
             controls();if(closeDeferred)DestroyWindow(h);else if(ready&&!pathsReady&&!runningGame&&(!demo||lifecyclePreview))run(L"status");return 0;}
         if(!p->control){if(!buildLine(p->line))log(p->line);return 0;}auto type=field(p->line,L"type"),msg=field(p->line,L"message");log(msg);
         if(type==L"publish_request"){std::lock_guard<std::mutex> lock(handles);const char* reply=cancelRequested?"cancel\n":"commit\n";publishing=!cancelRequested;hadPublishPermission=publishing;DWORD done=0;if(inputWrite&&(!WriteFile(inputWrite,reply,(DWORD)strlen(reply),&done,nullptr)||done!=strlen(reply))){CloseHandle(inputWrite);inputWrite=nullptr;log(L"Commit acknowledgement channel failed; waiting for safe completion/rollback.");}controls();}
         else if(type==L"stage"){auto stepText=field(p->line,L"step");if(!stepText.empty()){stageStep=(int)number(stepText);stageSteps=(int)number(field(p->line,L"steps"));stageTitle=field(p->line,L"stage");if(stageStep!=5){buildTotal=0;marquee(true);}}else{stageTitle=msg;}progressLine();}
-        else if(type==L"ready"||type==L"ready_available"){auto exe=field(p->line,L"exe");if(demo&&!lifecyclePreview){pendingReady=true;}else if(!exe.empty()&&(lifecyclePreview||samePath(fs::path(exe),fs::path(activeData)/L"play/hwder.exe"))){installedExe=exe;pathsReady=field(p->line,L"paths_ready")==L"yes";pendingReady=true;}committed=type==L"ready";}
+        else if(type==L"update_available"){updateTo=field(p->line,L"kit");installedVersion=field(p->line,L"installed");failureMessage=msg;}
+        else if(type==L"ready"||type==L"ready_available"){updateTo.clear();auto exe=field(p->line,L"exe");if(demo&&!lifecyclePreview){pendingReady=true;}else if(!exe.empty()&&(lifecyclePreview||samePath(fs::path(exe),fs::path(activeData)/L"play/hwder.exe"))){installedExe=exe;pathsReady=field(p->line,L"paths_ready")==L"yes";pendingReady=true;}committed=type==L"ready";}
         else if(type==L"launched"){if(installedExe.empty())installedExe=fs::path(activeData)/L"play/hwder.exe";if(field(p->line,L"paths_ready")==L"yes")pathsReady=true;pendingReady=monitorGame(p->line);if(!pendingReady){failureMessage=L"The game may be running, but its identity could not be verified. Close it, then choose Play again.";failureNext=L"close";state(failureMessage);}}else if(type==L"failed"){failureMessage=msg;failureNext=field(p->line,L"next");}
         if(type!=L"log"&&type!=L"stage")state(msg);else if(type==L"stage"&&stageStep==0)state(msg);return 0;}
     if(message==WM_TIMER&&wp==1){if(runningGame&&WaitForSingleObject(runningGame,0)==WAIT_OBJECT_0){forgetGame();if(ready&&certifiedData==text(dataBox)){state(L"Game closed. Checking your installed game for Play again\u2026");run(L"status");}controls();}return 0;}
