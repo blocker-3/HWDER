@@ -151,7 +151,6 @@ def main():
     make_setup_dist.assemble(source_kit, setup_dir/"HWDER Setup.exe", certificate, ROOT, target)
     info = check_zip(target)
     info.update({"zip": target.name, "zip_bytes": target.stat().st_size, "zip_sha256": sha(target), "version": version})
-    (target.parent/(name + ".sha256")).write_text(f"{info['zip_sha256']}  {target.name}\n", encoding="ascii")
     (target.parent/(name + ".json")).write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(json.dumps(info, indent=2))
 

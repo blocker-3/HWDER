@@ -14,15 +14,15 @@ It builds the source kit (`make_dist.py`), installs the pinned toolset from
 `tools/managed_toolchain.json` (public downloads checked by SHA-256), compiles `HWDER Setup.exe`
 (`build.py --setup-ui`), writes its bootstrap certificate, assembles the zip
 (`make_setup_dist.py`) and checks it again: one exe, no generated C, dumps, keys, saves or
-images. Output in `dist/`: the zip, `.sha256` and a `.json` summary. `--allow-untagged` packages
+images. Output in `dist/`: the zip and a `.json` summary (with its SHA-256). `--allow-untagged` packages
 a test build. Keep `--work` short on Windows (the toolset nests deep paths).
 
 ## On GitHub
 
 `.github/workflows/release.yml` runs the same command on `windows-2022`:
 
-- Pushing a `v*` tag runs the synthetic tests, builds the zip and attaches it with its `.sha256`
-  to a **draft** release. Publishing (and pasting the release notes) stays manual.
+- Pushing a `v*` tag runs the synthetic tests, builds the zip and the Linux tarball and attaches them
+  to a **draft** release (GitHub shows each asset's SHA-256; no separate `.sha256` files). Publishing (and pasting the release notes) stays manual.
 - Actions > Release setup zip > Run workflow builds an untagged test zip, kept as a workflow
   artifact only.
 

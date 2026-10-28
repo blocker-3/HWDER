@@ -189,7 +189,6 @@ def main():
     info = {"tarball": target.name, "bytes": target.stat().st_size, "sha256": sha(target), "version": version,
             "commit": commit, "files": len(files), "setup_ui": check_portable(setup_ui),
             "deps": read_json(deps / "BUILD-INFO.json")}
-    (out / (top + ".sha256")).write_text(f"{info['sha256']}  {target.name}\n", encoding="ascii")
     (out / (top + ".json")).write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(json.dumps(info, indent=2))
 
