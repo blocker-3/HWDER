@@ -87,6 +87,6 @@ Custom field-of-view adjustment is temporarily hidden because wider FOV can misp
 `hwder.log` is written beside `hwder.exe` (or wherever `HWDER_LOG` points) and is rewritten on
 every launch. After a crash, a minidump `hwder-crash-YYYYMMDD-HHMMSS.dmp` is written next to it
 (the newest 5 are kept; `HWDER_NO_DUMP=1` turns them off; they never leave your machine). Open an
-issue with the [bug report form](https://github.com/sonsegajp/HWDER/issues/new?template=bug_report.yml),
+issue with the [bug report form](https://github.com/blocker-3/HWDER/issues/new?template=bug_report.yml),
 attach the log, and zip the .dmp before dragging it in. The version string it asks for is at the
 bottom of the F1 menu and on the first line of the log. Never attach game files or keys.

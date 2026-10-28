@@ -13,7 +13,7 @@ and lz4, plus VS2022 Build Tools with MSVC x64, Clang, CMake/Ninja and a Windows
 The managed wizard does not require those global developer installations.
 
 ```
-git clone --recursive https://github.com/sonsegajp/HWDER
+git clone --recursive https://github.com/blocker-3/HWDER
 cd HWDER
 
 # 1. extract your dump once for the recompiler (exefs/ is all it needs; romfs/ is optional,

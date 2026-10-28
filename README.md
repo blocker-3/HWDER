@@ -33,7 +33,7 @@ Switch copy. No emulator, and no game files in this repository.
 - **In-game HWDER menu** (F1, or hold View/Select on a controller) for all of the above, most of
   it switchable while you play.
 - **Crash reports that help.** A log and crash dump are written beside the game, and a
-  [bug report form](https://github.com/sonsegajp/HWDER/issues/new?template=bug_report.yml)
+  [bug report form](https://github.com/blocker-3/HWDER/issues/new?template=bug_report.yml)
   asks for what we need.
 
 ## Quickstart
@@ -47,7 +47,7 @@ and keys are never copied.
 Windows 10/11 x64 with a Vulkan 1.2 graphics driver and an AVX2 CPU.
 
 1. Download the latest `HWDER-setup-<version>.zip` from the
-   [Releases](https://github.com/sonsegajp/HWDER/releases) page.
+   [Releases](https://github.com/blocker-3/HWDER/releases) page.
 2. Extract the whole zip into a folder you will keep and open **HWDER Setup.exe**. If Windows
    says "Windows protected your PC", choose **More info > Run anyway**.
 3. Choose your game file (`.nsp`), your `prod.keys` and, if you have it, the 1.0.1 game update.
@@ -70,7 +70,7 @@ x86-64 with glibc 2.35 or newer, Vulkan 1.3, an AVX2 CPU and Python 3 (Bazzite, 
 Ubuntu and Arch include it).
 
 1. Download the latest `HWDER-linux-x86_64-<version>.tar.gz` from the
-   [Releases](https://github.com/sonsegajp/HWDER/releases) page and extract it.
+   [Releases](https://github.com/blocker-3/HWDER/releases) page and extract it.
 2. Run `hwder-setup` (double-click it, or run `hwder-setup --cli` in a terminal), choose your game,
    keys and optional update, and let it build. A first install takes about 15 minutes on a ROG Ally.
 3. Start the game from the menu entry, or from Steam after **Add to Steam**.
@@ -94,7 +94,7 @@ Saves live in `~/.local/share/HWDER/save`, mods in `~/.local/share/HWDER/mods`. 
 
 ## Reporting a bug
 
-Open an issue with the [bug report form](https://github.com/sonsegajp/HWDER/issues/new?template=bug_report.yml)
+Open an issue with the [bug report form](https://github.com/blocker-3/HWDER/issues/new?template=bug_report.yml)
 and attach `hwder.log` from beside `hwder.exe` (and a zipped crash dump, if there is one). Never attach
 game files or keys. More: [Reporting a bug](docs/playing.md#reporting-a-bug).
 
@@ -108,3 +108,5 @@ optional 120 fps mode, at native or scaled resolution. Known issues are tracked 
 
 MIT for everything in this repository (see `LICENSE`). Hyrule Warriors: Definitive Edition is
 the property of Nintendo and Koei Tecmo; you need your own copy of the game.
+
+HWDER started as a fork of sonsegajp's original HWDER repository (sonsegajp/HWDER, no longer online).
