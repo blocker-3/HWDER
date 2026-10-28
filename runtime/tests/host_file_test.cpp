@@ -1,5 +1,6 @@
 // Public native file contracts. Synthetic bytes only; no game, keys or saves.
 #include "host/file.h"
+#include "fs/host_root.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -98,7 +99,27 @@ std::vector<unsigned char> read_all(const fs::path& path) {
 }
 }  // namespace
 
+// Guest filesystem roots (fs/host_root.h): a Windows long-path save root stays absolute. libc++'s
+// lexically_normal() made \\?\C:\... the drive-relative C:..., so the game read and wrote its saves below its own
+// folder instead (2026-10-28).
+static void host_root_contract() {
+#ifdef _WIN32
+    const std::filesystem::path save(LR"(\\?\C:\Users\player\AppData\Local\HWDER\play\save\)");
+    const auto root = hwfs::host_root(save);
+    check(root.native() == LR"(\\?\C:\Users\player\AppData\Local\HWDER\play\save)", "long-path root kept, trailing separator dropped");
+    check(root.is_absolute(), "long-path root stays absolute");
+    const auto file = (root / "0100AE00096EA000" / "zmha.bin").make_preferred();
+    check(file.native().rfind(LR"(\\?\C:\Users\player\)", 0) == 0, "save file stays under the chosen folder");
+    check(hwfs::host_root(LR"(C:\)").native() == LR"(C:\)", "drive root kept");
+#else
+    check(hwfs::host_root("/home/player/.local/share/HWDER/save/") == "/home/player/.local/share/HWDER/save/",
+          "POSIX root normalized");
+    check(hwfs::host_root("/a/./b/../c").native() == "/a/c", "POSIX root normalized");
+#endif
+}
+
 int main() {
+    host_root_contract();
     try {
 #ifndef _WIN32
         PrivateUmask private_files;
