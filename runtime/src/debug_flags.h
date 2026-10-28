@@ -17,9 +17,9 @@ enum Id {
     AutoplayCam,  // HWDER_AUTOPLAY_CAM
     AutoplayCircle,  // HWDER_AUTOPLAY_CIRCLE
     AutoplayIdle,  // HWDER_AUTOPLAY_IDLE
-    AutoplayX,  // HWDER_AUTOPLAY_X
     AutoplayPlus,  // HWDER_AUTOPLAY_PLUS
     AutoplaySkip,  // HWDER_AUTOPLAY_SKIP
+    AutoplayX,  // HWDER_AUTOPLAY_X
     CacheProfile,  // HWDER_CACHE_PROFILE
     CacheSaveSync,  // HWDER_CACHE_SAVE_SYNC
     Drawlog,  // HWDER_DRAWLOG
@@ -44,8 +44,8 @@ enum Id {
     GiNoObjects,  // HWDER_GI_NO_OBJECTS
     GiObjSync,  // HWDER_GI_OBJ_SYNC
     GiObjTrace,  // HWDER_GI_OBJ_TRACE
-    GpuTrace,  // HWDER_GPU_TRACE
     GpuTiming,  // HWDER_GPU_TIMING
+    GpuTrace,  // HWDER_GPU_TRACE
     GuestLibc,  // HWDER_GUEST_LIBC
     Hold,  // HWDER_HOLD
     IpcBt,  // HWDER_IPC_BT

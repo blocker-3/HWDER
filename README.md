@@ -376,9 +376,9 @@ current values. Kinds:
 | `HWDER_AUTOPLAY_CAM` | presence | off | Autoplay: also turn the camera with the right stick (2 s right, 2 s left, 2 s still). |
 | `HWDER_AUTOPLAY_CIRCLE` | presence | off | Autoplay: run in a slow circle (one turn every 8 s) so the view covers every direction. |
 | `HWDER_AUTOPLAY_IDLE` | presence | off | Autoplay: no input once in battle (experiments). |
-| `HWDER_AUTOPLAY_X` | presence | off | Autoplay: press X once, 1 s into the battle (the heavy-fight save: starts the special mode). |
 | `HWDER_AUTOPLAY_PLUS` | presence | off | Test: tap + five times a second for the first 30 s (players who press + through the startup and title screens). |
 | `HWDER_AUTOPLAY_SKIP` | presence | off | Autoplay: the 6 s cutscene-skip cycle for a save that starts with the story cutscenes. |
+| `HWDER_AUTOPLAY_X` | presence | off | Autoplay: press X once, 1 s into the battle (the heavy-fight save: starts the special mode). |
 | `HWDER_CACHE_PROFILE` | presence | off | Pipeline cache / warmup save: log retrieval, snapshot, validation, serialization and disk timings (cache-save:). Read on every save. |
 | `HWDER_CACHE_SAVE_SYNC` | string | unset | Exactly "1": save the warmup records synchronously instead of on the background task. |
 | `HWDER_DRAWLOG` | presence | off | With HWDER_FILMSTRIP: one line per draw into <filmstrip dir>/drawlog.txt while the capture window is open. |
@@ -403,8 +403,8 @@ current values. Kinds:
 | `HWDER_GI_NO_OBJECTS` | presence | off | 120 fps mode: interpolate the camera only, no object/bone blending (comparison). |
 | `HWDER_GI_OBJ_SYNC` | presence | off | 120 fps mode: blend objects on the GPU command thread instead of their own thread (comparison). |
 | `HWDER_GI_OBJ_TRACE` | presence | off | 120 fps mode: once a second, trace the c3 blocks nearest the player and the other vertex cbufs with transforms. |
-| `HWDER_GPU_TRACE` | string | unset | GPU command trace; "2": raw 3D method stream (first 200000); "3": host methods, class binds and submissions. |
 | `HWDER_GPU_TIMING` | number | unset | Renderer: GPU timestamps around every rendering instance; every that many seconds log the GPU time per frame, the idle time between submissions and the costliest passes (gpu-time:). Adds a timestamp per pass. |
+| `HWDER_GPU_TRACE` | string | unset | GPU command trace; "2": raw 3D method stream (first 200000); "3": host methods, class binds and submissions. |
 | `HWDER_GUEST_LIBC` | presence | off | Run the game's own (translated) memcpy/memmove/memset/bzero/strlen instead of the host C library's. |
 | `HWDER_HOLD` | presence | off | On a fatal error keep the window up showing the reason instead of exiting. |
 | `HWDER_IPC_BT` | string | unset | Log a backtrace for the IPC command named "<Service>#<command>" (e.g. IFile#4). |
