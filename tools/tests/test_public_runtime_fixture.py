@@ -18,13 +18,16 @@ class Fixture(unittest.TestCase):
 
     def test_exact_guest_allowlist_empty_metadata_and_no_real_ready_marker(self):
         record=fixture.create(self.output)
-        self.assertEqual(len(record["guest_bindings"]),23)
+        self.assertEqual(len(record["guest_bindings"]),12)
         self.assertEqual(fixture.verify(self.output),record)
         c=(self.output/"rc_public_link_only.c").read_text()
-        self.assertEqual(c.count("void f_"),23)
+        self.assertEqual(c.count("void f_"),12)
         self.assertNotIn("hw_lookup",c)
         self.assertIn("hw_func_count=0",(self.output/"functable.c").read_text())
         self.assertIn("hw_module_count=0",(self.output/"module_info.c").read_text())
+        self.assertIn("hw_symbol_count=0",(self.output/"functable.c").read_text())
+        self.assertIn("#define f_Camera_BuildProj_orig f_100057cee0_orig",(self.output/"symbols.h").read_text())
+        self.assertEqual(record["guest_bindings"]["f_100044660c_orig"],["runtime/src/game/stage_props.cpp"])
         self.assertFalse((self.output/"complete.json").exists())
         with self.assertRaises(FileExistsError):fixture.create(self.output)
 
@@ -49,6 +52,12 @@ class Fixture(unittest.TestCase):
         source=Path(self.temp.name)/"source/runtime/src"
         source.mkdir(parents=True)
         (source/"test.cpp").write_text('extern "C" void f_1000000000(Ctx* c);')
+        with self.assertRaisesRegex(ValueError,"allowlist changed"):
+            fixture.public_bindings(source.parents[1])
+        # A named guest (game/hook.h) that is not reviewed is refused too.
+        (source/"test.cpp").write_text("HW_GUEST(Scene_Draw);")
+        (source.parents[1]/"tools/recomp").mkdir(parents=True)
+        (source.parents[1]/"tools/recomp/symbols.txt").write_text("0x1000000004  Scene_Draw  func\n")
         with self.assertRaisesRegex(ValueError,"allowlist changed"):
             fixture.public_bindings(source.parents[1])
 

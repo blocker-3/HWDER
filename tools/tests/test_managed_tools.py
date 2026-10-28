@@ -3,6 +3,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -104,6 +105,14 @@ class Managed(unittest.TestCase):
         self.assertEqual((result / "output/python/LICENSE.txt").read_bytes(), b"fixture notice")
         result2 = self.install(value, lambda *a:self.fail("must reuse verified archive/output"))
         self.assertEqual(result, result2)
+
+    def test_relative_toolset_path_with_parent_steps_is_complete(self):
+        value, fetch = self.fixture()
+        result = self.install(value, fetch)
+        # e.g. build.py --managed-toolchain ..\HWDER\build\...: a \\?\ path does not resolve "..".
+        indirect = result.parent / "elsewhere" / ".." / result.name
+        self.assertTrue(tools.complete(indirect, tools.identity(value), value=value))
+        self.assertTrue(tools.complete(Path(os.path.relpath(indirect)), tools.identity(value), value=value))
 
     def test_tampered_output_is_not_reused_and_preserved_for_inspection(self):
         value, fetch = self.fixture()

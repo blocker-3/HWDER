@@ -56,11 +56,12 @@ class ManagedBuild(unittest.TestCase):
         with patch.object(build,"toolchain",return_value=({},"cmake","ninja","cc","cxx")), \
              patch.object(build.subprocess,"run",side_effect=run):
             self.assertEqual(build.build(self.args(only_file="runtime/src/threads.cpp",managed_probe=False)),0)
+        compile=next(c for c in calls if any(str(a).endswith("threads.cpp") for a in c))  # after the version.cmake stamp
         for flag in ("-mavx2","-mfma","-mf16c","-maes","-mpclmul","-msse4.2","-mcx16","-fno-strict-aliasing",
                      "-DNOMINMAX","-DWIN32_LEAN_AND_MEAN","-std=c++20",
                      "-D_WIN32_WINNT=0x0A00","-DWINVER=0x0A00","-DNTDDI_VERSION=0x0A000000"):
-            self.assertIn(flag,calls[0])
-        self.assertNotIn("/EHsc",calls[0])
+            self.assertIn(flag,compile)
+        self.assertNotIn("/EHsc",compile)
 
 
 if __name__=="__main__":
