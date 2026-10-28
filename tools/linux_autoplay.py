@@ -308,8 +308,9 @@ def main():
         # The recording alone missed the 2026-10-27 buzz (a null sink keeps its own timing); the game's own counters
         # are the reliable part: any dry run or dropped mixer audio fails the check.
         log = (run / "hwder.log").read_text(errors="replace") if (run / "hwder.log").exists() else ""
-        dry = sum(int(m) for m in re.findall(r"output ran dry (\d+) times", log))
-        dropped = sum(int(m) for m in re.findall(r"mixer chunks dropped (\d+) ms", log))
+        # The first 10 s report covers startup (the device opens before the game's mixer produces anything).
+        dry = sum(int(m) for m in re.findall(r"output ran dry (\d+) times", log)[1:])
+        dropped = sum(int(m) for m in re.findall(r"mixer chunks dropped (\d+) ms", log)[1:])
         line = audio_gaps(run / "audio.raw") + f"; game log: output ran dry {dry} times, mixer audio dropped {dropped} ms"
         if dry or dropped:
             line = "FAIL (" + ("ran dry" if dry else "dropped audio") + "): " + line
