@@ -215,11 +215,7 @@ void draw(VkExtent2D extent) {
         ImGui::PopFont();
         ImGui::SameLine(0.0f, st.ItemSpacing.x * 1.5f);
         ImGui::SetCursorPosY(y + big - ImGui::GetTextLineHeight() - 2.0f * s);
-#ifdef HWDER_VERSION
-        ImGui::TextDisabled("HWDER %s", HWDER_VERSION);
-#else
-        ImGui::TextDisabled("HWDER");
-#endif
+        ImGui::TextDisabled("HWDER %s", hw_version());
     }
     ImGui::Spacing();
 
