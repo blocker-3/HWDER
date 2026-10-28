@@ -181,6 +181,15 @@ class LinuxSetupTests(unittest.TestCase):
                 linux_setup.install_app(report)
             self.assertEqual((target / "tools" / "a.py").read_text(), "print(1)")  # old copy kept
 
+    def test_update_offered_when_the_release_differs_from_the_build(self):
+        release = {"version": "v0.2.3-1-gabc", "files": {"x": "0"}}
+        self.assertFalse(linux_setup.update_needed(release, "v0.2.3-1-gabc", True))
+        self.assertTrue(linux_setup.update_needed(release, "v0.2.2", True))      # older build
+        self.assertTrue(linux_setup.update_needed(release, "v0.2.4", True))      # newer build (another branch)
+        self.assertTrue(linux_setup.update_needed(release, None, True))          # never recorded
+        self.assertFalse(linux_setup.update_needed(release, "v0.2.2", False))    # nothing built yet: plain Prepare
+        self.assertFalse(linux_setup.update_needed({"version": "v0.2.3 (source checkout)", "files": None}, "x", True))
+
     def test_json_report_lines(self):
         out = io.StringIO()
         with patch("sys.stdout", out):

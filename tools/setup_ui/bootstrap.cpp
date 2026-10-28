@@ -108,7 +108,9 @@ Step step(){
     if(!demo&&(toolsMissingHint||!toolsPresent()))return Step::Install;
     return retryHint?Step::Retry:Step::Prepare;
 }
-const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:return L"Prepare";case Step::Retry:return L"Retry";default:return L"Play";}}
+// A kit whose version differs from the installed game's offers "Update to <version>" (bridge event update_available).
+std::wstring updateTo,installedVersion,updateLabel;
+const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:if(!updateTo.empty()){updateLabel=L"Update to "+updateTo;return updateLabel.c_str();}return L"Prepare";case Step::Retry:return L"Retry";default:return L"Play";}}
 std::wstring hint(Step s){
     switch(s){
     case Step::Inputs:return L"Pick your game file (.nsp) and your prod.keys, plus the game update if you have it. They stay where they are.";
@@ -437,7 +439,8 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         if(!p->control){if(!buildLine(p->line))log(p->line);return 0;}auto type=field(p->line,L"type"),msg=field(p->line,L"message");log(msg);
         if(type==L"publish_request"){std::lock_guard<std::mutex> lock(handles);const char* reply=cancelRequested?"cancel\n":"commit\n";publishing=!cancelRequested;hadPublishPermission=publishing;DWORD done=0;if(inputWrite&&(!WriteFile(inputWrite,reply,(DWORD)strlen(reply),&done,nullptr)||done!=strlen(reply))){CloseHandle(inputWrite);inputWrite=nullptr;log(L"Commit acknowledgement channel failed; waiting for safe completion/rollback.");}controls();}
         else if(type==L"stage"){auto stepText=field(p->line,L"step");if(!stepText.empty()){stageStep=(int)number(stepText);stageSteps=(int)number(field(p->line,L"steps"));stageTitle=field(p->line,L"stage");if(stageStep!=5){buildTotal=0;marquee(true);}}else{stageTitle=msg;}progressLine();}
-        else if(type==L"ready"||type==L"ready_available"){auto exe=field(p->line,L"exe");if(demo&&!lifecyclePreview){pendingReady=true;}else if(!exe.empty()&&(lifecyclePreview||samePath(fs::path(exe),fs::path(activeData)/L"play/hwder.exe"))){installedExe=exe;pathsReady=field(p->line,L"paths_ready")==L"yes";pendingReady=true;}committed=type==L"ready";}
+        else if(type==L"update_available"){updateTo=field(p->line,L"kit");installedVersion=field(p->line,L"installed");failureMessage=msg;}
+        else if(type==L"ready"||type==L"ready_available"){updateTo.clear();auto exe=field(p->line,L"exe");if(demo&&!lifecyclePreview){pendingReady=true;}else if(!exe.empty()&&(lifecyclePreview||samePath(fs::path(exe),fs::path(activeData)/L"play/hwder.exe"))){installedExe=exe;pathsReady=field(p->line,L"paths_ready")==L"yes";pendingReady=true;}committed=type==L"ready";}
         else if(type==L"launched"){if(installedExe.empty())installedExe=fs::path(activeData)/L"play/hwder.exe";if(field(p->line,L"paths_ready")==L"yes")pathsReady=true;pendingReady=monitorGame(p->line);if(!pendingReady){failureMessage=L"The game may be running, but its identity could not be verified. Close it, then choose Play again.";failureNext=L"close";state(failureMessage);}}else if(type==L"failed"){failureMessage=msg;failureNext=field(p->line,L"next");}
         if(type!=L"log"&&type!=L"stage")state(msg);else if(type==L"stage"&&stageStep==0)state(msg);return 0;}
     if(message==WM_TIMER&&wp==1){if(runningGame&&WaitForSingleObject(runningGame,0)==WAIT_OBJECT_0){forgetGame();if(ready&&certifiedData==text(dataBox)){state(L"Game closed. Checking your installed game for Play again\u2026");run(L"status");}controls();}return 0;}

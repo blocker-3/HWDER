@@ -687,6 +687,12 @@ def play(report):
     report.log("HWDER is starting")
 
 
+def update_needed(info, built, game_present):
+    """A release whose version differs from the one that built the game (newer, older or another branch) offers
+    "Update to <version>"; a source checkout (no release.json file list) is not checked."""
+    return bool(game_present and info.get("files") and built != info.get("version"))
+
+
 def status():
     current = config()
     info = release_info()
@@ -708,7 +714,7 @@ def status():
             "installed_version": read_json(app_dir() / "release.json").get("version"),
             "toolchain_ready": toolchain_ready(app), "files": files,
             "game_ready": exe.is_file() and bool(last), "game_path": str(exe), "built_version": built,
-            "rebuild_needed": bool(exe.is_file() and built and built != info.get("version")),
+            "rebuild_needed": update_needed(info, built, exe.is_file()),
             "update_in_build": bool(last.get("update_dir")), "profile": last.get("profile"),
             "steam": steam_state(app), "launchers": desktop_state(), "game_running": game_running(),
             "free_bytes": free, "jobs": default_jobs()}
@@ -795,7 +801,13 @@ def interactive(report):
     ready = (status_now["game_ready"] and not status_now["rebuild_needed"] and current.get("nsp") == nsp
              and current.get("keys") == keys and current.get("update", "") == (update or ""))
     print("\n== 2/3  Prepare")
-    if ready and not yes("The game is already prepared with these files. Prepare it again?", default=False):
+    if status_now["rebuild_needed"]:
+        print(f"Installed: {status_now['built_version'] or 'an earlier release'}. This release is {status_now['version']}.")
+        if not yes(f"Update to {status_now['version']} now? It takes about 15 minutes; saves and settings are kept."):
+            return report.result(False, "Nothing changed. Run HWDER Setup again to update.")
+        prepare(report, nsp, keys, update)
+        print("\nThe game is updated.")
+    elif ready and not yes("The game is already prepared with these files. Prepare it again?", default=False):
         pass
     else:
         first = "" if toolchain_ready() else " The build tools are downloaded first (about 200 MB, once)."

@@ -123,9 +123,6 @@ RECOVERY = (
      "Your game is running. Close it, then try again.", "close"),
     (("No verified prepared game",),
      "No prepared game yet. Choose Prepare.", "prepare"),
-    (("has newer code than your prepared game",),
-     "This setup has newer code than your game. Choose Prepare to update it; your saves and settings are kept.",
-     "prepare"),
     (("build.py", "Build succeeded without", "compil", "ninja", "cmake", "CMake"),
      "The build did not finish. Open Advanced, Details for the error, then Retry.", "prepare"),
     (("cancelled", "Cancelled"),
@@ -153,9 +150,10 @@ def kit_version(root=None):
 
 
 def stale_build(data, root=None):
-    """A newer (or other) kit than the one that prepared the installed game: Setup shows Prepare instead of Play,
-    so the update is actually built (before, a new kit landed on Play and kept running the old game). Installs
-    prepared before the version was recorded count as stale once."""
+    """The kit's version differs from the one that prepared the installed game (newer, older or another branch):
+    Setup offers "Update to <version>" instead of Play, so the kit's code is actually built (before, a new kit
+    landed on Play and kept running the old game). Installs prepared before the version was recorded count as
+    different once. Returns (kit version, installed version or None), or None when they match."""
     version = kit_version(root)
     if version is None:
         return None
@@ -266,8 +264,10 @@ def ready_status(data, managed=None, identity=process_identity):
         exe, _, _ = checked_ready(data)
         stale = stale_build(data)
         if stale:
-            raise ValueError(f"This kit ({stale[0]}) has newer code than your prepared game "
-                             f"({stale[1] or 'an earlier release'}). Choose Prepare to update it.")
+            installed = stale[1] or "an earlier release"
+            emit("update_available", f"Your game was prepared with {installed}; this setup is {stale[0]}. "
+                 f"Choose Update to build it; your saves and settings are kept.", kit=stale[0], installed=installed)
+            return
         if managed is not None:
             import managed_tools
             managed_tools.game_image(exe)
