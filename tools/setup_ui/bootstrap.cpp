@@ -108,10 +108,10 @@ Step step(){
     if(!demo&&(toolsMissingHint||!toolsPresent()))return Step::Install;
     return retryHint?Step::Retry:Step::Prepare;
 }
-// A kit whose version differs from the installed game's offers "Update to <version>" (bridge event update_available).
-std::wstring updateTo,installedVersion,updateLabel;
+// A kit whose version differs from the installed game's offers "Update" (bridge event update_available; the status line names both versions).
+std::wstring updateTo,installedVersion;
 bool repairTools=false;  // the Advanced tools button repairs once tools are installed
-const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:if(!updateTo.empty()){updateLabel=L"Update to "+updateTo;return updateLabel.c_str();}return L"Prepare";case Step::Retry:return L"Retry";default:return L"Play";}}
+const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:return updateTo.empty()?L"Prepare":L"Update";case Step::Retry:return L"Retry";default:return L"Play";}}
 std::wstring hint(Step s){
     switch(s){
     case Step::Inputs:return L"Pick your game file (.nsp) and your prod.keys, plus the game update if you have it. They stay where they are.";

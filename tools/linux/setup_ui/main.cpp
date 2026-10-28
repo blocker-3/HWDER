@@ -512,7 +512,7 @@ void draw(App& app, SDL_Window* window) {
             ImGui::TextWrapped("Takes about 15 minutes on a ROG Ally. The first time, the build tools are downloaded "
                                "too (about 200 MB, each file checked).");
         ImGui::BeginDisabled(!files_ok || st["game_running"].truthy());
-        const std::string main_label = update ? "Update to " + st["version"].str() : ready ? "Prepare again" : "Prepare the game";
+        const std::string main_label = update ? "Update" : ready ? "Prepare again" : "Prepare the game";
         if (ImGui::Button(main_label.c_str())) {
             std::vector<std::string> args{"--nsp", app.files[0].path, "--keys", app.files[1].path};
             if (!app.files[2].path.empty()) { args.push_back("--update"); args.push_back(app.files[2].path); }
