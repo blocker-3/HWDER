@@ -190,6 +190,20 @@ class LinuxSetupTests(unittest.TestCase):
         self.assertFalse(linux_setup.update_needed(release, "v0.2.2", False))    # nothing built yet: plain Prepare
         self.assertFalse(linux_setup.update_needed({"version": "v0.2.3 (source checkout)", "files": None}, "x", True))
 
+    @unittest.skipIf(os.name == "nt", "POSIX paths")
+    def test_toolchain_check_is_marker_and_key_sizes_only(self):
+        tc = linux_setup.toolchain_dir()
+        for path in linux_setup.tool_paths(tc).values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"binary")
+        manifest = linux_setup.file_sha256(linux_setup.ROOT / "tools" / "linux" / "toolchain.json")
+        linux_setup.write_json(tc / "complete.json", {"manifest": manifest, "sizes": linux_setup.key_sizes(tc)})
+        with patch.object(linux_setup, "file_sha256", wraps=linux_setup.file_sha256) as hashed:
+            self.assertTrue(linux_setup.toolchain_ready())
+        self.assertEqual(hashed.call_count, 1)  # the manifest only, no tool file
+        linux_setup.tool_paths(tc)["cmake"].write_bytes(b"changed size")
+        self.assertFalse(linux_setup.toolchain_ready())
+
     def test_json_report_lines(self):
         out = io.StringIO()
         with patch("sys.stdout", out):

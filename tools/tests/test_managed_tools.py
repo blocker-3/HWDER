@@ -113,6 +113,28 @@ class Managed(unittest.TestCase):
         self.assertTrue(tools.complete(result, tools.identity(value, self.source)))
         self.assertEqual(len(list(result.parent.glob(result.name + ".invalid-*"))), 1)
 
+    def test_old_certificate_is_hashed_once_then_stamped_and_repair_reinstalls(self):
+        value, fetch = self.fixture()
+        result = self.install(value, fetch)
+        key = tools.identity(value, self.source)
+        certificate = tools.first_run.read_json(result / "complete.json")
+        self.assertEqual(certificate["stamp_schema"], tools.STAMP_SCHEMA)
+        self.assertNotIn("files", certificate)
+        # A certificate written before the stamp (per-file hashes only): verified in full once, then stamped.
+        old = {k: v for k, v in certificate.items() if k not in ("stamp_schema", "stamp")}
+        old["files"] = tools.tool_hashes(result / "output")
+        tools.first_run.atomic_json(result / "complete.json", old)
+        self.assertTrue(tools.complete(result, key, value=value))
+        self.assertEqual(tools.first_run.read_json(result / "complete.json")["stamp_schema"], tools.STAMP_SCHEMA)
+        with patch.object(tools, "tool_hashes", lambda *a, **k: self.fail("stamped toolset re-hashed")):
+            self.assertTrue(tools.complete(result, key))
+        # Repair re-extracts from the cached, SHA-256 checked archives instead of trusting the installation.
+        again = tools.install(self.data, self.source, value, fetch=lambda *a: self.fail("cached archives reused"),
+                              validate=lambda path: None, repair=True)
+        self.assertEqual(again, result)
+        self.assertEqual(len(list(result.parent.glob(result.name + ".invalid-*"))), 1)
+        self.assertTrue(tools.complete(result, key))
+
     def test_checksum_failure_never_promotes_and_previous_stays_verified(self):
         good, fetch = self.fixture()
         previous = self.install(good, fetch)

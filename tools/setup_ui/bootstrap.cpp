@@ -110,6 +110,7 @@ Step step(){
 }
 // A kit whose version differs from the installed game's offers "Update to <version>" (bridge event update_available).
 std::wstring updateTo,installedVersion,updateLabel;
+bool repairTools=false;  // the Advanced tools button repairs once tools are installed
 const wchar_t* label(Step s){switch(s){case Step::Inputs:return L"Next";case Step::Install:return L"Install";case Step::Prepare:if(!updateTo.empty()){updateLabel=L"Update to "+updateTo;return updateLabel.c_str();}return L"Prepare";case Step::Retry:return L"Retry";default:return L"Play";}}
 std::wstring hint(Step s){
     switch(s){
@@ -136,6 +137,7 @@ void controls(){
     SetWindowTextW(locationBox,bound?(L"Installed game: "+installedExe.wstring()+(pathsReady?L"\r\nThe installed game needs no setup kit; a Desktop shortcut starts it directly.":L"\r\nGame running. The installed shortcut handoff finishes when it closes.")).c_str():L"Private tools stay in your Data folder. No Python or Visual Studio installation is needed.");
     EnableWindow(cancelButton,busy&&!publishing&&!launching);
     for(int id:{Game,Keys,Update,Data,BrowseGame,BrowseKeys,BrowseUpdate,BrowseData,Check,Components,PythonSite,ToolsSite,Advanced,Details})EnableWindow(GetDlgItem(window,id),!busy);
+    SetWindowTextW(GetDlgItem(window,Components),!demo&&toolsPresent()?L"Repair private tools":L"Install private tools");
 }
 void refresh(){controls();if(!busy&&failureMessage.empty())state(hint(step()));}
 std::wstring elapsedText(unsigned long long ms){wchar_t b[32];unsigned s=(unsigned)(ms/1000);swprintf(b,32,L"%u:%02u",s/60,s%60);return b;}
@@ -173,6 +175,7 @@ void run(std::wstring action){
     if(demo)command+=L" -Preview -PreviewPython "+quote(previewPython.wstring());
     if(demoFail)command+=L" -PreviewFail";
     if(lifecyclePreview)command+=L" -PreviewLifecycle";if(lifecycleRace)command+=L" -PreviewRace";
+    if(action==L"tools"&&repairTools)command+=L" -Repair";  // Repair private tools: re-extract from the checked archives
     if(action==L"prepare")command+=L" -Nsp "+quote(text(gameBox))+L" -Keys "+quote(text(keyBox));
     if(action==L"prepare"&&!text(updateBox).empty())command+=L" -Update "+quote(text(updateBox));
     if(text(dataBox)!=root.wstring())SetWindowTextW(dataBox,root.c_str());activeData=root.wstring();activeAction=action;
@@ -422,7 +425,7 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,562,790,185);
         statusBox=control(L"STATIC",L"",0,28,226,790,54); // created last: the tests read the final STATIC as the status line
         layout();refresh();return 0;}
-    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Update||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseUpdate||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components)run(L"tools");else if(id==Shortcut)shortcut();else if(id==Steam)addToSteam();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
+    if(message==WM_COMMAND){int id=LOWORD(wp);if(HIWORD(wp)==EN_CHANGE&&(id==Game||id==Keys||id==Update||id==Data)){ready=false;pathsReady=false;installedExe.clear();forgetGame();if(id==Data)toolsMissingHint=false;retryHint=false;if(!busy)failureMessage.clear();refresh();return 0;}if(id==BrowseGame||id==BrowseKeys||id==BrowseUpdate||id==BrowseData){browse(id);refresh();}else if(id==Primary)primary();else if(id==Check)run(lifecyclePreview?L"status":L"check");else if(id==Components){repairTools=toolsPresent();run(L"tools");}else if(id==Shortcut)shortcut();else if(id==Steam)addToSteam();else if(id==OpenGame){if(ready&&certifiedData==text(dataBox)&&fs::is_directory(installedExe.parent_path()))ShellExecuteW(h,L"open",installedExe.parent_path().c_str(),nullptr,nullptr,SW_SHOWNORMAL);}else if(id==Cancel){cancelRequested=true;std::lock_guard<std::mutex> lock(handles);if(!publishing&&currentJob)TerminateJobObject(currentJob,130);state(publishing?L"Finishing the safe update; this commit may complete before cancellation.":L"Cancelling\u2026 your previous playable version is kept.");}
         else if(id==Advanced){advanced=!advanced;layout();}
         else if(id==Details){detailsShown=SendMessageW(GetDlgItem(h,Details),BM_GETCHECK,0,0)==BST_CHECKED;layout();}
         else if(id==PythonSite){MessageBoxW(h,L"HWDER uses its own pinned Python, LLVM-MinGW, CMake and Ninja, plus cryptography, lz4, zstandard, cffi and pycparser.\n\nInstall is the only action that downloads. Prepare, Check and Play only verify existing tools.\n\nTools and full license notices live in the Data folder. No global PATH, registry or administrator installation is needed.",L"About private tools",MB_OK|MB_ICONINFORMATION);}

@@ -226,13 +226,57 @@ def identity(value, source):
     return first_run.digest({"manifest": value, "source": str(Path(source).resolve())})
 
 
-def complete(directory, key, progress=None):
+STAMP_SCHEMA = 2
+WHEELS = ("cryptography", "lz4", "cffi", "pycparser", "zstandard")
+
+
+def stamp(directory, value=None):
+    """Cheap identity of an installed toolset: size and modification time of its key binaries. The archives were
+    checked against their pinned SHA-256 before extraction; re-hashing ~17,000 extracted files (52 s) on every
+    check is not needed. None when a key binary is missing."""
+    value = value or manifest()
+    output = plain_path(directory) / "output"
+    result = {}
+    for item in value["artifacts"]:
+        for required in item.get("required", []):
+            if item["id"] in WHEELS:  # moved into the private Python at install
+                path = output / "python/Lib/site-packages" / required
+            else:
+                path = output / item["id"] / item.get("archive_root", "") / required
+            try:
+                info = os.stat(filesystem_path(path))
+            except OSError:
+                return None
+            result[path.relative_to(output).as_posix()] = [info.st_size, info.st_mtime_ns]
+    return result
+
+
+def complete(directory, key, progress=None, value=None, repair=False):
+    """True when the toolset at `directory` is installed for `key`. Normally a stamp comparison (key binaries'
+    size and mtime). A certificate from before the stamp (per-file hashes) is verified in full once and then
+    gains the stamp; repair=True always does the full per-file check (Repair tools)."""
     directory = Path(directory)
     certificate = first_run.read_json(directory / "complete.json")
     output = directory / "output"
-    return (certificate.get("owner") == OWNER and certificate.get("key") == key
-            and bool(certificate.get("files")) and output.is_dir()
-            and certificate["files"] == tool_hashes(output,progress))
+    if certificate.get("owner") != OWNER or certificate.get("key") != key or not output.is_dir():
+        return False
+    if certificate.get("stamp_schema") == STAMP_SCHEMA and not repair:
+        recorded = certificate.get("stamp")
+        if not recorded:
+            return False
+        for relative, (size, mtime_ns) in recorded.items():
+            try:
+                info = os.stat(filesystem_path(output / relative))
+            except OSError:
+                return False
+            if (info.st_size, info.st_mtime_ns) != (size, mtime_ns):
+                return False
+        return True
+    if not certificate.get("files") or certificate["files"] != tool_hashes(output, progress):
+        return False
+    first_run.atomic_json(directory / "complete.json",
+                          {**certificate, "stamp_schema": STAMP_SCHEMA, "stamp": stamp(directory, value)})
+    return True
 
 
 def tool_hashes(root, progress=None):
@@ -278,7 +322,9 @@ def probe_imports(output):
 
 
 def install(data, source, value=None, fetch=download, progress=lambda *a: None,
-            cancelled=lambda: False, validate=probe_imports, phase=lambda *a,**k:None):
+            cancelled=lambda: False, validate=probe_imports, phase=lambda *a,**k:None, repair=False):
+    """repair=True (Repair tools) re-extracts from the cached archives (each checked against its SHA-256 again)
+    instead of trusting the existing installation."""
     value = value or manifest()
     data, source = Path(data).absolute(), Path(source).resolve()
     owned_path(data, data)
@@ -290,7 +336,7 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
         final = root / key[:24]
         owned_path(final, data)
         phase("checking_installation")
-        if complete(final, key,lambda count,done:phase("verify_existing",files=count,finished=done)):
+        if not repair and complete(final, key, lambda count,done:phase("verify_existing",files=count,finished=done), value):
             phase("installed_ready")
             return final
         downloads = owned_path(root / "downloads", data)
@@ -321,7 +367,7 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
         packages = python / "Lib/site-packages"
         packages.mkdir(parents=True)
         for item in value["artifacts"]:
-            if item["id"] in ("cryptography", "lz4", "cffi", "pycparser", "zstandard"):
+            if item["id"] in WHEELS:
                 base = output / item["id"]
                 for entry in base.iterdir():
                     if entry.name.endswith(".pth") or (packages / entry.name).exists():
@@ -332,13 +378,14 @@ def install(data, source, value=None, fetch=download, progress=lambda *a: None,
         phase("imports")
         validate(output)
         phase("imports_done")
-        phase("verify_new",files=0,finished=False)
-        files = tool_hashes(output,lambda count,done:phase("verify_new",files=count,finished=done))
+        # The archives were checked against their pinned SHA-256 before extraction: no re-hash of the extracted
+        # files here; the certificate records the key binaries' size and mtime (stamp) for later checks.
         if cancelled():
             raise InterruptedError("Private tool setup cancelled before publication")
         phase("finalize")
         first_run.atomic_json(attempt / "complete.json",
-                             {"owner": OWNER, "key": key, "files": files, "abi": value["abi"]})
+                             {"owner": OWNER, "key": key, "abi": value["abi"], "stamp_schema": STAMP_SCHEMA,
+                              "stamp": stamp(attempt, value)})
         if final.exists():
             final.rename(root / (final.name + ".invalid-" + uuid.uuid4().hex[:8]))
         attempt.rename(final)
@@ -362,7 +409,7 @@ def installed(data, source, value=None, progress=None):
     data = plain_path(data)
     key = identity(value, source)
     directory = owned_path(data / "managed-tools" / key[:24], data)
-    if not complete(directory, key,progress):
+    if not complete(directory, key, progress, value):
         raise ValueError("Private tools are missing or changed. Choose Install private tools, then recheck.")
     return directory
 
@@ -374,7 +421,7 @@ def prerequisites(source, directory):
     key = identity(value, source)
     def checked(count,done):
         first_run.log(f"private-tools: Checking private tool files: {count} files hashed" + (" (scan complete)" if done else ""))
-    if not complete(directory, key,checked):
+    if not complete(directory, key, checked, value):
         raise ValueError("Private tool certificate changed. Choose Install private tools.")
     import importlib.metadata
     versions = {name:importlib.metadata.version(name) for name in ("cryptography","lz4","cffi","pycparser","zstandard")}
@@ -389,8 +436,9 @@ def prerequisites(source, directory):
     env = environment(directory, value)
     for name in ("cc","cmake","ninja"):
         result = subprocess.run([str(selected[name]),"--version"],env=env,check=True,capture_output=True,text=True)
+        info = os.stat(filesystem_path(selected[name]))  # identity is the stamp; no re-hash on every Prepare
         versions[name] = {"path":str(selected[name]),"version":result.stdout.strip(),
-                          "sha256":first_run.file_hash(selected[name])}
+                          "size":info.st_size,"mtime_ns":info.st_mtime_ns}
     versions.update(kind=value["abi"],managed_directory=str(directory),installation_key=key,
                     tool_certificate_sha256=first_run.file_hash(directory/"complete.json"),python=sys.version)
     return versions
@@ -454,6 +502,8 @@ def main():
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--source", default=MANIFEST.parent.parent, type=Path)
     parser.add_argument("--install", action="store_true", help="explicit consent to pinned private downloads")
+    parser.add_argument("--repair", action="store_true",
+                        help="with --install: re-extract from the cached archives (each SHA-256 checked again)")
     parser.add_argument("--bridge-action", choices=("check","prepare","launch"))
     parser.add_argument("--nonce",default="")
     parser.add_argument("--nsp")
@@ -493,7 +543,7 @@ def main():
         return
     result = install(args.data, args.source, value,
                      progress=lambda name, got, total:event("stage",f"Downloading {name}: {got//1048576} MiB received",stage="tools"),
-                     phase=phase)
+                     phase=phase, repair=args.repair)
     print("tools: verified " + str(result), flush=True)
     event("components_ready","Private tools installed and verified. Choose Prepare next.")
 

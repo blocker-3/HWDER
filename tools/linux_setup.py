@@ -221,11 +221,26 @@ def tool_paths(tc):
             "cxx": tc / "bin" / "zig-c++", "ar": tc / "bin" / "zig-ar", "ranlib": tc / "bin" / "zig-ranlib"}
 
 
+def key_sizes(tc):
+    """Sizes of the toolchain's key binaries: the cheap identity checked on every run (the archives were checked
+    against their pinned SHA-256 at download; extracted files are never re-hashed, except by toolchain --repair)."""
+    sizes = {}
+    for name, path in tool_paths(tc).items():
+        try:
+            sizes[name] = path.stat().st_size
+        except OSError:
+            return None
+    return sizes
+
+
 def toolchain_ready(root=ROOT):
     tc = toolchain_dir(root)
     marker = read_json(tc / "complete.json")
-    return (marker.get("manifest") == file_sha256(Path(root) / "tools" / "linux" / "toolchain.json")
-            and all(p.is_file() for p in tool_paths(tc).values()))
+    if marker.get("manifest") != file_sha256(Path(root) / "tools" / "linux" / "toolchain.json"):
+        return False
+    sizes = key_sizes(tc)
+    # Markers written before key_sizes existed: the binaries only have to exist.
+    return sizes is not None and marker.get("sizes", sizes) == sizes
 
 
 def download(url, target, expected_sha256, size, report, label):
@@ -309,8 +324,11 @@ def write_wrappers(tc, final=None):
         os.chmod(path, 0o755)
 
 
-def install_toolchain(report, root=ROOT):
-    """Downloads, checks and unpacks the pinned tools once; later runs only check the completion marker."""
+def install_toolchain(report, root=ROOT, repair=False):
+    """Downloads, checks and unpacks the pinned tools once; later runs only check the completion marker and the key
+    binaries' sizes. repair=True downloads and unpacks again (each archive SHA-256 checked)."""
+    if repair:
+        shutil.rmtree(toolchain_dir(root), ignore_errors=True)
     if toolchain_ready(root):
         write_wrappers(toolchain_dir(root))  # cheap; repairs wrappers of a moved data folder
         return toolchain_dir(root)
@@ -367,7 +385,7 @@ def install_toolchain(report, root=ROOT):
         if check.stdout.strip() != "ok":
             raise SetupError("The pinned Python could not load its modules: " + (check.stderr.strip()[-300:] or "?"))
         write_json(staging / "complete.json", {"manifest": file_sha256(Path(root) / "tools" / "linux" / "toolchain.json"),
-                                               "target": value["target"]})
+                                               "target": value["target"], "sizes": key_sizes(staging)})
         if tc.exists():
             shutil.rmtree(tc)
         os.replace(staging, tc)
@@ -854,7 +872,8 @@ def main(argv=None):
     d = sub.add_parser("desktop", help="write the menu entries (and a desktop icon with --desktop-icon)")
     d.add_argument("--desktop-icon", action="store_true")
     sub.add_parser("play", help="start the game")
-    sub.add_parser("toolchain", help="download and check the build tools only")
+    t = sub.add_parser("toolchain", help="download and check the build tools only")
+    t.add_argument("--repair", action="store_true", help="download and unpack the build tools again")
     u = sub.add_parser("uninstall", help="remove the game build, tools and launchers; keeps saves")
     u.add_argument("--yes", action="store_true")
     a = ap.parse_args(argv)
@@ -882,7 +901,7 @@ def main(argv=None):
             exe = prepare(report, clean_path(a.nsp), clean_path(a.keys), clean_path(a.update) or None, a.jobs or None)
             return report.result(True, "The game is ready.", game=str(exe))
         if a.command == "toolchain":
-            install_toolchain(report, install_app(report))
+            install_toolchain(report, install_app(report), repair=a.repair)
             return report.result(True, "Build tools ready.")
         if a.command == "steam":
             ok = add_to_steam(report, True if a.yes else None)
