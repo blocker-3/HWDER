@@ -1,7 +1,7 @@
 // Debug switches: every HWDER_* environment variable the runtime reads, in one table, with accessors that
 // reproduce the parse rule of the sites they replaced. Call sites keep their `static const` caching, so each
 // variable is still read once, at the same point as before. docs/code-structure/debug-flags.md is the inventory;
-// tools/gen_debug_flags_md.py renders this table into README.md and the F1 Tools tab lists it with the values.
+// tools/gen_debug_flags_md.py renders this table into docs/environment-variables.md and the F1 Tools tab lists it with the values.
 #pragma once
 #include <cstddef>
 
@@ -113,7 +113,7 @@ struct Flag {
     Kind kind;
 };
 
-// The whole table (kCount entries, in Id order), for the README / F1 menu generators.
+// The whole table (kCount entries, in Id order), for the docs/environment-variables.md / F1 menu generators.
 const Flag* table(size_t* count);
 
 // The variable's value, or nullptr when unset (a plain getenv; sites with their own parse rule use this).

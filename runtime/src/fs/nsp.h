@@ -9,7 +9,7 @@
 
 namespace hwfs::nsp {
 
-// Hyrule Warriors: Definitive Edition's application (program) ID, as in kernel.h and the README.
+// Hyrule Warriors: Definitive Edition's application (program) ID, as in kernel.h and docs/playing.md.
 constexpr uint64_t kTitleId = 0x0100AE00096EA000ull;
 
 // Paths picked on the startup screen (empty = search). Used after HWDER_NSP / HWDER_KEYS and before

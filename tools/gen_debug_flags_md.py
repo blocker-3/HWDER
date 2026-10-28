@@ -1,11 +1,11 @@
-"""Print the README's debug-switch table from the table in runtime/src/debug_flags.cpp.
+"""Print the debug-switch table of docs/environment-variables.md from runtime/src/debug_flags.cpp.
 
-The C++ table is the source of truth; this script only reads it. README.md carries the output between
-`<!-- debug-flags:begin -->` and `<!-- debug-flags:end -->`, and tools/tests/test_debug_flags_md.py fails
-when the two differ. Run from anywhere:
+The C++ table is the source of truth; this script only reads it. docs/environment-variables.md carries
+the output between `<!-- debug-flags:begin -->` and `<!-- debug-flags:end -->`, and
+tools/tests/test_debug_flags_md.py fails when the two differ. Run from anywhere:
 
     python tools/gen_debug_flags_md.py            # print the table
-    python tools/gen_debug_flags_md.py --write    # rewrite the README section in place
+    python tools/gen_debug_flags_md.py --write    # rewrite the doc's section in place
 """
 import argparse
 from pathlib import Path
@@ -14,7 +14,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "runtime" / "src" / "debug_flags.cpp"
-README = ROOT / "README.md"
+DOC = ROOT / "docs" / "environment-variables.md"
 BEGIN = "<!-- debug-flags:begin -->"
 END = "<!-- debug-flags:end -->"
 
@@ -84,7 +84,7 @@ def generate():
     return render(parse())
 
 
-def readme_section(text):
+def doc_section(text):
     """The text between the markers (exclusive), or None when a marker is missing."""
     b, e = text.find(BEGIN), text.find(END)
     if b < 0 or e < 0 or e < b:
@@ -92,23 +92,23 @@ def readme_section(text):
     return text[b + len(BEGIN):e].strip("\n") + "\n"
 
 
-def write(readme=README):
-    text = readme.read_text(encoding="utf-8")
+def write(doc=DOC):
+    text = doc.read_text(encoding="utf-8")
     b, e = text.find(BEGIN), text.find(END)
     if b < 0 or e < 0 or e < b:
-        raise ValueError("README.md lacks the debug-flags markers")
+        raise ValueError("docs/environment-variables.md lacks the debug-flags markers")
     new = text[:b + len(BEGIN)] + "\n" + generate() + text[e:]
     if new != text:
-        readme.write_text(new, encoding="utf-8", newline="\n")
+        doc.write_text(new, encoding="utf-8", newline="\n")
     return new != text
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--write", action="store_true", help="rewrite the README section in place")
+    ap.add_argument("--write", action="store_true", help="rewrite the doc's section in place")
     a = ap.parse_args(argv)
     if a.write:
-        print("README.md updated" if write() else "README.md already current")
+        print("docs/environment-variables.md updated" if write() else "docs/environment-variables.md already current")
     else:
         sys.stdout.write(generate())
     return 0

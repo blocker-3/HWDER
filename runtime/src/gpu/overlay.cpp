@@ -986,7 +986,7 @@ static void tab_tools(bool& changed) {
         }
     }
 
-    // Every startup switch the runtime knows (debug::table(), the same list as the README table), the ones
+    // Every startup switch the runtime knows (debug::table(), the same list as the docs/environment-variables.md table), the ones
     // set for this run first with their value. Read-only and read once: the subsystems saw these values at
     // startup (the saved switches above are applied before anything reads them), so nothing changes here.
     section("All startup switches");
@@ -1009,7 +1009,7 @@ static void tab_tools(bool& changed) {
                     if (v) set_count++;
                 }
         }
-        ImGui::TextDisabled("%zu of %zu set for this run (listed first). Each is read once at startup; the README has the same table.",
+        ImGui::TextDisabled("%zu of %zu set for this run (listed first). Each is read once at startup; docs/environment-variables.md has the same table.",
                             set_count, rows.size());
         if (ImGui::BeginTable("##switches", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("Switch", ImGuiTableColumnFlags_WidthStretch, 1.6f);
