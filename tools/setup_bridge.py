@@ -123,6 +123,9 @@ RECOVERY = (
      "Your game is running. Close it, then try again.", "close"),
     (("No verified prepared game",),
      "No prepared game yet. Choose Prepare.", "prepare"),
+    (("has newer code than your prepared game",),
+     "This setup has newer code than your game. Choose Prepare to update it; your saves and settings are kept.",
+     "prepare"),
     (("build.py", "Build succeeded without", "compil", "ninja", "cmake", "CMake"),
      "The build did not finish. Open Advanced, Details for the error, then Retry.", "prepare"),
     (("cancelled", "Cancelled"),
@@ -137,6 +140,27 @@ def recovery(detail):
             return message, step
     line = detail.strip().splitlines()[0][:160] if detail.strip() else "unknown error"
     return "Setup did not finish: " + line.rstrip(".") + ". Fix that, then Retry.", "prepare"
+
+
+def kit_version(root=None):
+    """The version this setup kit carries (version.txt, written into every release zip), or None in a source
+    checkout."""
+    try:
+        line = (Path(root or first_run.ROOT) / "version.txt").read_text(encoding="utf-8").splitlines()[0].strip()
+        return line or None
+    except (OSError, IndexError):
+        return None
+
+
+def stale_build(data, root=None):
+    """A newer (or other) kit than the one that prepared the installed game: Setup shows Prepare instead of Play,
+    so the update is actually built (before, a new kit landed on Play and kept running the old game). Installs
+    prepared before the version was recorded count as stale once."""
+    version = kit_version(root)
+    if version is None:
+        return None
+    built = first_run.read_json(Path(data) / "setup-inputs.json").get("built_version")
+    return None if built == version else (version, built)
 
 
 def checked_ready(data):
@@ -240,6 +264,10 @@ def discovered_game(exe):
 def ready_status(data, managed=None, identity=process_identity):
     with first_run.setup_lock(Path(data)):
         exe, _, _ = checked_ready(data)
+        stale = stale_build(data)
+        if stale:
+            raise ValueError(f"This kit ({stale[0]}) has newer code than your prepared game "
+                             f"({stale[1] or 'an earlier release'}). Choose Prepare to update it.")
         if managed is not None:
             import managed_tools
             managed_tools.game_image(exe)
@@ -312,7 +340,8 @@ def prepare(data, nsp, keys, backend=first_run, before_publish=None, managed=Non
         if first_run.file_hash(exe) != backend.read_json(data / "last-success.json").get("exe_sha256"):
             raise ValueError("Prepared executable certificate did not match.")
         backend.atomic_json(data / "setup-inputs.json", {"nsp": str(nsp), "keys": str(keys),
-                            **({"update": str(update)} if update else {})})
+                            **({"update": str(update)} if update else {}),
+                            **({"built_version": kit_version()} if kit_version() else {})})
         installed_paths(data, exe)
     emit("ready", "Ready to play. Your saves and settings stay in " + str(data / "play"), exe=str(exe), paths_ready="yes")
 
