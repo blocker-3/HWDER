@@ -95,8 +95,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.zip dist/*.tar.gz dist/*.sha256
+            gh release upload "$TAG" dist/*.zip dist/*.tar.gz
           else
-            gh release create "$TAG" dist/*.zip dist/*.tar.gz dist/*.sha256 --draft --verify-tag \
-              --title "HWDER $TAG" --notes "Draft built by GitHub Actions. SHA-256: $(cat dist/*.sha256)"
+            gh release create "$TAG" dist/*.zip dist/*.tar.gz --draft --verify-tag \
+              --title "HWDER $TAG" --notes "Draft built by GitHub Actions; GitHub lists each asset's SHA-256."
           fi
