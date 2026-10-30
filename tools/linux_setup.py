@@ -484,6 +484,8 @@ def run_build(report, tc, app, nsp, keys, update, jobs):
                "--keys", keys, "--cache", str(cache_dir()), "--jobs", str(jobs), "--no-steam"]
     if update:
         command += ["--update", update]
+    if os.environ.get("HWDER_TRY_UNSUPPORTED") == "1":
+        command.append("--try-unsupported")
     report.stage("build", "Preparing the game from your files (about 15 minutes on a ROG Ally; the first time only)")
     process = subprocess.Popen(command, cwd=str(app), env=build_environment(tc, app), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
@@ -867,6 +869,8 @@ def main(argv=None):
     p.add_argument("--keys", required=True)
     p.add_argument("--update", default="", help="your own game update 1.0.1 (.nsp or .nsz); omit for the base game")
     p.add_argument("--jobs", type=int, default=0)
+    p.add_argument("--try-unsupported", action="store_true",
+                   help="build a game version HWDER does not know anyway (may crash)")
     s = sub.add_parser("steam", help="add the game to Steam (closes and restarts a running Steam)")
     s.add_argument("--yes", action="store_true", help="close and restart a running Steam without asking")
     d = sub.add_parser("desktop", help="write the menu entries (and a desktop icon with --desktop-icon)")
@@ -898,6 +902,8 @@ def main(argv=None):
             ok = all(r["ok"] for r in results.values())
             return report.result(ok, "files look right" if ok else "check the files", files=results)
         if a.command == "prepare":
+            if a.try_unsupported:
+                os.environ["HWDER_TRY_UNSUPPORTED"] = "1"
             exe = prepare(report, clean_path(a.nsp), clean_path(a.keys), clean_path(a.update) or None, a.jobs or None)
             return report.result(True, "The game is ready.", game=str(exe))
         if a.command == "toolchain":

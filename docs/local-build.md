@@ -42,6 +42,12 @@ the build ID and SHA-256 of its `main`. With a matching profile (its own symbols
 (`GetDesiredLanguage` returns `ja`) and keeps saves in the `0100AE00096EA000` folder. Its update
 (`01002AB007FD2800`) is not read.
 
+**Try anyway (may crash)** (Windows Setup: Advanced; Linux Setup: next to Prepare; `first_run.py` and
+`linux_setup.py prepare`: `--try-unsupported`; all set `HWDER_TRY_UNSUPPORTED=1`) builds a version no
+profile matches with the closest profile's addresses: 1.0.1's when an update is given, else the base game's.
+It only works if the game's code is laid out exactly as in that version; otherwise the build or the game
+fails. A different module set is still refused.
+
 Setup reads/decrypts the user's NSP with the project's existing `nx_extract` primitives,
 checks title/module hashes, hashes the complete NSP, then writes only those five modules to
 the private cache. It never extracts RomFS, logos or movies. It runs the existing

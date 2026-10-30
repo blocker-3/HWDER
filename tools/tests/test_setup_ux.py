@@ -21,7 +21,9 @@ class Recovery(unittest.TestCase):
             "Expected exactly one base-game program for title 0100AE00096EA000 or 01002AB007FD2000; "
             "updates/bundles unsupported": ("base game", "inputs"),
             "Japanese version (title 01002AB007FD2000) is not supported yet: main build ID 00, SHA-256 00 does not "
-            "match a tested version. No code generated": ("Japanese version", "inputs"),
+            "match a tested version. No code generated": ("Try anyway", "inputs"),
+            "Unsupported game version: ExeFS SHA-256 does not match the tested base game (main build ID 00, "
+            "SHA-256 00). No code generated": ("Try anyway", "inputs"),
             "Unsupported ExeFS module set": ("supported game version", "inputs"),
             "Cannot decrypt NCA header; check your own dump and keys": ("prod.keys", "inputs"),
             "Required decryption key is missing; supply a complete own prod.keys and ticket": ("prod.keys", "inputs"),

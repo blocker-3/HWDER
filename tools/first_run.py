@@ -279,7 +279,7 @@ def unpack_update(cache, update, keys):
 def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modules=None, before_publish=None,
             update=None, prune=False):
     """Injectable stage boundary permits meaningful synthetic orchestration/failure tests."""
-    from local_game import read_program, supported_profile, profile as profile_entry
+    from local_game import read_program, supported_profile, profile as profile_entry, fallback_profile, try_unsupported
     root, cache, nsp, keys = map(Path, (root, cache, nsp, keys))
     if not nsp.is_file() or nsp.suffix.lower() != ".nsp" or not keys.is_file():
         raise ValueError("Supply an existing .nsp and your own prod.keys via --nsp/--keys or HWDER_NSP/HWDER_KEYS")
@@ -297,7 +297,13 @@ def prepare(root, cache, nsp, keys, jobs, toolchain, run=run_command, read_modul
         log("unpacking the game update (its main module and RomFS patch)")
         update_dir = unpack_update(cache, update, keys)
         modules = {**modules, "main": (update_dir / "exefs" / "main").read_bytes()}
-    profile = supported_profile(modules, root / "tools" / "supported_games.json")
+    try:
+        profile = supported_profile(modules, root / "tools" / "supported_games.json")
+    except ValueError as e:
+        if not try_unsupported():
+            raise
+        profile = fallback_profile(update is not None, root / "tools" / "supported_games.json")
+        log(f"warning: {e}; trying anyway with the addresses of {profile}: the game may fail to build, crash or misbehave")
     recomp = profile_entry(profile, root / "tools" / "supported_games.json").get("recomp", {})
     log(f"supported version: {profile}; hashing complete NSP for cache identity")
     game_hash = file_hash(nsp)
@@ -519,7 +525,11 @@ def main():
     steam.add_argument("--add-to-steam", action="store_true",
                        help="Linux: add the game to Steam without asking (closes and restarts a running Steam)")
     steam.add_argument("--no-steam", action="store_true", help="Linux: do not offer to add the game to Steam")
+    ap.add_argument("--try-unsupported", action="store_true",
+                    help="build a game version no profile matches anyway, with the closest profile (may crash)")
     a = ap.parse_args()
+    if a.try_unsupported:
+        os.environ["HWDER_TRY_UNSUPPORTED"] = "1"
     if a.jobs < 1:
         ap.error("--jobs must be at least 1")
     try:

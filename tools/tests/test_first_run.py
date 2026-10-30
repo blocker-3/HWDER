@@ -411,6 +411,12 @@ class Fixture(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertFalse((self.cache / "last-success.json").exists())
 
+    def test_try_anyway_builds_unsupported_version_with_base_profile(self):
+        self.modules["main"] += b"different version"
+        with patch.dict(os.environ, {local_game.TRY_UNSUPPORTED: "1"}):
+            self.prepare()
+        self.assertEqual(setup.read_json(self.cache / "last-success.json")["profile"], "synthetic-only")
+
     def test_source_change_during_generation_is_not_cached(self):
         runner = self.run_stage
         def mutate(args, cwd):

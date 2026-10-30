@@ -1,6 +1,7 @@
 """Validate and extract only known ExeFS modules from a user's NSP. Never writes keys."""
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 
@@ -11,6 +12,12 @@ TITLE_ID = 0x0100AE00096EA000
 TITLE_ID_JP = 0x01002AB007FD2000
 TITLE_IDS = (TITLE_ID, TITLE_ID_JP)
 MANIFEST = Path(__file__).resolve().parent / "supported_games.json"
+# Setup's "Try anyway (may crash)": build a version no profile matches with the closest profile's addresses.
+TRY_UNSUPPORTED = "HWDER_TRY_UNSUPPORTED"
+
+
+def try_unsupported():
+    return os.environ.get(TRY_UNSUPPORTED) == "1"
 
 
 def bounded_pfs(read, size):
@@ -118,7 +125,7 @@ def read_program(nsp, keys_path):
             if len(data) != size or data[:4] != b"NSO0":
                 raise ValueError("Invalid NSO module; check dump and keys")
             modules[name] = data
-        if program.title_id == TITLE_ID_JP:
+        if program.title_id == TITLE_ID_JP and not try_unsupported():
             try:
                 supported_profile(modules, MANIFEST)
             except ValueError:
@@ -141,6 +148,14 @@ def supported_profile(modules, manifest):
             return profile["id"]
     raise ValueError("Unsupported game version: ExeFS SHA-256 does not match the tested base game ("
                      + main_identity(modules) + "). No code generated")
+
+
+def fallback_profile(with_update, manifest):
+    """The profile "Try anyway" builds an unknown version with: 1.0.1's addresses with an update, else the base's."""
+    for entry in json.loads(Path(manifest).read_text(encoding="utf-8"))["profiles"]:
+        if ("recomp" in entry) == with_update:
+            return entry["id"]
+    raise ValueError("No profile to try an unsupported version with")
 
 
 def profile(profile_id, manifest):
