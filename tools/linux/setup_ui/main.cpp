@@ -271,6 +271,7 @@ struct App {
     std::string result_message;
     bool result_ok = true;
     bool steam_confirm = false;
+    bool try_anyway = false;  // build a game version no profile matches (--try-unsupported)
     bool quit = false;
     std::deque<std::vector<std::string>> queue;  // commands waiting for the running one
     // The dialog answers on another thread: its result waits here for the UI thread.
@@ -516,11 +517,14 @@ void draw(App& app, SDL_Window* window) {
         if (ImGui::Button(main_label.c_str())) {
             std::vector<std::string> args{"--nsp", app.files[0].path, "--keys", app.files[1].path};
             if (!app.files[2].path.empty()) { args.push_back("--update"); args.push_back(app.files[2].path); }
+            if (app.try_anyway) args.push_back("--try-unsupported");
             app.log.clear();
             app.run("prepare", args);
         }
         if (!ready || update) ImGui::SetItemDefaultFocus();  // the controller starts on the next step
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Checkbox("Try anyway (may crash)", &app.try_anyway);
         if (!files_ok) { ImGui::SameLine(); ImGui::TextDisabled("Choose the game and keys first."); }
         if (st["game_running"].truthy()) { ImGui::SameLine(); ImGui::TextDisabled("Close HWDER first."); }
     }

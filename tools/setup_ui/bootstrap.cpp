@@ -29,7 +29,7 @@
 
 namespace fs=std::filesystem;
 constexpr UINT Event=WM_APP+1;
-enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced,Steam,SteamGrid,Update,BrowseUpdate };
+enum { Game=101,Keys,Data,BrowseGame,BrowseKeys,BrowseData,Check,PythonSite,ToolsSite,Components,Primary,Unused112,Shortcut,Details,Cancel,OpenGame,Advanced,Steam,SteamGrid,Update,BrowseUpdate,TryAnyway };
 enum class Step { Inputs,Install,Prepare,Retry,Play };
 constexpr int Width=866;
 HWND window,gameBox,keyBox,updateBox,dataBox,statusBox,progress,progressBox,detailBox,primaryButton,shortcutButton,steamButton,cancelButton,locationBox,titleBox,advancedButton,steamGridBox;
@@ -176,6 +176,8 @@ void run(std::wstring action){
     if(demoFail)command+=L" -PreviewFail";
     if(lifecyclePreview)command+=L" -PreviewLifecycle";if(lifecycleRace)command+=L" -PreviewRace";
     if(action==L"tools"&&repairTools)command+=L" -Repair";  // Repair private tools: re-extract from the checked archives
+    // Advanced, "Try anyway": first_run builds a version no profile matches (local_game.TRY_UNSUPPORTED); inherited.
+    SetEnvironmentVariableW(L"HWDER_TRY_UNSUPPORTED",action==L"prepare"&&SendMessageW(GetDlgItem(window,TryAnyway),BM_GETCHECK,0,0)==BST_CHECKED?L"1":nullptr);
     if(action==L"prepare")command+=L" -Nsp "+quote(text(gameBox))+L" -Keys "+quote(text(keyBox));
     if(action==L"prepare"&&!text(updateBox).empty())command+=L" -Update "+quote(text(updateBox));
     if(text(dataBox)!=root.wstring())SetWindowTextW(dataBox,root.c_str());activeData=root.wstring();activeAction=action;
@@ -420,7 +422,7 @@ LRESULT CALLBACK procedure(HWND h,UINT message,WPARAM wp,LPARAM lp){
         // Advanced: hidden until expanded.
         control(L"STATIC",L"Data folder",0,28,400,180,24,0,true);dataBox=control(L"EDIT",L"",ES_AUTOHSCROLL,210,396,505,28,Data,true);control(L"BUTTON",L"Choose\u2026",BS_PUSHBUTTON,727,396,95,28,BrowseData,true);
         locationBox=control(L"STATIC",L"",0,28,432,790,42,0,true);
-        control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,478,170,36,Check,true);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,210,478,190,36,Components,true);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,412,478,150,36,OpenGame,true);
+        control(L"BUTTON",L"Check requirements",BS_PUSHBUTTON,28,478,170,36,Check,true);control(L"BUTTON",L"Install private tools",BS_PUSHBUTTON,210,478,190,36,Components,true);control(L"BUTTON",L"Open game folder",BS_PUSHBUTTON,412,478,150,36,OpenGame,true);control(L"BUTTON",L"Try anyway (may crash)",BS_AUTOCHECKBOX,574,482,248,30,TryAnyway,true);
         control(L"BUTTON",L"Open data folder",BS_PUSHBUTTON,28,522,150,36,ToolsSite,true);control(L"BUTTON",L"About tools",BS_PUSHBUTTON,190,522,120,36,PythonSite,true);control(L"BUTTON",L"Details",BS_AUTOCHECKBOX,322,526,90,30,Details,true);control(L"STATIC",L"SteamGridDB key",0,424,530,130,24,0,true);steamGridBox=control(L"EDIT",L"",ES_AUTOHSCROLL|ES_PASSWORD,556,526,266,28,SteamGrid,true);
         detailBox=control(L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL|ES_AUTOVSCROLL,28,562,790,185);
         statusBox=control(L"STATIC",L"",0,28,226,790,54); // created last: the tests read the final STATIC as the status line

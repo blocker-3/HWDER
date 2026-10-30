@@ -108,6 +108,11 @@ RECOVERY = (
     # (substrings of the backend detail, user sentence, next step for the window)
     (("CPU lacks AVX2",),
      "This PC's processor lacks AVX2, which HWDER needs (most Intel and AMD processors from 2015 on have it).", "close"),
+    (("Japanese version",),
+     "The Japanese version is untested. Tick Advanced, Try anyway (may crash) and Prepare, or send its build ID.",
+     "inputs"),
+    (("Unsupported game version",),
+     "This game version is untested. Tick Advanced, Try anyway (may crash) and Prepare again.", "inputs"),
     (("updates/bundles unsupported", "Expected exactly one base-game program"),
      "This NSP has an update or is not the base game. Use the base game only, then Prepare again.", "inputs"),
     (("Unsupported ExeFS module set", "not a supported", "unsupported version", "supported version"),

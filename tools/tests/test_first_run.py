@@ -411,6 +411,12 @@ class Fixture(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertFalse((self.cache / "last-success.json").exists())
 
+    def test_try_anyway_builds_unsupported_version_with_base_profile(self):
+        self.modules["main"] += b"different version"
+        with patch.dict(os.environ, {local_game.TRY_UNSUPPORTED: "1"}):
+            self.prepare()
+        self.assertEqual(setup.read_json(self.cache / "last-success.json")["profile"], "synthetic-only")
+
     def test_source_change_during_generation_is_not_cached(self):
         runner = self.run_stage
         def mutate(args, cwd):
@@ -706,6 +712,21 @@ class Parsers(unittest.TestCase):
         for data in (b"", b"PFS0", struct.pack("<4sIII", b"PFS0", 1000000000, 0, 0), self.pfs("main")[:-1]):
             with self.assertRaises(ValueError):
                 local_game.bounded_pfs(lambda o, n: data[o:o+n], len(data))
+
+    def test_profile_matches_by_modules_for_either_title_and_names_main(self):
+        modules = {name: b"NSO0" + bytes(0x3C) + bytes(range(16)) + name.encode() for name in local_game.MODULES}
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in modules.items()}
+        with temporary_directory() as tmp:
+            manifest = Path(tmp) / "supported.json"
+            for title in local_game.TITLE_IDS:
+                entry = {"id": "fixture", "title_id": f"{title:016x}", "modules_sha256": hashes}
+                manifest.write_text(json.dumps({"profiles": [entry]}))
+                self.assertEqual(local_game.supported_profile(modules, manifest), "fixture")
+            entry["title_id"] = "0100000000010000"
+            manifest.write_text(json.dumps({"profiles": [entry]}))
+            with self.assertRaisesRegex(ValueError, "build ID 000102030405060708090a0b0c0d0e0f, SHA-256 "
+                                        + hashes["main"]):
+                local_game.supported_profile(modules, manifest)
 
     def test_bad_marker_types_are_incomplete(self):
         with temporary_directory() as tmp:

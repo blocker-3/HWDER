@@ -3,6 +3,7 @@
 #include <mutex>
 
 #include "common.h"
+#include "fs/nsp.h"
 #include "hid/host_input.h"
 
 namespace ipc {
@@ -316,8 +317,10 @@ public:
         });
         reg(20, [](Request&, Response& rs) { rs.push<u64>(0); });  // EnsureSaveData
         reg(21, [](Request&, Response& rs) {                      // GetDesiredLanguage
+            // The best language the game supports for the console's English: the Japanese release has only "ja".
+            const char* code = hwfs::nsp::is_japanese() ? "ja" : "en-US";
             u64 lang = 0;
-            memcpy(&lang, "en-US", 5);
+            memcpy(&lang, code, strlen(code));
             rs.push(lang);
         });
         nop({22, 30, 31, 32, 60, 65, 66, 67, 68, 90, 100, 101, 102, 111, 120, 121, 122, 123, 124, 150, 151});

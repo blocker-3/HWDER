@@ -1,11 +1,23 @@
 """Validate and extract only known ExeFS modules from a user's NSP. Never writes keys."""
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 
 MODULES = ("rtld", "main", "subsdk0", "subsdk1", "sdk")
 TITLE_ID = 0x0100AE00096EA000
+# The Japanese release has its own title. It is read like the international one; it plays only if its modules
+# match a profile in supported_games.json, which nobody has checked yet (GitHub issue #3).
+TITLE_ID_JP = 0x01002AB007FD2000
+TITLE_IDS = (TITLE_ID, TITLE_ID_JP)
+MANIFEST = Path(__file__).resolve().parent / "supported_games.json"
+# Setup's "Try anyway (may crash)": build a version no profile matches with the closest profile's addresses.
+TRY_UNSUPPORTED = "HWDER_TRY_UNSUPPORTED"
+
+
+def try_unsupported():
+    return os.environ.get(TRY_UNSUPPORTED) == "1"
 
 
 def bounded_pfs(read, size):
@@ -99,8 +111,9 @@ def read_program(nsp, keys_path):
                 if any(s.start < 0xC00 or s.end > size or s.end <= s.start for s in nca.sections):
                     raise ValueError("NCA section outside container")
                 programs.append(nca)
-        if len(programs) != 1 or programs[0].title_id != TITLE_ID:
-            raise ValueError("Expected exactly one base-game program for title 0100AE00096EA000; updates/bundles unsupported")
+        if len(programs) != 1 or programs[0].title_id not in TITLE_IDS:
+            raise ValueError("Expected exactly one base-game program for title 0100AE00096EA000 or 01002AB007FD2000; "
+                             "updates/bundles unsupported")
         program = programs[0]
         sec, doff, entries = program_exefs(program)
         modules = {}
@@ -112,15 +125,37 @@ def read_program(nsp, keys_path):
             if len(data) != size or data[:4] != b"NSO0":
                 raise ValueError("Invalid NSO module; check dump and keys")
             modules[name] = data
+        if program.title_id == TITLE_ID_JP and not try_unsupported():
+            try:
+                supported_profile(modules, MANIFEST)
+            except ValueError:
+                raise ValueError("Japanese version (title 01002AB007FD2000) is not supported yet: "
+                                 + main_identity(modules) + " does not match a tested version. No code generated") from None
         return modules
+
+
+def main_identity(modules):
+    """Build ID and SHA-256 of main: enough to tell game builds apart in a report, and safe to share."""
+    main = modules["main"]
+    return f"main build ID {main[0x40:0x50].hex()}, SHA-256 {hashlib.sha256(main).hexdigest()}"
 
 
 def supported_profile(modules, manifest):
     hashes = {name: hashlib.sha256(modules[name]).hexdigest() for name in MODULES}
+    titles = {f"{t:016x}" for t in TITLE_IDS}
     for profile in json.loads(Path(manifest).read_text(encoding="utf-8"))["profiles"]:
-        if profile["title_id"] == f"{TITLE_ID:016x}" and profile["modules_sha256"] == hashes:
+        if profile["title_id"] in titles and profile["modules_sha256"] == hashes:
             return profile["id"]
-    raise ValueError("Unsupported game version: ExeFS SHA-256 does not match the tested base game. No code generated")
+    raise ValueError("Unsupported game version: ExeFS SHA-256 does not match the tested base game ("
+                     + main_identity(modules) + "). No code generated")
+
+
+def fallback_profile(with_update, manifest):
+    """The profile "Try anyway" builds an unknown version with: 1.0.1's addresses with an update, else the base's."""
+    for entry in json.loads(Path(manifest).read_text(encoding="utf-8"))["profiles"]:
+        if ("recomp" in entry) == with_update:
+            return entry["id"]
+    raise ValueError("No profile to try an unsupported version with")
 
 
 def profile(profile_id, manifest):
