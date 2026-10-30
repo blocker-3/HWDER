@@ -19,6 +19,7 @@ your own dump; no game code is downloaded or shipped. Runs on the system Python 
 build itself runs on the pinned Python.
 """
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -490,7 +491,8 @@ def run_build(report, tc, app, nsp, keys, update, jobs):
     process = subprocess.Popen(command, cwd=str(app), env=build_environment(tc, app), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
                                start_new_session=True)
-    failure, phase, last_tick = None, 0.02, 0.0
+    failure, phase, last_tick, in_error = None, 0.02, 0.0, False
+    hidden = collections.deque(maxlen=30)  # recent lines not shown, printed if the build fails
     phases = (("validating NSP", 0.02, "Checking your game and keys"), ("unpacking the game update", 0.03,
               "Unpacking the game update"), ("exefs:", 0.05, "Reading the game's code"), ("generated:", 0.07,
               "Translating the game's code (a few minutes)"), ("build: compiling", 0.12, "Compiling"))
@@ -506,6 +508,9 @@ def run_build(report, tc, app, nsp, keys, update, jobs):
                     report.progress(0.12 + 0.86 * done / max(total, 1), f"Compiling {done} of {total}")
                 continue
             if not line.strip() or line.startswith(("-- ", "[", "ninja:")):
+                if line.strip():
+                    hidden.append(line)
+                in_error = False
                 continue
             if line.startswith("setup: failed:"):
                 failure = line[len("setup: failed:"):].strip()
@@ -514,10 +519,20 @@ def run_build(report, tc, app, nsp, keys, update, jobs):
                     phase = fraction
                     report.end_progress()
                     report.progress(fraction, text)
-            if line.startswith("setup: ") or "error" in line.lower():
+            # CMake indents the reason under "CMake Error at ...:" (e.g. "Could NOT find Threads"): show it too.
+            if line.startswith("setup: ") or "error" in line.lower() or (in_error and line[:1].isspace()):
+                in_error = not line.startswith("setup: ")
                 report.end_progress()
                 report.log(line[len("setup: "):] if line.startswith("setup: ") else line)
+            else:
+                in_error = False
+                hidden.append(line)
         code = process.wait()
+        if code and hidden:
+            report.end_progress()
+            report.log("Last build output:")
+            for line in hidden:
+                report.log("  " + line)
     except KeyboardInterrupt:
         os.killpg(process.pid, signal.SIGINT)
         process.wait()
