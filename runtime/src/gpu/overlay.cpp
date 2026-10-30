@@ -1118,6 +1118,11 @@ static void build_ui(VkExtent2D extent) {
         ImGui::SameLine(0.0f, st.ItemSpacing.x * 1.5f);
         ImGui::SetCursorPosY(y + big - ImGui::GetTextLineHeight() - 2.0f * s);
         ImGui::TextDisabled("Hyrule Warriors: Definitive Edition");
+        // The build's version (git describe, as the setup package is named), right-aligned on the same line.
+        const char* ver = hw_version();
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(ver).x));
+        ImGui::TextDisabled("%s", ver);
     }
     ImGui::Spacing();
     const float footer = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2.0f + st.SeparatorSize + 2.0f * s;
