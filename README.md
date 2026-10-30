@@ -50,6 +50,8 @@ Windows 10/11 x64 with a Vulkan 1.2 graphics driver and an AVX2 CPU.
    [Releases](https://github.com/blocker-3/HWDER/releases) page.
 2. Extract the whole zip into a folder you will keep and open **HWDER Setup.exe**. If Windows
    says "Windows protected your PC", choose **More info > Run anyway**.
+   Some antivirus tools flag the unsigned Setup by heuristics; see
+   [Antivirus warnings](docs/antivirus.md) to check your download.
 3. Choose your game file (`.nsp`), your `prod.keys` and, if you have it, the 1.0.1 game update.
    Click **Next**.
 4. Click **Install** and confirm. Setup downloads its own private build tools (about 260 MB, no
@@ -86,6 +88,7 @@ Saves live in `~/.local/share/HWDER/save`, mods in `~/.local/share/HWDER/mods`. 
 | [Mods](docs/mods.md) | Mods folder layouts and load order |
 | [120 fps mode](docs/high-framerate.md) | How the extra frame is drawn, pacing and known limits |
 | [Windows setup](docs/windows-setup.md) | What Setup.exe does, isolation and packaging |
+| [Antivirus warnings](docs/antivirus.md) | What an antivirus may flag, how to check your download, the v0.3.0 audit |
 | [Linux release](docs/linux-release.md) and [Linux native port](docs/linux-native.md) | Linux Setup and tarball, native port build and validation |
 | [Building from source](docs/building.md) | Developer build, the recompile loop, synthetic tests |
 | [How HWDER works](docs/how-it-works.md) | The recompiler, kernel, services, GPU and shader translator; repository layout |

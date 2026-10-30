@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Antivirus warnings.** Some players saw a virus warning when downloading v0.3.0. An audit of the v0.3.0 release found nothing malicious: both packages hold exactly the tagged source, `HWDER Setup.exe` is byte-identical to an independent build of that source except for its link timestamp, the tools Setup downloads match the official files, and Microsoft Defender reports no threats. Setup is still unsigned and starts PowerShell and downloads compilers, which heuristic scanners can dislike. [Antivirus warnings](docs/antivirus.md) explains what is flagged and why, and how to check your download against the SHA-256 GitHub lists next to each file. If your antivirus flags HWDER, please report the product and the detection name.
+
 ## v0.3.0
 
 - **Linux release.** HWDER now runs natively on Linux (tested on a ROG Ally with Bazzite, Game Mode included). Download `HWDER-linux-x86_64-<version>.tar.gz`, extract it and run `hwder-setup`: a Setup window (or `hwder-setup --cli` in a terminal) picks your game, keys and update 1.0.1, downloads the pinned build tools and builds the game on your machine. No container or extra packages; it adds menu entries and a Steam shortcut. Saves live in `~/.local/share/HWDER/save`.
