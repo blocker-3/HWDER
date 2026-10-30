@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 (2026-10-30)
 
+- **Fix: the game no longer fails to start on PCs with Microsoft's Vulkan compatibility layer** (issue #2). Windows' OpenCL/OpenGL/Vulkan Compatibility Pack adds a Vulkan-on-Direct3D 12 device that HWDER cannot use; it could be picked over the real GPU driver. HWDER now skips devices without the Vulkan extensions it needs and prefers native drivers, and the error message no longer says Vulkan is missing when a device was only unusable.
+- **Fix: Linux Setup's build no longer fails at the final link** when the system has `ld.lld` on its PATH (issue #1).
+- **Version in the menus.** The startup menu and the F1 menu header show the HWDER version.
 - **Antivirus warnings.** Some players saw a virus warning when downloading v0.3.0. An audit of the v0.3.0 release found nothing malicious: both packages hold exactly the tagged source, `HWDER Setup.exe` is byte-identical to an independent build of that source except for its link timestamp, the tools Setup downloads match the official files, and Microsoft Defender reports no threats. Setup is still unsigned and starts PowerShell and downloads compilers, which heuristic scanners can dislike. [Antivirus warnings](docs/antivirus.md) explains what is flagged and why, and how to check your download against the SHA-256 GitHub lists next to each file. If your antivirus flags HWDER, please report the product and the detection name.
 
 ## v0.3.0
