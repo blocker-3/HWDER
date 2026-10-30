@@ -486,7 +486,7 @@ def run_build(report, tc, app, nsp, keys, update, jobs):
         command += ["--update", update]
     if os.environ.get("HWDER_TRY_UNSUPPORTED") == "1":
         command.append("--try-unsupported")
-    report.stage("build", "Preparing the game from your files (about 15 minutes on a ROG Ally; the first time only)")
+    report.stage("build", "Preparing the game from your files (about 15 minutes on a ROG Ally; needed again only after an HWDER update)")
     process = subprocess.Popen(command, cwd=str(app), env=build_environment(tc, app), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1,
                                start_new_session=True)
