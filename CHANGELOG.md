@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Japanese release recognised** (issue #3). Setup accepts the Japanese game (title 01002AB007FD2000). It builds if its code matches a version HWDER knows; otherwise Setup names the build so it can be reported. The game asks for Japanese text with it.
+- **Try anyway (may crash).** A Setup option (Windows: under Advanced; Linux: next to Prepare) that builds a game version HWDER does not recognise with the closest known version's layout. It works only if the code is laid out the same; otherwise the build or the game fails.
+
 ## v0.3.1 (2026-10-30)
 
 - **Fix: the game no longer fails to start on PCs with Microsoft's Vulkan compatibility layer** (issue #2). Windows' OpenCL/OpenGL/Vulkan Compatibility Pack adds a Vulkan-on-Direct3D 12 device that HWDER cannot use; it could be picked over the real GPU driver. HWDER now skips devices without the Vulkan extensions it needs and prefers native drivers, and the error message no longer says Vulkan is missing when a device was only unusable.
