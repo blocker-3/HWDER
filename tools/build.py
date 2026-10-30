@@ -142,6 +142,10 @@ def build(a):
         # Empty values clear what an earlier configure of the same build directory set.
         args += [f"-DHWDER_LINUX_DEPS={env.get('HWDER_LINUX_DEPS', '')}"]
         args += [f"-DCMAKE_{name}={env[f'HWDER_{name}']}" for name in ("AR", "RANLIB") if env.get(f"HWDER_{name}")]
+    if sys.platform.startswith("linux"):
+        # CMake 3.31 passes -Wl,--dependency-file to the link when it finds an ld.lld on PATH (Arch with lld
+        # installed), but Zig's cc driver rejects it ("unsupported linker arg"). Ninja tracks link inputs anyway.
+        args += ["-DCMAKE_LINK_DEPENDS_USE_LINKER=OFF"]
     result = subprocess.run(args, env=env)
     if result.returncode:
         return result.returncode
