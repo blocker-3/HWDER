@@ -26,7 +26,7 @@ fetch() {  # url sha256 -> path
     file="$DL/$(basename "$1")"
     if [ ! -f "$file" ] || ! echo "$2  $file" | sha256sum -c --status; then
         mkdir -p "$DL"
-        curl -sSfL --retry 3 -o "$file.part" "$1"
+        curl -sSfL --retry 5 --retry-all-errors --retry-delay 10 -o "$file.part" "$1"
         echo "$2  $file.part" | sha256sum -c --status || { echo "SHA-256 mismatch: $1" >&2; exit 1; }
         mv "$file.part" "$file"
     fi
@@ -53,7 +53,8 @@ cmake --install "$WORK/sdl" >/dev/null
 cp "$ROOT/third_party/SDL/LICENSE.txt" "$OUT/licenses/SDL-LICENSE.txt"
 
 echo "== FFmpeg $FFMPEG_VERSION (libavcodec + libavutil, H.264 decoder only, LGPL)"
-tar -xJf "$(fetch "$FFMPEG_URL" "$FFMPEG_SHA256")" -C "$WORK"
+src=$(fetch "$FFMPEG_URL" "$FFMPEG_SHA256")  # a failed fetch stops here (set -e), not in tar
+tar -xJf "$src" -C "$WORK"
 FFMPEG_CONFIGURE="--prefix=$OUT --libdir=$OUT/lib --enable-static --disable-shared --enable-pic --disable-programs \
 --disable-doc --disable-everything --enable-decoder=h264 --disable-avformat --disable-avdevice --disable-avfilter \
 --disable-swscale --disable-swresample --disable-network --disable-autodetect --disable-iconv --disable-debug \
@@ -67,7 +68,8 @@ cp "$WORK/ffmpeg-$FFMPEG_VERSION/LICENSE.md" "$OUT/licenses/FFmpeg-LICENSE.md"
 cp "$DL/ffmpeg-$FFMPEG_VERSION.tar.xz" "$OUT/sources/"
 
 echo "== OpenSSL $OPENSSL_VERSION (libcrypto only, static)"
-tar -xzf "$(fetch "$OPENSSL_URL" "$OPENSSL_SHA256")" -C "$WORK"
+src=$(fetch "$OPENSSL_URL" "$OPENSSL_SHA256")
+tar -xzf "$src" -C "$WORK"
 OPENSSL_CONFIGURE="linux-x86_64 --prefix=$OUT --libdir=lib --openssldir=/etc/ssl no-shared no-dso no-engine \
 no-module no-tests no-apps no-docs no-legacy no-ui-console -fPIC -fvisibility=hidden"
 (cd "$WORK/openssl-$OPENSSL_VERSION" && ./Configure $OPENSSL_CONFIGURE >"$WORK/openssl-configure.log" \
