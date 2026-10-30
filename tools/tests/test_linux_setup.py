@@ -215,6 +215,28 @@ class LinuxSetupTests(unittest.TestCase):
         self.assertEqual([l["type"] for l in lines], ["stage", "progress", "result"])
         self.assertEqual(lines[1]["fraction"], 1.0)
 
+    def test_failed_build_shows_the_cmake_reason_and_the_last_output(self):
+        output = ["-- Looking for pthread.h", "-- Looking for pthread.h - not found",
+                  "CMake Error at FindPackageHandleStandardArgs.cmake:233 (message):",
+                  "  Could NOT find Threads (missing: Threads_FOUND)", "Call Stack (most recent call first):",
+                  "", "setup: failed: build.py returned non-zero exit status 1."]
+
+        class Build:
+            pid = 0
+            stdout = iter(line + "\n" for line in output)
+
+            def wait(self):
+                return 1
+
+        report = Quiet()
+        with patch.object(linux_setup.subprocess, "Popen", return_value=Build()), \
+                patch.object(linux_setup, "build_environment", return_value={}):
+            with self.assertRaises(linux_setup.SetupError):
+                linux_setup.run_build(report, self.dir, self.dir, "game.nsp", "prod.keys", None, 2)
+        logged = [e["text"] for e in report.events if e["type"] == "log"]
+        self.assertIn("  Could NOT find Threads (missing: Threads_FOUND)", logged)
+        self.assertIn("  -- Looking for pthread.h - not found", logged)
+
 
 if __name__ == "__main__":
     unittest.main()
