@@ -708,7 +708,9 @@ bool init(const std::string& exe_dir, std::string& error) {
     inf.has_version = read_cnmt_version(*st, files, inf.title_id, inf.version);
     if (inf.has_version) hw_log("nsp: version %u", inf.version);
     if (inf.has_version) inf.title_source += " (matches the CNMT)";
-    if (inf.title_id != kTitleId) {
+    if (inf.title_id == kTitleIdJp) {
+        hw_log("nsp: Japanese release (title %016llX)", (unsigned long long)inf.title_id);
+    } else if (inf.title_id != kTitleId) {
         // Updates are the base ID | 0x800; add-on content is the base ID + 0x1000 + index.
         const char* what = inf.title_id == (kTitleId | 0x800) ? "an update, not the base game"
                          : (inf.title_id & ~0xFFFull) == kTitleId + 0x1000 ? "add-on content (DLC), not the base game"
@@ -762,6 +764,8 @@ bool init(const std::string& exe_dir, std::string& error) {
 }
 
 bool active() { return g_state != nullptr; }
+
+bool is_japanese() { return g_state && g_info.title_id == kTitleIdJp; }
 
 const std::string& path() {
     static std::string none;

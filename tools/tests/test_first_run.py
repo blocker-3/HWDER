@@ -707,6 +707,21 @@ class Parsers(unittest.TestCase):
             with self.assertRaises(ValueError):
                 local_game.bounded_pfs(lambda o, n: data[o:o+n], len(data))
 
+    def test_profile_matches_by_modules_for_either_title_and_names_main(self):
+        modules = {name: b"NSO0" + bytes(0x3C) + bytes(range(16)) + name.encode() for name in local_game.MODULES}
+        hashes = {name: hashlib.sha256(data).hexdigest() for name, data in modules.items()}
+        with temporary_directory() as tmp:
+            manifest = Path(tmp) / "supported.json"
+            for title in local_game.TITLE_IDS:
+                entry = {"id": "fixture", "title_id": f"{title:016x}", "modules_sha256": hashes}
+                manifest.write_text(json.dumps({"profiles": [entry]}))
+                self.assertEqual(local_game.supported_profile(modules, manifest), "fixture")
+            entry["title_id"] = "0100000000010000"
+            manifest.write_text(json.dumps({"profiles": [entry]}))
+            with self.assertRaisesRegex(ValueError, "build ID 000102030405060708090a0b0c0d0e0f, SHA-256 "
+                                        + hashes["main"]):
+                local_game.supported_profile(modules, manifest)
+
     def test_bad_marker_types_are_incomplete(self):
         with temporary_directory() as tmp:
             p = Path(tmp) / "complete.json"

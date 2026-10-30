@@ -18,7 +18,10 @@ ROOT.mkdir(parents=True, exist_ok=True)
 class Recovery(unittest.TestCase):
     def test_each_known_failure_maps_to_one_sentence_and_a_window_step(self):
         cases = {
-            "Expected exactly one base-game program for title 0100AE00096EA000; updates/bundles unsupported": ("base game", "inputs"),
+            "Expected exactly one base-game program for title 0100AE00096EA000 or 01002AB007FD2000; "
+            "updates/bundles unsupported": ("base game", "inputs"),
+            "Japanese version (title 01002AB007FD2000) is not supported yet: main build ID 00, SHA-256 00 does not "
+            "match a tested version. No code generated": ("Japanese version", "inputs"),
             "Unsupported ExeFS module set": ("supported game version", "inputs"),
             "Cannot decrypt NCA header; check your own dump and keys": ("prod.keys", "inputs"),
             "Required decryption key is missing; supply a complete own prod.keys and ticket": ("prod.keys", "inputs"),

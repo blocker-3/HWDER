@@ -35,6 +35,13 @@ from the base-game code used to validate main `1c8ee53`. No game data or keys ar
 Other versions and update bundles are rejected. NSO hashes verify supported code identity;
 they do not verify every RomFS asset or certify a dump's provenance.
 
+The Japanese release (title `01002AB007FD2000`, GitHub issue #3) is read too, but no profile covers it
+yet: unless its modules match a profile, Setup stops with "Japanese version ... is not supported yet" and
+the build ID and SHA-256 of its `main`. With a matching profile (its own symbols from
+`tools/recomp/remap_symbols.py`, as for 1.0.1) it would build; the game then asks for Japanese text
+(`GetDesiredLanguage` returns `ja`) and keeps saves in the `0100AE00096EA000` folder. Its update
+(`01002AB007FD2800`) is not read.
+
 Setup reads/decrypts the user's NSP with the project's existing `nx_extract` primitives,
 checks title/module hashes, hashes the complete NSP, then writes only those five modules to
 the private cache. It never extracts RomFS, logos or movies. It runs the existing
