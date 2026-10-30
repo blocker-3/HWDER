@@ -372,7 +372,7 @@ void validation_report() { validation_summary(true); }
 
 // A player without a working Vulkan 1.2 driver would otherwise see the game close with only a log line.
 [[noreturn]] static void no_vulkan(const char* why, const std::wstring& found = L"") {
-    std::wstring msg = L"HWDER could not start because no Vulkan 1.2 graphics driver was found.\n\n";
+    std::wstring msg = L"HWDER could not start because no graphics driver offers the Vulkan 1.2 support it needs.\n\n";
     if (!found.empty()) msg += found + L"\n\n";
     msg += L"Install the latest driver for your graphics card (NVIDIA, AMD or Intel) and try again.";
 #ifdef _WIN32
@@ -446,25 +446,50 @@ static void init_vulkan() {
     vkEnumeratePhysicalDevices(g_dev.instance, &n, nullptr);
     std::vector<VkPhysicalDevice> pds(n);
     vkEnumeratePhysicalDevices(g_dev.instance, &n, pds.data());
-    std::wstring too_old;  // best device that only offers Vulkan 1.0/1.1, named in the error
+    std::wstring unusable;  // last device that cannot run HWDER, named in the error
+    int best = -1;
     for (auto pd : pds) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(pd, &p);
+        VkPhysicalDeviceDriverProperties drv{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &drv};
+        vkGetPhysicalDeviceProperties2(pd, &p2);
+        const VkPhysicalDeviceProperties& p = p2.properties;
+        wchar_t line[400];
         if (p.apiVersion < VK_API_VERSION_1_2) {
             hw_log("vulkan: skipping %s (api %u.%u, 1.2 needed)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
                    VK_API_VERSION_MINOR(p.apiVersion));
-            wchar_t line[400];
             swprintf(line, 400, L"Found: %hs, which only offers Vulkan %u.%u.", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
                      VK_API_VERSION_MINOR(p.apiVersion));
-            too_old = line;
+            unusable = line;
             continue;
         }
-        if (!g_dev.phys || p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        u32 ne = 0;
+        vkEnumerateDeviceExtensionProperties(pd, nullptr, &ne, nullptr);
+        std::vector<VkExtensionProperties> ext(ne);
+        vkEnumerateDeviceExtensionProperties(pd, nullptr, &ne, ext.data());
+        const char* missing = nullptr;
+        for (const char* req : {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME})
+            if (!missing && !has_ext(ext, req)) missing = req;
+        if (missing) {
+            // e.g. Microsoft's Vulkan-on-D3D12 layer (Dozen), which Windows' compatibility pack installs next to
+            // the real driver and which reports the same GPU name.
+            hw_log("vulkan: skipping %s (api %u.%u, no %s)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                   VK_API_VERSION_MINOR(p.apiVersion), missing);
+            swprintf(line, 400, L"Found: %hs, which lacks %hs.", p.deviceName, missing);
+            unusable = line;
+            continue;
+        }
+        // Prefer a native driver over a translation layer, then a discrete GPU, then the newest API.
+        int score = (drv.driverID != VK_DRIVER_ID_MESA_DOZEN) * 4 + (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) * 2 +
+                    (p.apiVersion >= VK_API_VERSION_1_3);
+        hw_log("vulkan: candidate %s (api %u.%u, score %d)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+               VK_API_VERSION_MINOR(p.apiVersion), score);
+        if (score > best) {
+            best = score;
             g_dev.phys = pd;
             g_dev.props = p;
         }
     }
-    if (!g_dev.phys) no_vulkan("no Vulkan 1.2 device", too_old);
+    if (!g_dev.phys) no_vulkan("no usable Vulkan device", unusable);
     vkGetPhysicalDeviceMemoryProperties(g_dev.phys, &g_dev.mem);
     hw_log("vulkan: %s (api %u.%u)", g_dev.props.deviceName, VK_API_VERSION_MAJOR(g_dev.props.apiVersion),
            VK_API_VERSION_MINOR(g_dev.props.apiVersion));
