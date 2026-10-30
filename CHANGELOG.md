@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.2 (2026-10-30, pre-release)
 
 - **Japanese release recognised** (issue #3). Setup accepts the Japanese game (title 01002AB007FD2000). It builds if its code matches a version HWDER knows; otherwise Setup names the build so it can be reported. The game asks for Japanese text with it.
 - **Try anyway (may crash).** A Setup option (Windows: under Advanced; Linux: next to Prepare) that builds a game version HWDER does not recognise with the closest known version's layout. It works only if the code is laid out the same; otherwise the build or the game fails.
