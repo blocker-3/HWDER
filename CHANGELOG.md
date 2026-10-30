@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.3 (2026-10-30, pre-release)
+
+- **Fix: Linux Setup's build stopped at "Could NOT find OpenSSL" on the Steam Deck** (issue #1). The build looked for the system's OpenSSL for two test programs although HWDER bundles its own; SteamOS has no OpenSSL headers. The release build now uses the bundled library throughout.
+- **Linux Setup shows why a build failed.** It printed CMake's "CMake Error" line but hid the reason under it; it now shows the reason and the last build output.
+- Linux Setup no longer says the build happens "the first time only": it runs again after each HWDER update.
+- The Linux release build retries a failed download instead of stopping.
+
 ## v0.3.2 (2026-10-30, pre-release)
 
 - **Japanese release recognised** (issue #3). Setup accepts the Japanese game (title 01002AB007FD2000). It builds if its code matches a version HWDER knows; otherwise Setup names the build so it can be reported. The game asks for Japanese text with it.
