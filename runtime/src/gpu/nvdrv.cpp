@@ -1,6 +1,7 @@
 // nvdrv: the NVIDIA driver interface. Devices: nvmap, nvhost-as-gpu, nvhost-ctrl, nvhost-ctrl-gpu,
 // nvhost-gpu (channels). Video devices register themselves through nvdrv_device.h.
 #include "host/sampler.h"
+#include <algorithm>
 #include <condition_variable>
 #include <map>
 #include <mutex>
