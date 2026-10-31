@@ -60,3 +60,22 @@ because the validation environment restricts writes outside the workspace.
 No game dump, keys, generated game implementation or save was provided. Actual
 first-run generation, gameplay, live graphics/audio/input and release packaging
 were not validated. Windows was not built on this Linux host.
+
+## Follow-up with local game inputs (2026-10-31)
+
+A local base-game NSP and keys subsequently became available. Setup recognized
+`hwde-0100ae00096ea000-tested-base`, generated all five modules (83,412 guest
+functions), compiled all 751 build steps, and published a native Linux game
+executable. No game-derived files or keys are committed.
+
+On Omega, the GTX 1060's driver reports `shaderFloat16=false`. The renderer
+unconditionally requests that feature, so device creation returns
+`VK_ERROR_FEATURE_NOT_PRESENT` (-8). This is a remaining hardware compatibility
+blocker for that GPU, despite its reported Vulkan 1.4 API version.
+
+Selecting the Intel HD Graphics 530 through `VK_DRIVER_FILES` allowed startup.
+The runtime opened PipeWire audio output and presented hundreds of frames,
+with logged 300-frame windows averaging 16.67 ms and no reported fence timeouts
+or skipped draws. This establishes execution and frame presentation, not visual
+correctness, controller operation, battle performance or full gameplay validation.
+The Intel workaround does not resolve the GTX 1060 compatibility issue.
