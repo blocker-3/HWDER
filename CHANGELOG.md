@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.5 (2026-11-01)
+
+- **Linux Setup explains a damaged release instead of stopping at version.txt** (reported in #8). `version.txt` is the last file in the tarball and the last one Setup checks, so an unpack or download that did not finish, or a release unpacked over an older HWDER folder, failed there. When `release.json`'s version and commit reproduce the expected `version.txt`, Setup now rewrites it and continues. Otherwise the error names the file, the folder checked, what it found and the expected version, and says to unpack into a new, empty folder. README-LINUX now says to use a new folder for each version. `HWDER Setup.exe` is unchanged (Setup 1.0.0, the same file as in v0.3.4).
+
 ## v0.3.4 (2026-11-01)
 
 - **GTX 10-series graphics cards can start the game** (reported in #7 and #2). HWDER asked the driver for a fixed list of Vulkan features, including 16-bit float shader support, which GTX 10-series (Pascal) drivers do not offer, so the game stopped at startup with "did not accept the features HWDER needs (error -8)". HWDER now asks the card what it supports, requires only what it really uses (timeline semaphores and dynamic rendering) and turns the rest on where available. If a card lacks a required feature, the message names it instead of claiming Vulkan 1.2 is missing.
