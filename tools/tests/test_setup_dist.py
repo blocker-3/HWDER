@@ -25,7 +25,7 @@ class Package(unittest.TestCase):
             self.files["third_party/"+sub+"/LICENSE"]=b"retained upstream license fixture"
         self.kit=self.root/"base.zip"
         self.write_kit()
-        self.sources=["CMakeLists.txt","tools/build.py","tools/setup_ui/bootstrap.cpp","tools/setup_ui/steam_shortcut.h"]
+        self.sources=list(dist.SETUP_SOURCES)
         for n in self.sources:
             p=self.root/n;p.parent.mkdir(parents=True,exist_ok=True);p.write_text("public bootstrap source")
         self.exe=self.root/"bootstrap.exe";self.exe.write_bytes(b"MZsynthetic code-free fixture; never execute")
@@ -117,6 +117,18 @@ class Package(unittest.TestCase):
     def test_source_change_after_compile_refused(self):
         (self.root/self.sources[0]).write_text("changed source")
         with self.assertRaisesRegex(ValueError,"source changed"):self.package()
+
+    def test_setup_version_must_name_its_sources(self):
+        version=self.root/dist.SETUP_VERSION_FILE
+        version.write_text('#define HWDER_SETUP_VERSION "1.0.0"\n#define HWDER_SETUP_SOURCES_SHA256 "%s"\n'%dist.setup_digest(self.root))
+        self.assertEqual(dist.require_setup_version(self.root),"1.0.0")
+        # A CRLF checkout of the same sources is the same Setup.
+        rc=self.root/"tools/setup_ui/bootstrap.rc";rc.write_bytes(b"line one\nline two\n")
+        version.write_text('#define HWDER_SETUP_VERSION "1.0.0"\n#define HWDER_SETUP_SOURCES_SHA256 "%s"\n'%dist.setup_digest(self.root))
+        rc.write_bytes(b"line one\r\nline two\r\n")
+        self.assertEqual(dist.require_setup_version(self.root),"1.0.0")
+        rc.write_bytes(b"line one\nchanged\n")
+        with self.assertRaisesRegex(ValueError,"bump HWDER_SETUP_VERSION"):dist.require_setup_version(self.root)
 
 
 if __name__=="__main__":unittest.main()

@@ -25,7 +25,6 @@
 #include <cctype>
 #include <cwctype>
 #include "steam_shortcut.h"
-#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 namespace fs=std::filesystem;
 constexpr UINT Event=WM_APP+1;
@@ -192,20 +191,26 @@ void run(std::wstring action){
         auto fail=[&](const wchar_t* message){post(gen,message);};
         if(CreatePipe(&read,&write,&sa,0)&&CreatePipe(&inRead,&inWrite,&sa,0)){
             SetHandleInformation(read,HANDLE_FLAG_INHERIT,0);SetHandleInformation(inWrite,HANDLE_FLAG_INHERIT,0);
-            STARTUPINFOEXW si{};si.StartupInfo.cb=sizeof si;si.StartupInfo.dwFlags=STARTF_USESTDHANDLES;si.StartupInfo.hStdOutput=si.StartupInfo.hStdError=write;si.StartupInfo.hStdInput=inRead;
-            SIZE_T size=0;InitializeProcThreadAttributeList(nullptr,1,0,&size);std::vector<unsigned char> attrs(size);si.lpAttributeList=(LPPROC_THREAD_ATTRIBUTE_LIST)attrs.data();
-            if(InitializeProcThreadAttributeList(si.lpAttributeList,1,0,&size)){
+            // A cancellable action starts inside a kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST), so it is owned from its first instruction.
+            if(cancellable){job=CreateJobObjectW(nullptr,nullptr);JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if(job&&!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof limits)){CloseHandle(job);job=nullptr;}
+            }
+            // PowerShell's console is visible (minimized, titled) rather than hidden; its output still comes to this window.
+            STARTUPINFOEXW si{};si.StartupInfo.cb=sizeof si;si.StartupInfo.dwFlags=STARTF_USESTDHANDLES|STARTF_USESHOWWINDOW;si.StartupInfo.wShowWindow=SW_SHOWMINNOACTIVE;
+            wchar_t title[]=L"HWDER Setup - Windows PowerShell (progress is shown in HWDER Setup)";si.StartupInfo.lpTitle=title;
+            si.StartupInfo.hStdOutput=si.StartupInfo.hStdError=write;si.StartupInfo.hStdInput=inRead;
+            const DWORD count=job?2:1;SIZE_T size=0;InitializeProcThreadAttributeList(nullptr,count,0,&size);std::vector<unsigned char> attrs(size);si.lpAttributeList=(LPPROC_THREAD_ATTRIBUTE_LIST)attrs.data();
+            if(cancellable&&!job)fail(L"Could not safely own the setup process. No uncontrolled child was started.");
+            else if(InitializeProcThreadAttributeList(si.lpAttributeList,count,0,&size)){
                 HANDLE inherited[]={write,inRead};
-                if(UpdateProcThreadAttribute(si.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof inherited,nullptr,nullptr)){
+                if(UpdateProcThreadAttribute(si.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof inherited,nullptr,nullptr)&&
+                   (!job||UpdateProcThreadAttribute(si.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&job,sizeof job,nullptr,nullptr))){
                     std::wstring cmd=command;
-                    if(CreateProcessW(nullptr,cmd.data(),nullptr,nullptr,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|EXTENDED_STARTUPINFO_PRESENT,nullptr,source.c_str(),&si.StartupInfo,&pi)){
-                        if(cancellable){job=CreateJobObjectW(nullptr,nullptr);JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                            assigned=job&&SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof limits)&&AssignProcessToJobObject(job,pi.hProcess);
-                        }else assigned=true;
-                        if(assigned){std::lock_guard<std::mutex> lock(handles);currentJob=job;inputWrite=inWrite;inWrite=nullptr;if(cancelRequested&&job)TerminateJobObject(job,130);else if(ResumeThread(pi.hThread)==DWORD(-1)){if(job)TerminateJobObject(job,1);else TerminateProcess(pi.hProcess,1);fail(L"Could not resume the owned setup process.");}}
-                        else{TerminateProcess(pi.hProcess,1);fail(L"Could not safely own the setup process. No uncontrolled child was started.");}
+                    if(CreateProcessW(nullptr,cmd.data(),nullptr,nullptr,TRUE,CREATE_NEW_CONSOLE|EXTENDED_STARTUPINFO_PRESENT,nullptr,source.c_str(),&si.StartupInfo,&pi)){
+                        assigned=true;std::lock_guard<std::mutex> lock(handles);currentJob=job;inputWrite=inWrite;inWrite=nullptr;if(cancelRequested&&job)TerminateJobObject(job,130);
                     }else fail(L"Could not start Windows PowerShell. See Details or check Windows system tools.");
-                }DeleteProcThreadAttributeList(si.lpAttributeList);
+                }else fail(L"Could not safely own the setup process. No uncontrolled child was started.");
+                DeleteProcThreadAttributeList(si.lpAttributeList);
             }
         }else fail(L"Could not create setup communication pipes.");
         if(write){CloseHandle(write);write=nullptr;}if(inRead){CloseHandle(inRead);inRead=nullptr;}
@@ -463,7 +468,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int){
     std::wstring chosen=demo?std::wstring():readJson(prefsPath());
     if(selected.empty()){auto remembered=field(chosen,L"data");std::error_code e;if(!remembered.empty()&&fs::is_directory(fs::path(remembered),e))selected=remembered;}
     if(selected.empty()){PWSTR local=nullptr;SHGetKnownFolderPath(FOLDERID_LocalAppData,KF_FLAG_DEFAULT,nullptr,&local);selected=(fs::path(local)/L"HWDER").wstring();CoTaskMemFree(local);}
-    WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"HWDERSetupPrototype";cls.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);cls.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&cls);
+    WNDCLASSW cls{};cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.lpszClassName=L"HWDERSetupPrototype";cls.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);cls.hCursor=LoadCursor(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));RegisterClassW(&cls);
     window=CreateWindowW(cls.lpszClassName,demo?L"HWDER Setup \u2014 Preview (no game or installs)":L"HWDER Setup",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,Width,400,nullptr,nullptr,instance,nullptr);SetWindowTextW(dataBox,selected.c_str());
     auto inputs=readJson(fs::path(selected)/L"setup-inputs.json"),prefs=demo?std::wstring():readJson(fs::path(selected)/L"setup-prefs.json");auto nsp=field(inputs,L"nsp"),keys=field(inputs,L"keys");if(nsp.empty())nsp=field(prefs,L"nsp");if(keys.empty())keys=field(prefs,L"keys");SetWindowTextW(gameBox,nsp.c_str());SetWindowTextW(keyBox,keys.c_str());
     auto update=field(field(inputs,L"nsp").empty()?prefs:inputs,L"update");SetWindowTextW(updateBox,update.c_str()); // a prepared game without an update keeps the field empty

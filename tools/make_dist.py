@@ -18,7 +18,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 TOP_FILES = {"CMakeLists.txt", "LICENSE", "README.md", "play-local.sh", "third_party/README.md"}
 SUBMODULES = ("SDL", "imgui", "spirv-headers", "vulkan-headers")
-SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp"}
+SOURCE_SUFFIXES = {".py", ".txt", ".json", ".cmake", ".c", ".cpp", ".h", ".hpp", ".inc", ".md", ".comp",
+                   ".rc", ".manifest", ".ico"}
 PUBLIC_SCRIPTS = {"tools/setup_ui/install_private_python.ps1"}
 THIRD_PARTY_SOURCE_SUFFIXES = SOURCE_SUFFIXES | {".in", ".def", ".rc", ".s", ".asm", ".m", ".mm",
                                               ".metal", ".glsl", ".vert", ".frag", ".xml", ".natvis",

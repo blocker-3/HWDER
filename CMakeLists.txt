@@ -28,11 +28,19 @@ if(HWDER_SETUP_UI_ONLY)
     if(NOT WIN32)
         message(FATAL_ERROR "The native setup window currently requires Windows")
     endif()
-    add_executable(hwder_setup WIN32 tools/setup_ui/bootstrap.cpp)
+    # Icon, manifest and version information: an exe without them looks like a dropper to antivirus heuristics.
+    add_executable(hwder_setup WIN32 tools/setup_ui/bootstrap.cpp tools/setup_ui/bootstrap.rc)
+    set_source_files_properties(tools/setup_ui/bootstrap.rc PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_SOURCE_DIR}/tools/setup_ui/setup_version.h;${CMAKE_SOURCE_DIR}/tools/setup_ui/bootstrap.manifest;${CMAKE_SOURCE_DIR}/tools/setup_ui/hwder.ico")
     target_compile_definitions(hwder_setup PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(hwder_setup PRIVATE comctl32 comdlg32 shell32 ole32 uuid advapi32 user32 gdi32 winhttp)
     if(MINGW)
-        target_link_options(hwder_setup PRIVATE -municode -static "-Wl,-Map,${CMAKE_BINARY_DIR}/setup-ui-link.map")
+        # -s: no symbol table or DWARF. No link timestamp: unchanged sources give the same file in
+        # every release, so antivirus reputation earned by one Setup carries over (setup_version.h).
+        target_link_options(hwder_setup PRIVATE -municode -static -s -Wl,--no-insert-timestamp
+                            "-Wl,-Map,${CMAKE_BINARY_DIR}/setup-ui-link.map")
+    elseif(MSVC)
+        target_link_options(hwder_setup PRIVATE /MANIFEST:NO /Brepro)  # bootstrap.rc embeds the manifest
     endif()
     set_target_properties(hwder_setup PROPERTIES OUTPUT_NAME "HWDER Setup")
     return()

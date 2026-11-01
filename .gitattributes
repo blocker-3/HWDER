@@ -1,3 +1,6 @@
 *.bat text eol=crlf
 *.sh text eol=lf
 tools/linux/hwder-setup text eol=lf
+*.ico binary
+# Embedded byte for byte in HWDER Setup.exe: one line ending on every checkout keeps the exe identical.
+tools/setup_ui/bootstrap.manifest text eol=lf
