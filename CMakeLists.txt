@@ -28,11 +28,26 @@ if(HWDER_SETUP_UI_ONLY)
     if(NOT WIN32)
         message(FATAL_ERROR "The native setup window currently requires Windows")
     endif()
-    add_executable(hwder_setup WIN32 tools/setup_ui/bootstrap.cpp)
+    # Version stamp for the Setup's Windows version resource (bootstrap.rc).
+    set(HW_VERSION_DIR ${CMAKE_BINARY_DIR}/version)
+    add_custom_target(hwder_version
+        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${HW_VERSION_DIR}/hwder_version.h
+                "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}" -P ${CMAKE_SOURCE_DIR}/tools/version.cmake
+        BYPRODUCTS ${HW_VERSION_DIR}/hwder_version.h
+        COMMENT "Stamping version")
+    # Icon, manifest and version information: an exe without them looks like a dropper to antivirus heuristics.
+    add_executable(hwder_setup WIN32 tools/setup_ui/bootstrap.cpp tools/setup_ui/bootstrap.rc)
+    set_source_files_properties(tools/setup_ui/bootstrap.rc PROPERTIES OBJECT_DEPENDS
+        "${HW_VERSION_DIR}/hwder_version.h;${CMAKE_SOURCE_DIR}/tools/setup_ui/bootstrap.manifest;${CMAKE_SOURCE_DIR}/tools/setup_ui/hwder.ico")
+    add_dependencies(hwder_setup hwder_version)
+    target_include_directories(hwder_setup PRIVATE ${HW_VERSION_DIR})
     target_compile_definitions(hwder_setup PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(hwder_setup PRIVATE comctl32 comdlg32 shell32 ole32 uuid advapi32 user32 gdi32 winhttp)
     if(MINGW)
-        target_link_options(hwder_setup PRIVATE -municode -static "-Wl,-Map,${CMAKE_BINARY_DIR}/setup-ui-link.map")
+        # -s: no symbol table or DWARF in the shipped exe.
+        target_link_options(hwder_setup PRIVATE -municode -static -s "-Wl,-Map,${CMAKE_BINARY_DIR}/setup-ui-link.map")
+    elseif(MSVC)
+        target_link_options(hwder_setup PRIVATE /MANIFEST:NO)  # bootstrap.rc embeds the manifest
     endif()
     set_target_properties(hwder_setup PROPERTIES OUTPUT_NAME "HWDER Setup")
     return()

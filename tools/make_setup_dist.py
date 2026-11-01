@@ -29,6 +29,10 @@ def digest(data):
 
 
 BASELINE = "tools/kit_baseline.txt"
+# Everything HWDER Setup.exe is built from; its certificate pins each file's SHA-256.
+SETUP_SOURCES = ("CMakeLists.txt", "tools/build.py", "tools/version.cmake", "tools/setup_ui/bootstrap.cpp",
+                 "tools/setup_ui/bootstrap.rc", "tools/setup_ui/bootstrap.manifest", "tools/setup_ui/hwder.ico",
+                 "tools/setup_ui/steam_shortcut.h")
 PROJECT_ROOTS = ("runtime", "tools", "docs")
 
 
@@ -99,8 +103,7 @@ def assemble(source_kit, bootstrap, certificate, root, target, tracked=make_dist
     data = bootstrap.read_bytes()
     if cert.get("kind") != "HWDER-codefree-setup-v1" or cert.get("exe_sha256") != digest(data) or not data.startswith(b"MZ"):
         raise ValueError("Only the reviewed code-free bootstrap certificate is accepted")
-    expected = {"CMakeLists.txt", "tools/build.py", "tools/setup_ui/bootstrap.cpp", "tools/setup_ui/steam_shortcut.h"}
-    if set(cert.get("source_sha256", {})) != expected:
+    if set(cert.get("source_sha256", {})) != set(SETUP_SOURCES):
         raise ValueError("Incomplete bootstrap source certification")
     for name, sha in cert["source_sha256"].items():
         if digest((root/name).read_bytes()) != sha:

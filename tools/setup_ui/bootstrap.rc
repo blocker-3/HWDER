@@ -1,0 +1,37 @@
+// HWDER Setup.exe resources: icon, application manifest and the version information Explorer
+// shows under Properties > Details. hwder_version.h comes from tools/version.cmake.
+#include <winver.h>
+#include "hwder_version.h"
+
+1 ICON "hwder.ico"
+1 24 "bootstrap.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION HWDER_VERSION_MAJOR,HWDER_VERSION_MINOR,HWDER_VERSION_PATCH,HWDER_VERSION_BUILD
+PRODUCTVERSION HWDER_VERSION_MAJOR,HWDER_VERSION_MINOR,HWDER_VERSION_PATCH,HWDER_VERSION_BUILD
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "HWDER project"
+            VALUE "FileDescription", "HWDER Setup"
+            VALUE "FileVersion", HWDER_VERSION
+            VALUE "InternalName", "HWDER Setup"
+            VALUE "LegalCopyright", "HWDER contributors. MIT License."
+            VALUE "OriginalFilename", "HWDER Setup.exe"
+            VALUE "ProductName", "HWDER"
+            VALUE "ProductVersion", HWDER_VERSION
+            VALUE "Comments", "Sets up HWDER from your own game dump. https://github.com/blocker-3/HWDER"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -90,5 +90,39 @@ def inspect(path):
             raise ValueError("Unterminated PE delay import table")
     characteristics, = struct.unpack_from("<H", data, optional+70)
     stack, = struct.unpack_from("<Q", data, optional+72)
+    resource_types=[]
+    resource_rva, _=struct.unpack_from("<II", data, optional+112+2*8)
+    if resource_rva:
+        at=offset(resource_rva)
+        named, ids=struct.unpack_from("<HH", data, at+12)
+        for i in range(min(named+ids,64)):
+            name, _=struct.unpack_from("<II", data, at+16+i*8)
+            resource_types.append(name if not name & 0x80000000 else -1)
+    symbols, = struct.unpack_from("<I", data, pe+12)
+    section_names=[]
+    for i in range(sections):
+        raw_name=data[table+i*40:table+i*40+8].rstrip(b"\0").decode("ascii", "replace")
+        section_names.append(raw_name)
     return {"imports": sorted(set(imports)), "delay_imports":sorted(set(delay)),
-            "stack_reserve":stack, "dynamic_base":bool(characteristics & 0x40), "machine":"amd64"}
+            "stack_reserve":stack, "dynamic_base":bool(characteristics & 0x40), "machine":"amd64",
+            "resource_types":sorted(resource_types), "sections":section_names, "symbol_table":bool(symbols)}
+
+
+VERSION_STRINGS = {"CompanyName": "HWDER project", "ProductName": "HWDER", "FileDescription": "HWDER Setup",
+                   "OriginalFilename": "HWDER Setup.exe"}
+
+
+def setup_identity_problems(path):
+    """What HWDER Setup.exe lacks of its icon, manifest, version information and stripped symbols."""
+    record = inspect(path)
+    data = Path(path).read_bytes()
+    problems = [f"no {kind} resource" for kind, rt in (("icon", 14), ("version", 16), ("manifest", 24))
+                if rt not in record["resource_types"]]
+    for key, value in VERSION_STRINGS.items():
+        if (key + "\0").encode("utf-16-le") not in data or (value + "\0").encode("utf-16-le") not in data:
+            problems.append(f"version string {key} is not {value!r}")
+    if b"asInvoker" not in data:
+        problems.append("manifest lacks requestedExecutionLevel asInvoker")
+    if record["symbol_table"] or any(n.startswith((".debug", "/")) for n in record["sections"]):
+        problems.append("symbols or debug sections not stripped")
+    return problems

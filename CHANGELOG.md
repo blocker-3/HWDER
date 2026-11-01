@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fewer antivirus false positives for `HWDER Setup.exe`** (Microsoft Defender flagged v0.3.3 as `Trojan:Win32/Wacatac.B!ml`). Setup now has an icon, an application manifest and version information, ships without debug symbols (2.1 MB down to 1.2 MB), and no longer starts PowerShell hidden or suspended: its console is visible, minimized. Releases attach a `SHA256SUMS` file. [docs/antivirus.md](docs/antivirus.md) explains the detection and how to restore Setup.
+
 ## v0.3.3 (2026-10-30, pre-release)
 
 - **Fix: Linux Setup's build stopped at "Could NOT find OpenSSL" on the Steam Deck** (issue #1). The build looked for the system's OpenSSL for two test programs although HWDER bundles its own; SteamOS has no OpenSSL headers. The release build now uses the bundled library throughout.

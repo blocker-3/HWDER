@@ -137,6 +137,9 @@ def build(a):
         import managed_tools
         args += [f"-DPython3_EXECUTABLE={managed_tools.paths(managed)['python']}",
                  "-DPython3_FIND_REGISTRY=NEVER"]
+    git = shutil.which("git")  # the private toolchain PATH has no git; the version stamp needs it
+    if git:
+        args += [f"-DGIT_EXECUTABLE={git}"]
     if sys.platform.startswith("linux") and not (a.synthetic_tests or a.host_tests):
         # Linux release toolchain (tools/linux_setup.py): Zig's archiver and the prebuilt static libraries.
         # Empty values clear what an earlier configure of the same build directory set.

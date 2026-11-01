@@ -88,6 +88,11 @@ jobs:
         with:
           name: hwder-linux
           path: dist
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum *.zip *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
       - name: Attach to a draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,8 +100,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.zip dist/*.tar.gz
+            gh release upload "$TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS
           else
-            gh release create "$TAG" dist/*.zip dist/*.tar.gz --draft --verify-tag \
-              --title "HWDER $TAG" --notes "Draft built by GitHub Actions; GitHub lists each asset's SHA-256."
+            notes="Draft built by GitHub Actions. SHA-256 of each download (also in SHA256SUMS):"
+            notes+=$'\n\n```\n'"$(cat dist/SHA256SUMS)"$'\n```\n\n'
+            notes+="If your antivirus flags HWDER Setup.exe, see docs/antivirus.md."
+            gh release create "$TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS --draft --verify-tag \
+              --title "HWDER $TAG" --notes "$notes"
           fi
