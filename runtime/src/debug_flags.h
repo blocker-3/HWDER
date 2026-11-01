@@ -53,6 +53,7 @@ enum Id {
     IpcTrace,  // HWDER_IPC_TRACE
     Keys,  // HWDER_KEYS
     Log,  // HWDER_LOG
+    MaskFeatures,  // HWDER_MASK_FEATURES
     Mods,  // HWDER_MODS
     Mute,  // HWDER_MUTE
     NoMods,  // HWDER_NO_MODS

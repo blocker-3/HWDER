@@ -49,6 +49,7 @@ static const Flag kTable[] = {
     {IpcTrace, "HWDER_IPC_TRACE", "Service call (IPC) trace, including Control requests.", kPresence},
     {Keys, "HWDER_KEYS", "prod.keys path (the loader reads it as a wide string; the startup screen only notes that it is set).", kPresence},
     {Log, "HWDER_LOG", "Log file path (set by test launchers); when set the window opens minimized unless HWDER_SHOW is set.", kPresence},
+    {MaskFeatures, "HWDER_MASK_FEATURES", "Test: comma-separated Vulkan 1.1-1.3 feature names (e.g. shaderFloat16) the GPU is treated as not offering, to exercise the device feature checks.", kString},
     {Mods, "HWDER_MODS", "Mods folder to use instead of the one in the settings or the default (read as a path; see fs/mods.h).", kString},
     {Mute, "HWDER_MUTE", "No audio output; also: no message boxes, and with HWDER_OFFSCREEN marks an automated run.", kPresence},
     {NoMods, "HWDER_NO_MODS", "Load no mods from the mods folder (the game RomFS is passed through untouched).", kNonzero},
