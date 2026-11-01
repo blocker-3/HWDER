@@ -63,6 +63,7 @@ current values. Kinds:
 | `HWDER_LOG` | presence | off | Log file path (set by test launchers); when set the window opens minimized unless HWDER_SHOW is set. |
 | `HWDER_MODS` | string | unset | Mods folder to use instead of the one in the settings or the default (read as a path; see fs/mods.h). |
 | `HWDER_MUTE` | presence | off | No audio output; also: no message boxes, and with HWDER_OFFSCREEN marks an automated run. |
+| `HWDER_NO_FAST_CLEAR` | presence | off | Renderer: clear whole colour targets with vkCmdClearAttachments instead of a load-op fast clear (always on for Intel GPUs, whose driver crashed in it, issue #6). |
 | `HWDER_NO_MODS` | nonzero | off | Load no mods from the mods folder (the game RomFS is passed through untouched). |
 | `HWDER_NO_PRELAUNCH` | presence | off | Skip the startup screen. |
 | `HWDER_NSP` | presence | off | Game NSP path (read as a wide string by the loader; the startup screen only notes that it is set). |

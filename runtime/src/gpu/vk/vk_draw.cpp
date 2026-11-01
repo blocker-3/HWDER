@@ -1111,10 +1111,21 @@ void VkRenderer::do_clear(const u32* regs, u32 v) {
     // layout: the driver's fast clear (metadata only), which images in GENERAL layout never get. The game's full-
     // screen G-buffer and effect clears were ~0.6 ms of GPU time per frame at the busy spot. (Depth clears gained
     // nothing this way and stay as they are.)
-    if (att.size() == 1 && att[0].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
+    // Not on Intel: the UHD 620 (Gen9) driver crashed inside vkCmdBeginRendering of this clear on every driver
+    // tried, the first full-screen clear after Legend Mode's opening movie (issue #6). Nor when the target's format
+    // cannot be a colour attachment (texture_cache.cpp gives such images the usage anyway, for storage/blits), or
+    // with HWDER_NO_FAST_CLEAR (comparison).
+    static const bool fast_clears = [] {
+        const bool intel = display::device().props.vendorID == 0x8086;
+        const bool off = debug::flag(debug::NoFastClear);
+        if (intel || off) hw_log("vk: fast colour clears off (%s)", intel ? "Intel GPU" : "HWDER_NO_FAST_CLEAR");
+        return !intel && !off;
+    }();
+    if (fast_clears && att.size() == 1 && att[0].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT) {
         const Image* img = fb.color[rt];
         if (img && img->info.levels == 1 && img->info.layers == 1 && img->info.type == ImageType::e2D && r.rect.offset.x == 0 &&
-            r.rect.offset.y == 0 && r.rect.extent.width == img->level_width(0) && r.rect.extent.height == img->level_height(0)) {
+            r.rect.offset.y == 0 && r.rect.extent.width == img->level_width(0) && r.rect.extent.height == img->level_height(0) &&
+            (format_features(fb.color_format[rt]) & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
             fast_clear_color(fb.color[rt], fb.color_view[rt], att[0].clearValue.color);
             gputime::count_clear();
             return;
