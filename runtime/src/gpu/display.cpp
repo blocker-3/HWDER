@@ -288,6 +288,73 @@ static bool has_ext(const std::vector<VkExtensionProperties>& v, const char* n) 
     return false;
 }
 
+// The Vulkan 1.1-1.3 features HWDER asks for. A device without a required one is skipped; the others are enabled
+// only where the driver offers them. Asking for one a driver lacks fails vkCreateDevice with
+// VK_ERROR_FEATURE_NOT_PRESENT: GTX 10-series drivers have no shaderFloat16 (issues #2, #7). The translated
+// shaders use none of the optional ones today; they stay enabled where offered, as before.
+struct DeviceFeatures {
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    DeviceFeatures() = default;
+    DeviceFeatures(const DeviceFeatures&) = delete;  // the pNext chain points into the object
+    // The 1.3 struct only on a 1.3 device; without it a 1.2 device reports dynamicRendering as missing.
+    VkPhysicalDeviceFeatures2* chain(bool vk13) {
+        f2.pNext = &f11;
+        f11.pNext = &f12;
+        f12.pNext = vk13 ? &f13 : nullptr;
+        f13.pNext = nullptr;
+        return &f2;
+    }
+};
+struct DeviceFeature {
+    const char* name;
+    bool required;
+    VkBool32* (*at)(DeviceFeatures&);
+};
+static const DeviceFeature kDeviceFeatures[] = {
+    {"timelineSemaphore", true, [](DeviceFeatures& f) { return &f.f12.timelineSemaphore; }},
+    {"dynamicRendering", true, [](DeviceFeatures& f) { return &f.f13.dynamicRendering; }},
+    {"synchronization2", false, [](DeviceFeatures& f) { return &f.f13.synchronization2; }},
+    {"maintenance4", false, [](DeviceFeatures& f) { return &f.f13.maintenance4; }},
+    {"shaderInt8", false, [](DeviceFeatures& f) { return &f.f12.shaderInt8; }},
+    {"storageBuffer8BitAccess", false, [](DeviceFeatures& f) { return &f.f12.storageBuffer8BitAccess; }},
+    {"uniformAndStorageBuffer8BitAccess", false, [](DeviceFeatures& f) { return &f.f12.uniformAndStorageBuffer8BitAccess; }},
+    {"scalarBlockLayout", false, [](DeviceFeatures& f) { return &f.f12.scalarBlockLayout; }},
+    {"shaderFloat16", false, [](DeviceFeatures& f) { return &f.f12.shaderFloat16; }},
+    {"storageBuffer16BitAccess", false, [](DeviceFeatures& f) { return &f.f11.storageBuffer16BitAccess; }},
+    {"uniformAndStorageBuffer16BitAccess", false, [](DeviceFeatures& f) { return &f.f11.uniformAndStorageBuffer16BitAccess; }},
+    {"shaderDrawParameters", false, [](DeviceFeatures& f) { return &f.f11.shaderDrawParameters; }},
+};
+
+// HWDER_MASK_FEATURES: "shaderFloat16,storageBuffer8BitAccess" -> treated as not offered (tests the checks above).
+static bool feature_masked(const char* name) {
+    const char* m = debug::str(debug::MaskFeatures);
+    if (!m) return false;
+    const size_t n = strlen(name);
+    for (const char* p = m; *p;) {
+        const char* end = strchr(p, ',');
+        const size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && !strncmp(p, name, n)) return true;
+        if (!end) break;
+        p = end + 1;
+    }
+    return false;
+}
+
+static void query_features(VkPhysicalDevice pd, u32 api, DeviceFeatures& have) {
+    vkGetPhysicalDeviceFeatures2(pd, have.chain(api >= VK_API_VERSION_1_3));
+    for (const DeviceFeature& f : kDeviceFeatures)
+        if (*f.at(have) && feature_masked(f.name)) *f.at(have) = VK_FALSE;
+}
+
+static const char* missing_required(DeviceFeatures& have) {
+    for (const DeviceFeature& f : kDeviceFeatures)
+        if (f.required && !*f.at(have)) return f.name;
+    return nullptr;
+}
+
 static void create_swapchain() {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_dev.phys, g_surface, &caps);
@@ -370,9 +437,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL validation_callback(VkDebugUtilsMessageSev
 }
 void validation_report() { validation_summary(true); }
 
-// A player without a working Vulkan 1.2 driver would otherwise see the game close with only a log line.
+// A player without a usable Vulkan driver would otherwise see the game close with only a log line. `found` names
+// what the best device lacked (API version, extension or feature), so the text does not claim Vulkan is missing.
 [[noreturn]] static void no_vulkan(const char* why, const std::wstring& found = L"") {
-    std::wstring msg = L"HWDER could not start because no graphics driver offers the Vulkan 1.2 support it needs.\n\n";
+    std::wstring msg = L"HWDER could not start because no graphics driver offers the Vulkan support it needs.\n\n";
     if (!found.empty()) msg += found + L"\n\n";
     msg += L"Install the latest driver for your graphics card (NVIDIA, AMD or Intel) and try again.";
 #ifdef _WIN32
@@ -478,6 +546,15 @@ static void init_vulkan() {
             unusable = line;
             continue;
         }
+        DeviceFeatures have;
+        query_features(pd, p.apiVersion, have);
+        if (const char* feature = missing_required(have)) {
+            hw_log("vulkan: skipping %s (api %u.%u, no %s)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                   VK_API_VERSION_MINOR(p.apiVersion), feature);
+            swprintf(line, 400, L"Found: %hs, which lacks the Vulkan feature %hs.", p.deviceName, feature);
+            unusable = line;
+            continue;
+        }
         // Prefer a native driver over a translation layer, then a discrete GPU, then the newest API.
         int score = (drv.driverID != VK_DRIVER_ID_MESA_DOZEN) * 4 + (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) * 2 +
                     (p.apiVersion >= VK_API_VERSION_1_3);
@@ -531,35 +608,29 @@ static void init_vulkan() {
     qci.queueFamilyIndex = g_dev.queue_family;
     qci.queueCount = qcount;
     qci.pQueuePriorities = prio;
-    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-    f13.dynamicRendering = VK_TRUE;
-    f13.synchronization2 = VK_TRUE;
-    f13.maintenance4 = VK_TRUE;
-    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &f13};
-    f12.shaderInt8 = VK_TRUE;
-    f12.storageBuffer8BitAccess = VK_TRUE;
-    f12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
-    f12.scalarBlockLayout = VK_TRUE;
-    f12.shaderFloat16 = VK_TRUE;
-    f12.timelineSemaphore = VK_TRUE;
-    VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &f12};
-    f11.storageBuffer16BitAccess = VK_TRUE;
-    f11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
-    f11.shaderDrawParameters = VK_TRUE;
-    VkPhysicalDeviceFeatures2 feat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f11};
-    VkPhysicalDeviceFeatures2 avail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    vkGetPhysicalDeviceFeatures2(g_dev.phys, &avail);
-    feat.features = avail.features;
-    feat.features.robustBufferAccess = VK_FALSE;
-    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &feat};
+    const bool vk13 = g_dev.props.apiVersion >= VK_API_VERSION_1_3;  // always true: dynamicRendering is required
+    DeviceFeatures have, want;
+    query_features(g_dev.phys, g_dev.props.apiVersion, have);
+    VkPhysicalDeviceFeatures2* feat = want.chain(vk13);
+    std::string enabled, off;
+    for (const DeviceFeature& f : kDeviceFeatures) {
+        std::string& list = *f.at(have) ? enabled : off;
+        if (*f.at(have)) *f.at(want) = VK_TRUE;
+        list += (list.empty() ? "" : " ") + std::string(f.name);
+    }
+    hw_log("vulkan: features %s", enabled.c_str());
+    if (!off.empty()) hw_log("vulkan: optional features not offered (left off): %s", off.c_str());
+    feat->features = have.f2.features;
+    feat->features.robustBufferAccess = VK_FALSE;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, feat};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = (u32)dev_ext.size();
     dci.ppEnabledExtensionNames = dev_ext.data();
     if (VkResult r = vkCreateDevice(g_dev.phys, &dci, nullptr, &g_dev.dev); r != VK_SUCCESS) {
-        hw_log("vkCreateDevice failed: %d", (int)r);
+        hw_log("vkCreateDevice failed: %d (features asked for: %s)", (int)r, enabled.c_str());
         wchar_t line[400];
-        swprintf(line, 400, L"%hs did not accept the features HWDER needs (error %d).", g_dev.props.deviceName, (int)r);
+        swprintf(line, 400, L"%hs did not accept the Vulkan features HWDER asked for (error %d).", g_dev.props.deviceName, (int)r);
         no_vulkan("vkCreateDevice failed", line);
     }
     hw_vk_load_device(g_dev.dev);

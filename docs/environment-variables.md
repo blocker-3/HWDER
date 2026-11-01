@@ -61,6 +61,7 @@ current values. Kinds:
 | `HWDER_IPC_TRACE` | presence | off | Service call (IPC) trace, including Control requests. |
 | `HWDER_KEYS` | presence | off | prod.keys path (the loader reads it as a wide string; the startup screen only notes that it is set). |
 | `HWDER_LOG` | presence | off | Log file path (set by test launchers); when set the window opens minimized unless HWDER_SHOW is set. |
+| `HWDER_MASK_FEATURES` | string | unset | Test: comma-separated Vulkan 1.1-1.3 feature names (e.g. shaderFloat16) the GPU is treated as not offering, to exercise the device feature checks. |
 | `HWDER_MODS` | string | unset | Mods folder to use instead of the one in the settings or the default (read as a path; see fs/mods.h). |
 | `HWDER_MUTE` | presence | off | No audio output; also: no message boxes, and with HWDER_OFFSCREEN marks an automated run. |
 | `HWDER_NO_MODS` | nonzero | off | Load no mods from the mods folder (the game RomFS is passed through untouched). |
