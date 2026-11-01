@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.3.4 (2026-11-01)
 
+- **GTX 10-series graphics cards can start the game** (reported in #7 and #2). HWDER asked the driver for a fixed list of Vulkan features, including 16-bit float shader support, which GTX 10-series (Pascal) drivers do not offer, so the game stopped at startup with "did not accept the features HWDER needs (error -8)". HWDER now asks the card what it supports, requires only what it really uses (timeline semaphores and dynamic rendering) and turns the rest on where available. If a card lacks a required feature, the message names it instead of claiming Vulkan 1.2 is missing.
+- **Intel UHD 620 crash after Legend Mode's first movie worked around** (reported in #6). The Intel driver crashed in the renderer's fast colour clear on every driver version tried. HWDER now clears with the regular path on Intel GPUs (and on any GPU when the target's format cannot be drawn to). Other GPUs keep the fast clear.
+- New debug switches for testing these: `HWDER_MASK_FEATURES` (treat named Vulkan features as missing) and `HWDER_NO_FAST_CLEAR` (use the regular clear on any GPU). See [docs/environment-variables.md](docs/environment-variables.md).
 - **Fewer antivirus false positives for `HWDER Setup.exe`** (Microsoft Defender flagged v0.3.3 as `Trojan:Win32/Wacatac.B!ml`). Setup now has an icon, an application manifest and version information, ships without debug symbols (2.1 MB down to 1.2 MB), and no longer starts PowerShell hidden or suspended: its console is visible, minimized. Setup is now built reproducibly with its own version (1.0.0), so an unchanged Setup is the identical file in every release and keeps any antivirus reputation it has earned. Releases attach a `SHA256SUMS` file. [docs/antivirus.md](docs/antivirus.md) explains the detection and how to restore Setup.
 
 ## v0.3.3 (2026-10-30, pre-release)
