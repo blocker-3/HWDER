@@ -14,7 +14,8 @@ installed on the system and no container is used.
 
 Install
 -------
-1. Unpack this folder anywhere (for example in Downloads).
+1. Unpack this folder anywhere (for example in Downloads). Use a new folder for each version, not the folder of
+   an older HWDER.
 2. Double-click "hwder-setup" (in a file manager choose "Execute" / "Run"), or run ./hwder-setup in a terminal.
    The HWDER Setup window opens. It works with a mouse, touch screen or controller.
 3. Choose your game .nsp, prod.keys and, if you have it, the update. Then "Prepare the game".

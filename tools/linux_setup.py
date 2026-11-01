@@ -165,6 +165,38 @@ def file_sha256(path):
     return h.hexdigest()
 
 
+def restore_version_stamp(info, destination):
+    """version.txt is "<version>\\n<commit>\\n" from release.json (tools/linux/package_release.py). It is the last file
+    in the tarball, so an extraction that stopped early, or one over an older folder, leaves it short or stale while
+    everything before it checks out. Rewrites it only when release.json reproduces the listed hash exactly."""
+    stamp = f"{info.get('version', '')}\n{info.get('commit', '')}\n".encode()
+    if hashlib.sha256(stamp).hexdigest() != info["files"]["version.txt"]:
+        return False
+    destination.write_bytes(stamp)
+    return True
+
+
+def describe_mismatch(name, source):
+    found = f"{source.stat().st_size} bytes"
+    if name == "version.txt":
+        first = source.read_bytes()[:200].decode("utf-8", "replace").splitlines()
+        found += f", says {first[0].strip()!r}" if first else ", empty"
+    return f"its content differs ({found})"
+
+
+def raise_damaged(report, info, name, source, why):
+    """Says which file, where, what was expected, and the usual cause: two releases mixed in one folder, or an
+    extraction or download that did not finish."""
+    report.log(f"Checked {source}: {why}.")
+    report.log(f"Expected the {info.get('version', '?')} file listed in {ROOT / 'release.json'} "
+               f"(SHA-256 {info['files'][name][:16]}...).")
+    report.log("Usual cause: a newer release unpacked over an older HWDER folder, or an unpack or download that did "
+               "not finish.")
+    raise SetupError(f"The release folder is incomplete or mixed ({name}: {why}).\n"
+                     f"Unpack HWDER {info.get('version', '')} into a new, empty folder and run hwder-setup from there. "
+                     f"Checked: {ROOT}")
+
+
 def install_app(report):
     """Copies this release into data/app (verified against its release.json), unless it already runs from there or
     from a source checkout. Returns the folder the build uses."""
@@ -187,10 +219,16 @@ def install_app(report):
     for i, name in enumerate(names):
         source, destination = ROOT / name, staging / name
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if not source.is_file():
+            shutil.rmtree(staging, ignore_errors=True)
+            raise_damaged(report, info, name, source, "the file is missing")
         shutil.copy2(source, destination)
         if file_sha256(destination) != info["files"][name]:
+            if name == "version.txt" and restore_version_stamp(info, destination):
+                report.log(f"{source} did not match release.json; rewrote it from release.json ({info['version']})")
+                continue
             shutil.rmtree(staging, ignore_errors=True)
-            raise SetupError(f"The release is damaged ({name} does not match). Download and unpack it again.")
+            raise_damaged(report, info, name, source, describe_mismatch(name, source))
         if i % 200 == 0:
             report.progress(i / len(names), f"copying {i}/{len(names)} files")
     shutil.copy2(ROOT / "release.json", staging / "release.json")

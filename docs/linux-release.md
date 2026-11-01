@@ -13,7 +13,7 @@ Vulkan driver).
 | `setup/hwder-setup-ui` | The Setup window (SDL3 + Dear ImGui, `tools/linux/setup_ui`). Needs only glibc; SDL loads X11/Wayland/OpenGL itself. Code-free: it runs `tools/linux_setup.py --json`. |
 | `linux-deps/` | Static SDL3, libavcodec/libavutil (FFmpeg 8.0.3, H.264 decoder only, LGPL, its source in `linux-deps/sources/`) and OpenSSL 3.5.9 libcrypto, built on Ubuntu 22.04 by `tools/linux/build_deps.sh` with hidden visibility. Licences: `linux-deps/licenses/`. |
 | source | The project source and pinned third-party source (make_dist's file list), `version.txt` for the version stamp. |
-| `release.json` | Version, commit and SHA-256 of every file; Setup copies only verified files. |
+| `release.json` | Version, commit and SHA-256 of every file; Setup copies only verified files; a stale `version.txt` is rewritten from it when that reproduces the listed hash (issue #8). |
 
 ## What Setup does
 
