@@ -56,6 +56,7 @@ enum Id {
     MaskFeatures,  // HWDER_MASK_FEATURES
     Mods,  // HWDER_MODS
     Mute,  // HWDER_MUTE
+    NoFastClear,  // HWDER_NO_FAST_CLEAR
     NoMods,  // HWDER_NO_MODS
     NoPrelaunch,  // HWDER_NO_PRELAUNCH
     Nsp,  // HWDER_NSP

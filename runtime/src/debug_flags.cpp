@@ -52,6 +52,7 @@ static const Flag kTable[] = {
     {MaskFeatures, "HWDER_MASK_FEATURES", "Test: comma-separated Vulkan 1.1-1.3 feature names (e.g. shaderFloat16) the GPU is treated as not offering, to exercise the device feature checks.", kString},
     {Mods, "HWDER_MODS", "Mods folder to use instead of the one in the settings or the default (read as a path; see fs/mods.h).", kString},
     {Mute, "HWDER_MUTE", "No audio output; also: no message boxes, and with HWDER_OFFSCREEN marks an automated run.", kPresence},
+    {NoFastClear, "HWDER_NO_FAST_CLEAR", "Renderer: clear whole colour targets with vkCmdClearAttachments instead of a load-op fast clear (always on for Intel GPUs, whose driver crashed in it, issue #6).", kPresence},
     {NoMods, "HWDER_NO_MODS", "Load no mods from the mods folder (the game RomFS is passed through untouched).", kNonzero},
     {NoPrelaunch, "HWDER_NO_PRELAUNCH", "Skip the startup screen.", kPresence},
     {Nsp, "HWDER_NSP", "Game NSP path (read as a wide string by the loader; the startup screen only notes that it is set).", kPresence},
