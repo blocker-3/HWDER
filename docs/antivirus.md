@@ -87,10 +87,17 @@ Done for releases after v0.3.3 (branch `defender-mitigations`):
 - `HWDER Setup.exe` has an icon, an application manifest (`asInvoker`, Windows 10/11
   `supportedOS`, common controls v6, DPI-unaware with GDI scaling) and Windows version information
   (CompanyName "HWDER project", ProductName "HWDER", FileDescription "HWDER Setup",
-  OriginalFilename "HWDER Setup.exe", version from `git describe`). See
+  OriginalFilename "HWDER Setup.exe", Setup's own version, see below). See
   `tools/setup_ui/bootstrap.rc`, `bootstrap.manifest` and `hwder.ico` (made by `make_icon.py` from
   uncompressed bitmaps, so it adds no compressed data).
 - It is linked with `-s`: no symbol table or DWARF debug sections (2.1 MB down to 1.2 MB).
+- **The same Setup is the same file in every release.** It links without a timestamp
+  (`--no-insert-timestamp`) and its version information carries Setup's own version
+  (`tools/setup_ui/setup_version.h`, 1.0.0), not the release tag. While Setup's code is
+  unchanged, every release ships a byte-identical `HWDER Setup.exe`, so a file that players or
+  Microsoft have already cleared stays cleared. `release_kit.py` refuses to package when the Setup
+  sources changed but `setup_version.h` still records the old sources' digest. To bump the
+  version, edit it and run `python tools/release_kit.py --setup-digest`.
 - PowerShell is no longer started hidden. Setup no longer creates it suspended and then resumes
   it (a pattern malware uses to tamper with a child process). The process starts directly inside
   Setup's kill-on-close job (`PROC_THREAD_ATTRIBUTE_JOB_LIST`). `ResumeThread` is gone from its

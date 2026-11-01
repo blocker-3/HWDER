@@ -30,9 +30,43 @@ def digest(data):
 
 BASELINE = "tools/kit_baseline.txt"
 # Everything HWDER Setup.exe is built from; its certificate pins each file's SHA-256.
-SETUP_SOURCES = ("CMakeLists.txt", "tools/build.py", "tools/version.cmake", "tools/setup_ui/bootstrap.cpp",
-                 "tools/setup_ui/bootstrap.rc", "tools/setup_ui/bootstrap.manifest", "tools/setup_ui/hwder.ico",
+SETUP_SOURCES = ("CMakeLists.txt", "tools/build.py", "tools/setup_ui/bootstrap.cpp", "tools/setup_ui/bootstrap.rc",
+                 "tools/setup_ui/bootstrap.manifest", "tools/setup_ui/hwder.ico", "tools/setup_ui/setup_version.h",
                  "tools/setup_ui/steam_shortcut.h")
+# The files whose content makes up Setup's own version (setup_version.h); see setup_digest().
+SETUP_VERSIONED = ("tools/setup_ui/bootstrap.cpp", "tools/setup_ui/bootstrap.rc", "tools/setup_ui/bootstrap.manifest",
+                   "tools/setup_ui/hwder.ico", "tools/setup_ui/steam_shortcut.h")
+SETUP_VERSION_FILE = "tools/setup_ui/setup_version.h"
+
+
+def setup_digest(root):
+    """SHA-256 over SETUP_VERSIONED, line endings normalised so a CRLF checkout gives the same digest."""
+    h = hashlib.sha256()
+    for name in SETUP_VERSIONED:
+        data = (Path(root)/name).read_bytes()
+        if not name.endswith(".ico"):
+            data = data.replace(b"\r\n", b"\n")
+        h.update(name.encode() + b"\0" + data + b"\0")
+    return h.hexdigest()
+
+
+def recorded_setup_version(root):
+    """(version, digest) from setup_version.h."""
+    text = (Path(root)/SETUP_VERSION_FILE).read_text(encoding="utf-8")
+    version = re.search(r'#define HWDER_SETUP_VERSION "([0-9.]+)"', text)
+    digest_ = re.search(r'#define HWDER_SETUP_SOURCES_SHA256 "([0-9a-f]{64})"', text)
+    if not version or not digest_:
+        raise ValueError(SETUP_VERSION_FILE + " lacks HWDER_SETUP_VERSION or HWDER_SETUP_SOURCES_SHA256")
+    return version.group(1), digest_.group(1)
+
+
+def require_setup_version(root):
+    """Setup's own version must name its current sources: changed sources need a version bump."""
+    version, recorded = recorded_setup_version(root)
+    if recorded != setup_digest(root):
+        raise ValueError(f"Setup sources changed since Setup {version}: bump HWDER_SETUP_VERSION in "
+                         f"{SETUP_VERSION_FILE} and run tools/release_kit.py --setup-digest")
+    return version
 PROJECT_ROOTS = ("runtime", "tools", "docs")
 
 

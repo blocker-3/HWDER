@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 import zipfile
@@ -63,6 +64,7 @@ def certify(out, toolset):
             target = out/destination
             target.parent.mkdir(exist_ok=True)
             target.write_bytes(data)
+    setup_version = make_setup_dist.require_setup_version(ROOT)
     exe = out/"HWDER Setup.exe"
     pe = pe_dependencies.inspect(exe)
     extra = [n for n in pe["imports"]+pe["delay_imports"]
@@ -77,7 +79,7 @@ def certify(out, toolset):
     if "bootstrap.cpp.obj" not in link or any(s in link for s in ("hwder_game", "SDL", "rc_")):
         raise ValueError("Setup link input is not the code-free bootstrap alone")
     cert = {"kind": "HWDER-codefree-setup-v1", "compiler_abi": "llvm-mingw-ucrt-static-cxx-v1",
-            "source_commit": git("rev-parse", "HEAD"), "exe_sha256": sha(exe),
+            "source_commit": git("rev-parse", "HEAD"), "exe_sha256": sha(exe), "setup_version": setup_version,
             "source_sha256": {n: sha(ROOT/n) for n in CERTIFIED_SOURCES},
             "compiled_object_sha256": sha(out/"CMakeFiles/hwder_setup.dir/tools/setup_ui/bootstrap.cpp.obj"),
             "no_game_linkage": True, "system_imports_only": True, "pe": pe,
@@ -119,7 +121,17 @@ def main():
     ap.add_argument("--tools-data", type=Path, help="managed toolset data folder (default: <work>/tools-data); reuses verified downloads")
     ap.add_argument("--name", help="zip base name (default: HWDER-setup-<git describe>)")
     ap.add_argument("--allow-untagged", action="store_true", help="package a commit that has no exact v* tag (test builds)")
+    ap.add_argument("--setup-digest", action="store_true",
+                    help="after bumping Setup's own version, record its sources' digest in setup_version.h and exit")
     a = ap.parse_args()
+    if a.setup_digest:
+        path = ROOT/make_setup_dist.SETUP_VERSION_FILE
+        digest = make_setup_dist.setup_digest(ROOT)
+        text = re.sub(r'(#define HWDER_SETUP_SOURCES_SHA256 ")[0-9a-f]{64}(")', r"\g<1>" + digest + r"\g<2>",
+                      path.read_text(encoding="utf-8"))
+        path.write_text(text, encoding="utf-8", newline="")
+        print(make_setup_dist.recorded_setup_version(ROOT))
+        return
     if git("status", "--porcelain", "--ignore-submodules=none"):
         ap.error("Commit coherent source before packaging (tree or a submodule is dirty)")
     version = git("describe", "--tags", "--match", "v*", "--always")
