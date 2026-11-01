@@ -181,6 +181,35 @@ class LinuxSetupTests(unittest.TestCase):
                 linux_setup.install_app(report)
             self.assertEqual((target / "tools" / "a.py").read_text(), "print(1)")  # old copy kept
 
+    def test_install_app_rewrites_a_stale_version_stamp_and_explains_other_mismatches(self):
+        report = Quiet()
+        release = self.dir / "release"
+        (release / "tools").mkdir(parents=True)
+        (release / "tools" / "a.py").write_text("print(1)")
+        stamp = b"v0.3.3\n07a6d6f6ad\n"
+        files = {"tools/a.py": hashlib.sha256(b"print(1)").hexdigest(), "version.txt": hashlib.sha256(stamp).hexdigest()}
+        info = {"version": "v0.3.3", "commit": "07a6d6f6ad", "files": files}
+        (release / "release.json").write_text(json.dumps(info))
+        (release / "version.txt").write_bytes(b"v0.3.0\n0123456789\n")  # unpacked over an older release
+        with patch.object(linux_setup, "ROOT", release):
+            target = linux_setup.install_app(report)
+            self.assertEqual((target / "version.txt").read_bytes(), stamp)
+            self.assertTrue(any("rewrote it" in e.get("text", "") for e in report.events))
+
+            files2 = files | {"version.txt": hashlib.sha256(b"v0.3.4\n").hexdigest()}  # stamp can't be rebuilt
+            (release / "release.json").write_text(json.dumps(info | {"version": "v0.3.4", "files": files2}))
+            with self.assertRaises(linux_setup.SetupError) as error:
+                linux_setup.install_app(report)
+            self.assertIn("version.txt", str(error.exception))
+            self.assertIn("new, empty folder", str(error.exception))
+            self.assertIn(str(release), str(error.exception))
+            self.assertTrue(any("'v0.3.0'" in e.get("text", "") for e in report.events))  # what was found
+
+            (release / "tools" / "a.py").unlink()
+            with self.assertRaisesRegex(linux_setup.SetupError, "missing"):
+                linux_setup.install_app(report)
+            self.assertEqual((target / "version.txt").read_bytes(), stamp)  # the installed copy is untouched
+
     def test_update_offered_when_the_release_differs_from_the_build(self):
         release = {"version": "v0.2.3-1-gabc", "files": {"x": "0"}}
         self.assertFalse(linux_setup.update_needed(release, "v0.2.3-1-gabc", True))
