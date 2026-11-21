@@ -699,7 +699,8 @@ static void tab_input(bool& changed) {
             }
             ImGui::EndCombo();
         }
-        help("Controllers take players 1 and 2 in the order they connect. Automatic: the keyboard is the first player\n"
+        help("Controllers take players 1 and 2 in the order they connect; a controller not used yet gives its player\n"
+             "to the first controller that is. Automatic: the keyboard is the first player\n"
              "without a controller, so with one controller plugged in the keyboard is player 2 for local co-op.");
         for (int i = 0; i < 2; i++) {
             char name[96];

@@ -223,11 +223,14 @@ int free_slot() {
 }
 
 void sdl_open(SDL_JoystickID id) {
+    static std::vector<SDL_JoystickID> s_failed;  // tried once; the periodic rescan does not retry them
     for (const SdlPad& p : g_pads)
         if (p.id == id) return;
+    if (std::find(s_failed.begin(), s_failed.end(), id) != s_failed.end()) return;
     SDL_Gamepad* gp = SDL_OpenGamepad(id);
     if (!gp) {
         hw_log("hid: cannot open controller %u (%s)", (unsigned)id, SDL_GetError());
+        s_failed.push_back(id);
         return;
     }
     SdlPad p;
@@ -321,6 +324,17 @@ bool sdl_poll(bool want_sensors, RawPad raws[kPlayerSlots], RawPad& menu, Motion
     }
 #endif
     const u64 now = host::ticks_ms();
+    // Once a second, also open any gamepad SDL lists that no event announced: a controller connected after
+    // the start was otherwise never opened when its added event did not reach this thread (issue #13).
+    static u64 s_rescan_at = 0;
+    if (now >= s_rescan_at) {
+        s_rescan_at = now + 1000;
+        int n = 0;
+        if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+            for (int i = 0; i < n; i++) sdl_open(ids[i]);  // sdl_open skips pads already open
+            SDL_free(ids);
+        }
+    }
     SdlPad* best = nullptr;
     u32 best_buttons = 0;
     for (SdlPad& p : g_pads) {
@@ -337,7 +351,26 @@ bool sdl_poll(bool want_sensors, RawPad raws[kPlayerSlots], RawPad& menu, Motion
         bool moved = false;
         for (SDL_GamepadAxis a : {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY})
             moved |= std::abs((int)SDL_GetGamepadAxis(p.gp, a)) > 20000;
-        if ((b & ~p.prev_buttons) || moved) p.last_used = now;
+        if ((b & ~p.prev_buttons) || moved) {
+            // First use: take the lowest player slot held by a pad never used since it connected. Some
+            // devices SDL lists as gamepads never send input (a laptop's force-sensing touchpad took
+            // player 1 ahead of the real controller, issue #24).
+            if (p.last_used == 0 && p.slot != 0) {
+                SdlPad* idle = nullptr;
+                for (SdlPad& q : g_pads)
+                    if (&q != &p && q.last_used == 0 && q.slot >= 0 && (p.slot < 0 || q.slot < p.slot) &&
+                        (!idle || q.slot < idle->slot))
+                        idle = &q;
+                if (idle) {
+                    const char* name = SDL_GetGamepadName(p.gp);
+                    const char* other = SDL_GetGamepadName(idle->gp);
+                    hw_log("hid: %s is player %d; unused %s moves to %d", name ? name : "?", idle->slot + 1,
+                           other ? other : "?", p.slot + 1);
+                    std::swap(p.slot, idle->slot);
+                }
+            }
+            p.last_used = now;
+        }
         p.prev_buttons = b;
         if (p.slot >= 0) sdl_read(p, b, raws[p.slot]);
         if (!best || p.last_used > best->last_used) {
