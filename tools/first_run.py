@@ -35,8 +35,17 @@ def digest(value):
 def file_hash(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
-        while chunk := f.read(8 * 1024 * 1024):
-            h.update(chunk)
+        try:
+            while chunk := f.read(8 * 1024 * 1024):
+                h.update(chunk)
+        except OSError as e:
+            if e.filename is not None:
+                raise
+            # A failed read names no file: "[Errno 13] Permission denied" alone (issue #28). On Windows that is
+            # another program holding part of the file locked, or security software refusing the read.
+            raise OSError(e.errno, f"Could not read {path} at {f.tell() >> 20} MiB ({e.strerror}). "
+                          "Close any program using it (an emulator, a sync or backup tool), or copy the file to "
+                          "another folder and pick that copy, then Retry") from e
     return h.hexdigest()
 
 

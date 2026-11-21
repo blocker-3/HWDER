@@ -780,6 +780,29 @@ class UpdatePath(unittest.TestCase):
             self.assertEqual(ini.read_bytes(), b"save_dir=/saves\nupdate_path=\n")
 
 
+class FileHash(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows byte-range locks")
+    def test_locked_region_names_the_file(self):
+        # Issue #28: a read refused partway through the NSP gave "[Errno 13] Permission denied" with no file name.
+        with temporary_directory() as d:
+            path = Path(d) / "game.nsp"
+            path.write_bytes(b"\0" * (12 * 1024 * 1024))
+            import msvcrt
+            with open(path, "r+b") as holder:  # another program locking part of the file
+                holder.seek(9 * 1024 * 1024)
+                msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 4096)
+                try:
+                    with self.assertRaises(OSError) as caught:
+                        setup.file_hash(path)
+                finally:
+                    holder.seek(9 * 1024 * 1024)
+                    msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 4096)
+            self.assertEqual(caught.exception.errno, 13)
+            self.assertIn(str(path), str(caught.exception))
+            self.assertIn("Close any program using it", str(caught.exception))
+            self.assertEqual(setup.file_hash(path), hashlib.sha256(b"\0" * (12 * 1024 * 1024)).hexdigest())
+
+
 class Packaging(unittest.TestCase):
     def test_source_kit_omits_private_artifacts_even_if_present(self):
         with temporary_directory() as tmp:
