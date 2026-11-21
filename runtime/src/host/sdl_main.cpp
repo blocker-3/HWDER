@@ -28,6 +28,10 @@ int run_main(int argc, char** argv, int (*runtime)(int, char**)) {
     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+    // Window sizes and the menu in pixels on Wayland too. With a desktop scale above 100% SDL otherwise reports
+    // the window in scaled (logical) units while the swapchain is in pixels; the menus are laid out in pixels, so
+    // they were drawn too large and off to the right (issue #23). The environment variable still overrides this.
+    SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_SCALE_TO_DISPLAY, "1");
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::fprintf(stderr, "SDL video: %s\n", SDL_GetError()); return 1; }
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) std::fprintf(stderr, "SDL audio unavailable: %s\n", SDL_GetError());
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_SENSOR))
