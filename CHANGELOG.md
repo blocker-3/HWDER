@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Setup no longer says "Your game is running" when it is not** (reported in #25). When the game closed while Setup was not open, Setup kept its launch record. If Windows later gave the same process number to a system process, Setup could not inspect it and refused Update, Prepare and Play until a restart. Such a record now counts as a closed game.
+- **Setup names the file when Windows refuses to read your game** (reported in #28). Setup stopped with only "[Errno 13] Permission denied" while checking the game file. That happens when another program (an emulator, a sync or backup tool, antivirus) holds part of the file. The message now names the file and says what to do.
+- **Linux: the menus fit the window on scaled Wayland desktops** (reported in #23). With a desktop scale above 100% on KDE Wayland the startup screen and menus were drawn too large and off to the right. HWDER now sets `SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1` itself (an environment variable still overrides it).
+- **Controllers connected after the game started are picked up** (reported in #13). HWDER now also checks once a second for controllers it has not opened yet.
+- **The controller you use is player 1** (reported in #24). A device listed as a gamepad that never sends input (a laptop's force-sensing touchpad) could take player 1 ahead of the real controller. The first controller used now takes the player of one that has not been used.
+
 ## v0.3.5 (2026-11-01)
 
 - **Linux Setup explains a damaged release instead of stopping at version.txt** (reported in #8). `version.txt` is the last file in the tarball and the last one Setup checks, so an unpack or download that did not finish, or a release unpacked over an older HWDER folder, failed there. When `release.json`'s version and commit reproduce the expected `version.txt`, Setup now rewrites it and continues. Otherwise the error names the file, the folder checked, what it found and the expected version, and says to unpack into a new, empty folder. README-LINUX now says to use a new folder for each version. `HWDER Setup.exe` is unchanged (Setup 1.0.0, the same file as in v0.3.4).
