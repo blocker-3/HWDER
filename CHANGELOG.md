@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.6 (2026-11-21)
 
 - **Setup no longer says "Your game is running" when it is not** (reported in #25). When the game closed while Setup was not open, Setup kept its launch record. If Windows later gave the same process number to a system process, Setup could not inspect it and refused Update, Prepare and Play until a restart. Such a record now counts as a closed game.
 - **Setup names the file when Windows refuses to read your game** (reported in #28). Setup stopped with only "[Errno 13] Permission denied" while checking the game file. That happens when another program (an emulator, a sync or backup tool, antivirus) holds part of the file. The message now names the file and says what to do.
