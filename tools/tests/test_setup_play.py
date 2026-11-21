@@ -93,6 +93,34 @@ class Play(unittest.TestCase):
         b.ready_status(self.data, identity=lambda pid: None)
         self.assertIn(b"keys_path=", settings.read_bytes())
 
+    def test_stale_record_with_reused_protected_pid_is_not_running(self):
+        # Issue #25: the game exited while Setup was closed and Windows gave its PID to a process Setup may
+        # not query. That record must not block Play, Update or Prepare.
+        self.marker()
+        def denied(pid):
+            raise b.ProcessAccessDenied(f"Cannot inspect process {pid} (access denied).")
+        self.assertIsNone(b.running_game(self.data, self.exe, denied))
+        b.ready_status(self.data, identity=denied)
+        self.assertIn('"paths_ready": "yes"', self.output.getvalue())
+
+    @unittest.skipUnless(os.name == "nt", "Windows process query")
+    def test_real_process_identity_running_exited_and_protected(self):
+        child = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time;time.sleep(5)"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            identity = b.process_identity(child.pid)
+            self.assertEqual(identity["pid"], str(child.pid))
+            self.assertEqual(os.path.normcase(identity["exe"]), os.path.normcase(str(Path(sys.executable).resolve())))
+        finally:
+            child.kill(); child.wait()
+        self.assertIsNone(b.process_identity(child.pid))
+        # PID 4 (System) answers a query-limited open from an ordinary user; whatever it does, it must not raise
+        # the generic "previously launched game" error that blocked Setup.
+        try:
+            b.process_identity(4)
+        except b.ProcessAccessDenied:
+            pass
+
     def test_direct_installed_exe_discovery_also_prevents_settings_write_and_duplicate(self):
         with patch.object(b, "discovered_game", return_value=self.record):
             b.launch(self.data, lambda *a, **k: self.fail("direct duplicate"))

@@ -182,6 +182,10 @@ def checked_ready(data):
     return exe, nsp, keys
 
 
+class ProcessAccessDenied(OSError):
+    """OpenProcess refused even query-limited access: the process belongs to another user or is protected."""
+
+
 def process_identity(pid):
     """Read-only process identity. None means exited; inaccessible is not 'exited'."""
     import ctypes
@@ -190,16 +194,25 @@ def process_identity(pid):
     kernel.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
     kernel.OpenProcess.restype = w.HANDLE
     kernel.CloseHandle.argtypes = (w.HANDLE,)
-    kernel.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
+    kernel.GetExitCodeProcess.argtypes = (w.HANDLE, ctypes.POINTER(w.DWORD))
     kernel.QueryFullProcessImageNameW.argtypes = (w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD))
     kernel.GetProcessTimes.argtypes = (w.HANDLE,) + (ctypes.POINTER(w.FILETIME),) * 4
-    handle = kernel.OpenProcess(0x100000 | 0x1000, False, int(pid))
+    # PROCESS_QUERY_LIMITED_INFORMATION only (no SYNCHRONIZE): the least an ordinary user needs. Most service
+    # processes refuse even that; running_game() treats such a refusal of a recorded PID as a reused PID, which
+    # before blocked Update, Prepare and Play until the PID went away (issue #25).
+    handle = kernel.OpenProcess(0x1000, False, int(pid))
     if not handle:
-        if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
             return None
+        if error == 5:  # ERROR_ACCESS_DENIED
+            raise ProcessAccessDenied(f"Cannot inspect process {int(pid)} (access denied).")
         raise OSError("Cannot verify the previously launched game. Close it before retrying.")
     try:
-        if kernel.WaitForSingleObject(handle, 0) == 0:
+        code = w.DWORD()
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+            raise OSError("Cannot verify the running game identity. Close it before retrying.")
+        if code.value != 259:  # STILL_ACTIVE
             return None
         name = ctypes.create_unicode_buffer(32768)
         length = w.DWORD(len(name))
@@ -222,7 +235,13 @@ def running_game(data, exe, identity=process_identity):
         return None
     if not isinstance(marker, dict) or marker.get("schema") != 1 or marker.get("exe") != str(exe.resolve()) or not str(marker.get("pid", "")).isdigit() or not str(marker.get("created", "")).isdigit() or not 0 < int(marker["pid"]) < 2**32 or not 0 < int(marker["created"]) < 2**64:
         raise ValueError("The game launch record is invalid. Close the game, then retry verification.")
-    actual = identity(int(marker["pid"]))
+    try:
+        actual = identity(int(marker["pid"]))
+    except ProcessAccessDenied:
+        # Setup starts the game as this user, unelevated, so it can always query it. A PID it may not even
+        # query belongs to another user or a protected process: Windows reused the PID of a game that exited
+        # while Setup was closed (issue #25).
+        return None
     if actual is not None and actual == {k: marker[k] for k in ("pid", "created", "exe")}:
         return actual
     return None  # Exited, or a reused PID belonging to a different process.
@@ -252,7 +271,11 @@ def discovered_game(exe):
         more = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
         while more:
             if entry.name.casefold() == exe.name.casefold():
-                actual = process_identity(entry.pid)  # Access denied is deliberately not 'not running'.
+                try:
+                    actual = process_identity(entry.pid)
+                except ProcessAccessDenied:  # Deliberately not 'not running': it may be this game, elevated.
+                    raise OSError(f"A {exe.name} that Setup may not inspect is running (process {entry.pid}). "
+                                  "Close it, then try again.") from None
                 if actual and os.path.normcase(actual["exe"]) == os.path.normcase(str(exe.resolve())):
                     return actual
             ctypes.set_last_error(0)
